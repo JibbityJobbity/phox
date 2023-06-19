@@ -1,5 +1,5 @@
-#ifndef PLATFORM_LINUX_HPP
-#define PLATFORM_LINUX_HPP
+#ifndef PHOX_PLATFORM_LINUX_HPP
+#define PHOX_PLATFORM_LINUX_HPP
 
 #include <X11/Xlib.h>
 

@@ -1,3 +1,6 @@
 [submodule "volk"]
 	path = volk
 	url = ./thirdparty/volk
+[submodule "thirdparty/assimp"]
+	path = thirdparty/assimp
+	url = https://github.com/assimp/assimp.git

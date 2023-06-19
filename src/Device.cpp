@@ -1,7 +1,9 @@
+#define VMA_IMPLEMENTATION
 #include "Device.hpp"
 
-#include <stdexcept>
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 
 namespace phox {
 
@@ -9,8 +11,8 @@ VkPhysicalDevice Device::PickPhysicalDevice(VkInstance instance,
                                             DeviceType type) {
     uint32_t nPhysDev;
     vkEnumeratePhysicalDevices(instance, &nPhysDev, nullptr);
-    auto physDevs = new VkPhysicalDevice[nPhysDev];
-    vkEnumeratePhysicalDevices(instance, &nPhysDev, physDevs);
+    auto physDevs = std::vector<VkPhysicalDevice>(nPhysDev);
+    vkEnumeratePhysicalDevices(instance, &nPhysDev, physDevs.data());
 
     VkPhysicalDeviceType physDevType;
     switch (type) {
@@ -42,7 +44,6 @@ VkPhysicalDevice Device::PickPhysicalDevice(VkInstance instance,
         }
     }
 
-    delete[] physDevs;
     return out;
 }
 
@@ -54,7 +55,7 @@ void Device::initialize(VkPhysicalDevice physicalDevice, VkInstance instance,
     m_physicalDevice = physicalDevice;
 
     // Pick queue families
-    uint32_t nQueueFamilies;
+    uint32_t nQueueFamilies = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &nQueueFamilies,
                                              nullptr);
     auto *queueFamilies = new VkQueueFamilyProperties[nQueueFamilies];
@@ -62,7 +63,7 @@ void Device::initialize(VkPhysicalDevice physicalDevice, VkInstance instance,
                                              queueFamilies);
     uint32_t graphicsFamily = -1;
     uint32_t presentFamily = -1;
-    VkBool32 presentSupport = false;
+    VkBool32 presentSupport = VK_FALSE;
     for (uint32_t i = 0; i < nQueueFamilies; i++) {
         if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
             graphicsFamily = i;
@@ -120,25 +121,88 @@ void Device::initialize(VkPhysicalDevice physicalDevice, VkInstance instance,
 
     volkLoadDeviceTable(&m_table, m_device);
 
-    m_table.vkGetDeviceQueue(m_device, graphicsFamily, 0, &m_graphicsQueue);
-    m_table.vkGetDeviceQueue(m_device, presentFamily, 0, &m_presentQueue);
+    {
+        m_table.vkGetDeviceQueue(m_device, graphicsFamily, 0,
+                                 &m_queueInfo.graphicsQueue);
+        m_table.vkGetDeviceQueue(m_device, presentFamily, 0,
+                                 &m_queueInfo.presentQueue);
+        m_queueInfo.graphicsQueueIndex = graphicsFamily;
+        m_queueInfo.presentQueueIndex = presentFamily;
+    }
 
-    m_table.vkDeviceWaitIdle(m_device);
+    // Memory allocator
+    {
+        VmaVulkanFunctions vulkanFunctions = {};
+        vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+        vulkanFunctions.vkGetPhysicalDeviceProperties =
+            vkGetPhysicalDeviceProperties;
+        vulkanFunctions.vkGetPhysicalDeviceMemoryProperties =
+            vkGetPhysicalDeviceMemoryProperties;
+        vulkanFunctions.vkAllocateMemory = m_table.vkAllocateMemory;
+        vulkanFunctions.vkFreeMemory = m_table.vkFreeMemory;
+        vulkanFunctions.vkMapMemory = m_table.vkMapMemory;
+        vulkanFunctions.vkUnmapMemory = m_table.vkUnmapMemory;
+        vulkanFunctions.vkFlushMappedMemoryRanges =
+            m_table.vkFlushMappedMemoryRanges;
+        vulkanFunctions.vkInvalidateMappedMemoryRanges =
+            m_table.vkInvalidateMappedMemoryRanges;
+        vulkanFunctions.vkBindBufferMemory = m_table.vkBindBufferMemory;
+        vulkanFunctions.vkBindImageMemory = m_table.vkBindImageMemory;
+        vulkanFunctions.vkGetBufferMemoryRequirements =
+            m_table.vkGetBufferMemoryRequirements;
+        vulkanFunctions.vkGetImageMemoryRequirements =
+            m_table.vkGetImageMemoryRequirements;
+        vulkanFunctions.vkCreateBuffer = m_table.vkCreateBuffer;
+        vulkanFunctions.vkDestroyBuffer = m_table.vkDestroyBuffer;
+        vulkanFunctions.vkCreateImage = m_table.vkCreateImage;
+        vulkanFunctions.vkDestroyImage = m_table.vkDestroyImage;
+        vulkanFunctions.vkCmdCopyBuffer = m_table.vkCmdCopyBuffer;
+        vulkanFunctions.vkGetBufferMemoryRequirements2KHR =
+            m_table.vkGetBufferMemoryRequirements2KHR;
+        vulkanFunctions.vkGetImageMemoryRequirements2KHR =
+            m_table.vkGetImageMemoryRequirements2KHR;
+        vulkanFunctions.vkBindBufferMemory2KHR = m_table.vkBindBufferMemory2KHR;
+        vulkanFunctions.vkBindImageMemory2KHR = m_table.vkBindImageMemory2KHR;
+        vulkanFunctions.vkGetPhysicalDeviceMemoryProperties2KHR =
+            vkGetPhysicalDeviceMemoryProperties2KHR;
+        vulkanFunctions.vkGetDeviceBufferMemoryRequirements =
+            vkGetDeviceBufferMemoryRequirements;
+        vulkanFunctions.vkGetDeviceImageMemoryRequirements =
+            vkGetDeviceImageMemoryRequirements;
 
+        VmaAllocatorCreateInfo allocatorInfo = {};
+        allocatorInfo.physicalDevice = m_physicalDevice;
+        allocatorInfo.device = m_device;
+        allocatorInfo.instance = m_instance;
+        allocatorInfo.vulkanApiVersion = VK_MAKE_VERSION(1, 3, 0);
+        allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+        result = vmaCreateAllocator(&allocatorInfo, &m_allocator);
+
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create memory allocator!");
+        }
+    }
 
     m_initialized = true;
 }
 
 void Device::cleanup() {
-    if (!m_initialized) return;
+    if (!m_initialized)
+        return;
+
+    if (m_allocator != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(m_allocator);
+        m_allocator = VK_NULL_HANDLE;
+    }
 
     if (m_device != VK_NULL_HANDLE) {
-        m_table.vkQueueWaitIdle(m_graphicsQueue);
-        m_table.vkQueueWaitIdle(m_presentQueue);
+        m_table.vkQueueWaitIdle(m_queueInfo.graphicsQueue);
+        m_table.vkQueueWaitIdle(m_queueInfo.presentQueue);
         m_table.vkDeviceWaitIdle(m_device);
         m_table.vkDestroyDevice(m_device, nullptr);
-        m_presentQueue = VK_NULL_HANDLE;
-        m_graphicsQueue = VK_NULL_HANDLE;
+        m_queueInfo.graphicsQueue = VK_NULL_HANDLE;
+        m_queueInfo.presentQueue = VK_NULL_HANDLE;
         m_device = VK_NULL_HANDLE;
     }
     // Device doesn't own these
@@ -149,8 +213,79 @@ void Device::cleanup() {
 
 bool Device::isInitialized() { return m_initialized; }
 
-Device::~Device() {
-    cleanup();
+Device::~Device() { cleanup(); }
+
+Buffer
+Device::allocateBuffer(size_t size, VkBufferUsageFlagBits usage,
+                       MemoryLocation memoryLocation = MemoryLocation::Auto) {
+    const VmaMemoryUsage memLocationToUsage[] = {
+        VMA_MEMORY_USAGE_AUTO,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        VMA_MEMORY_USAGE_CPU_ONLY,
+        VMA_MEMORY_USAGE_CPU_COPY,
+    };
+
+    VkBuffer buf;
+    VmaAllocation allocation;
+
+    uint32_t queueFamilyIndices[] = {m_queueInfo.presentQueueIndex,
+                                     m_queueInfo.graphicsQueueIndex};
+
+    VkBufferCreateInfo bufferCreateInfo;
+    bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferCreateInfo.pNext = nullptr;
+    bufferCreateInfo.flags = 0;
+    bufferCreateInfo.size = size;
+    bufferCreateInfo.usage = usage;
+    bufferCreateInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+    bufferCreateInfo.queueFamilyIndexCount =
+        sizeof(queueFamilyIndices) / sizeof(queueFamilyIndices[0]);
+    bufferCreateInfo.pQueueFamilyIndices = queueFamilyIndices;
+
+    VmaAllocationCreateInfo allocationCreateInfo;
+    allocationCreateInfo.usage = memLocationToUsage[(size_t)memoryLocation];
+
+    vmaCreateBuffer(m_allocator, &bufferCreateInfo, &allocationCreateInfo, &buf,
+                    &allocation, nullptr);
+
+    return {size, buf, m_allocator, allocation};
+}
+
+void Device::freeBuffer(Buffer &buffer) { buffer.free(); }
+
+Image Device::allocateImage(const size_t width, const size_t height) {
+    VkResult res;
+    VmaAllocation allocation;
+    VkImage image = VK_NULL_HANDLE;
+    const VkImageCreateInfo createInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .extent =
+            {
+                .width = static_cast<uint32_t>(width),
+                .height = static_cast<uint32_t>(height),
+                .depth = 1,
+            },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .sharingMode = VK_SHARING_MODE_CONCURRENT,
+    };
+
+    VmaAllocationCreateInfo allocationCreateInfo;
+    allocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkBindImageMemoryInfo bindInfo;
+    bindInfo.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
+
+    res = vmaCreateImage(m_allocator, &createInfo, &allocationCreateInfo,
+                         &image, &allocation, nullptr);
+    if (res != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create image!");
+    }
+
+    return {image, m_device, m_allocator, allocation};
 }
 
 } // namespace phox

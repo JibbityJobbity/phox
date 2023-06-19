@@ -89,6 +89,8 @@ void Renderer::createInstance() {
     case PlatformType::Linux:
         extensions.push_back("VK_KHR_xlib_surface");
         break;
+    default:
+        break;
     }
 
     VkInstanceCreateInfo createInfo = {};

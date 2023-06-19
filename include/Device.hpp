@@ -3,15 +3,13 @@
 
 #include "Common.hpp"
 
-#include <cstdint>
-
+#include "Buffer.hpp"
+#include "Image.hpp"
 #include "Platform/Platform.hpp"
-#ifndef VK_EXT_debug_utils
-#define VK_EXT_debug_utils
-#endif // VK_EXT_debug_utils
-#include "volk.h"
 
 namespace phox {
+
+enum class MemoryLocation { Auto, Device, Host, HostVisible };
 
 enum class DeviceType { Discrete, Integrated, Virtual, CPU, Unknown };
 
@@ -20,10 +18,14 @@ class Device {
     VkInstance m_instance = VK_NULL_HANDLE;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;
-    VkQueue m_graphicsQueue = VK_NULL_HANDLE;
-    VkQueue m_presentQueue = VK_NULL_HANDLE;
+    struct {
+        uint32_t presentQueueIndex = -1, graphicsQueueIndex = -1;
+        VkQueue graphicsQueue = VK_NULL_HANDLE;
+        VkQueue presentQueue = VK_NULL_HANDLE;
+    } m_queueInfo;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
     VolkDeviceTable m_table = {};
+    VmaAllocator m_allocator = VK_NULL_HANDLE;
     bool m_initialized = false;
 
   public:
@@ -32,6 +34,13 @@ class Device {
                                                DeviceType type);
     void initialize(VkPhysicalDevice physicalDevice, VkInstance instance,
                     VkSurfaceKHR surface);
+    Buffer allocateBuffer(size_t size, VkBufferUsageFlagBits usage,
+                          MemoryLocation memoryLocation);
+    Image allocateImage(size_t width, size_t height);
+    Buffer copyBuffer(Buffer &buffer, VkBufferUsageFlagBits usage,
+                      MemoryLocation memoryLocation);
+
+    void freeBuffer(Buffer &buffer);
     bool isInitialized();
     void cleanup();
     ~Device();
