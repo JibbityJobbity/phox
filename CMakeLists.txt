@@ -1,4 +1,5 @@
-add_library(phox STATIC include/Buffer.hpp src/Buffer.cpp)
+cmake_minimum_required(VERSION 3.10)
+add_library(phox STATIC)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -10,6 +11,8 @@ add_subdirectory(thirdparty)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CXX_FLAGS "-Wall")
+
 target_sources( phox
     PRIVATE
         src/phox.cpp
@@ -18,6 +21,9 @@ target_sources( phox
         src/Buffer.cpp
         src/Model.cpp
         src/Image.cpp
+        src/Pipeline/Pipeline.cpp
+        src/Pipeline/GraphicsPipeline.cpp
+        src/Pipeline/Shader.cpp
 )
 
 # print the current source dir
@@ -30,7 +36,11 @@ target_include_directories( phox
     ${glfw_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
     ${ASSIMP_INCLUDE_DIRS}
-)
+    )
+
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 
 # export thirdparty include dirs
 

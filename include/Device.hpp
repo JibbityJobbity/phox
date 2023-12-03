@@ -5,6 +5,7 @@
 
 #include "Buffer.hpp"
 #include "Image.hpp"
+#include "Pipeline/Shader.hpp"
 #include "Platform/Platform.hpp"
 
 namespace phox {
@@ -39,7 +40,7 @@ class Device {
     Image allocateImage(size_t width, size_t height);
     Buffer copyBuffer(Buffer &buffer, VkBufferUsageFlagBits usage,
                       MemoryLocation memoryLocation);
-
+    Shader loadSpirv(const char *path);
     void freeBuffer(Buffer &buffer);
     bool isInitialized();
     void cleanup();

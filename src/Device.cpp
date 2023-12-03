@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <vector>
 
+using namespace std;
+
 namespace phox {
 
 VkPhysicalDevice Device::PickPhysicalDevice(VkInstance instance,
@@ -185,6 +187,38 @@ void Device::initialize(VkPhysicalDevice physicalDevice, VkInstance instance,
     }
 
     m_initialized = true;
+}
+
+Shader Device::loadSpirv(const char *path) {
+    FILE *shaderFile = fopen(path, "rb");
+    if (!shaderFile) {
+        cerr << "Could not open shader file: " << path << endl;
+        return {nullptr, nullptr};
+    }
+
+    // get length of shader file
+    fseek(shaderFile, 0, SEEK_END);
+    long length = ftell(shaderFile);
+    fseek(shaderFile, 0, SEEK_SET);
+
+    // read file
+    std::vector<unsigned char *> buffer;
+    buffer.resize(length);
+    fread(buffer.data(), length, 1, shaderFile);
+
+    // close file
+    fclose(shaderFile);
+
+    // create shader module
+    VkShaderModule out;
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = length;
+    createInfo.pCode = (uint32_t *)buffer.data();
+    createInfo.flags = 0;
+    vkCreateShaderModule(m_device, &createInfo, nullptr, &out);
+
+    return {m_device, out};
 }
 
 void Device::cleanup() {
