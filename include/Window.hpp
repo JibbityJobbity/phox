@@ -1,7 +1,7 @@
 #ifndef WINDOW_HPP
 #define WINDOW_HPP
 
-#include <X11/Xlib.h>
+#include "Platform/Platform.hpp"
 
 namespace phox {
 #ifdef __linux__

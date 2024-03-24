@@ -89,7 +89,10 @@ void Renderer::createInstance() {
     case PlatformType::Linux:
         extensions.push_back("VK_KHR_xlib_surface");
         break;
+    case PlatformType::MacOS:
+        extensions.push_back("VK_MVK_macos_surface");
     default:
+        throw std::runtime_error("Unsupported platform");
         break;
     }
 

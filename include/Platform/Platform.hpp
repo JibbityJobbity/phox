@@ -11,4 +11,8 @@ enum PlatformType { Unknown, Windows, Linux, MacOS };
 #include "PlatformLinux.hpp"
 #endif
 
+#ifdef __APPLE__
+#include "PlatformMacOS.hpp"
+#endif
+
 #endif // PHOX_PLATFORM_HPP
