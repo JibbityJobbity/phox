@@ -95,6 +95,11 @@ option(PHOX_BACKEND_NULL "Build the null RHI backend (records commands, draws no
 
 set(PHOX_CORE_HEADERS
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Component.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Pass.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/RenderGraph.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/ResourceHandle.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Technique.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Backend.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Capabilities.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/CommandList.hpp
@@ -105,6 +110,9 @@ set(PHOX_CORE_HEADERS
 )
 set(PHOX_CORE_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/Log.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/Barriers.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/Internal.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/RenderGraph.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/rhi/Backend.cpp
 )
 

@@ -64,6 +64,17 @@ if(NOT TEST_INSTALLED_VERSION)
   endif()
   add_test(NAME rhi_null COMMAND PhoxRhiNullTest)
 
+  # Phase 3: the render graph, on the null backend (no GPU needed).
+  add_executable(PhoxGraphTest source/graph_test.cpp)
+  target_link_libraries(PhoxGraphTest PRIVATE PhoxCore PhoxNull)
+  set_target_properties(PhoxGraphTest PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_options(PhoxGraphTest PRIVATE -Wall -Wpedantic -Wextra)
+  elseif(MSVC)
+    target_compile_options(PhoxGraphTest PRIVATE /W4)
+  endif()
+  add_test(NAME graph COMMAND PhoxGraphTest)
+
   # Phase 2: the same frame through the Vulkan backend, compared against the golden image.
   if(PHOX_BACKEND_VULKAN AND TARGET PhoxVulkan)
     find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
