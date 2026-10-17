@@ -35,6 +35,9 @@ class Renderer : public phox::Renderer {
     bool m_enableValidationLayers = false;
     bool m_initialized = false;
     bool m_useFallback = false;
+    Window *m_window = nullptr;
+    int m_windowWidth = 0;
+    int m_windowHeight = 0;
 
     void createInstance();
     void renderFallback(const Scene &scene);
@@ -42,10 +45,12 @@ class Renderer : public phox::Renderer {
     void createSurface();
     void createLogicalDevice();
     void createPipeline();
+    void createSwapchain();
+    void recreateSwapchain();
 
   public:
     Renderer();
-    void initialize(bool debug) override;
+    void initialize(bool debug, Window *window) override;
     void cleanup() override;
     void render(const Scene &scene) override;
     ~Renderer() override;

@@ -1,7 +1,7 @@
 #define VOLK_IMPLEMENTATION
 #include "phox/vulkan/Renderer.hpp"
 
-#include "phox/platform/Platform.hpp"
+#include "phox/Window.hpp"
 
 #include <algorithm>
 #include <array>
@@ -51,6 +51,8 @@ struct FrameResources {
         if (stagingBuffer != VK_NULL_HANDLE || stagingAllocation != VK_NULL_HANDLE) {
             vmaDestroyBuffer(device.allocator(), stagingBuffer, stagingAllocation);
         }
+        t.vkDestroySemaphore(dev, renderFinished, nullptr);
+        t.vkDestroySemaphore(dev, imageAvailable, nullptr);
         t.vkDestroyCommandPool(dev, transferPool, nullptr);
         t.vkDestroyCommandPool(dev, commandPool, nullptr);
         t.vkDestroyFramebuffer(dev, framebuffer, nullptr);
@@ -71,6 +73,8 @@ struct FrameResources {
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VmaAllocation stagingAllocation = VK_NULL_HANDLE;
     VkCommandPool transferPool = VK_NULL_HANDLE;
+    VkSemaphore imageAvailable = VK_NULL_HANDLE;
+    VkSemaphore renderFinished = VK_NULL_HANDLE;
 };
 
 std::array<uint8_t, 4> makeColor(const std::array<float, 4> &albedo) {
@@ -89,6 +93,265 @@ void writePpm(const std::filesystem::path &path, uint32_t width, uint32_t height
     for (const auto &pixel : pixels) {
         output.write(reinterpret_cast<const char *>(pixel.data()), 3);
     }
+}
+
+
+// Copies the rendered image back to the CPU and writes it as a PPM (headless output).
+void writeFrameToPpm(phox::vk::Device &device, FrameResources &res, uint32_t width, uint32_t height, bool verbose) {
+    auto &image = res.image;
+    auto &stagingBuffer = res.stagingBuffer;
+    auto &stagingAllocation = res.stagingAllocation;
+    auto &transferPool = res.transferPool;
+
+    VkBufferCreateInfo stagingBufferInfo{};
+    stagingBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingBufferInfo.size = width * height * 4;
+    stagingBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+
+    if (verbose) std::cout << "[render] preparing image copy" << std::endl;
+    if (vmaCreateBuffer(device.allocator(), &stagingBufferInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create staging buffer");
+    }
+
+    VkCommandPoolCreateInfo transferPoolInfo{};
+    transferPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    transferPoolInfo.queueFamilyIndex = device.graphicsQueueFamilyIndex();
+    transferPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+
+    if (device.table().vkCreateCommandPool(device.handle(), &transferPoolInfo, nullptr, &transferPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create transfer command pool");
+    }
+
+    VkCommandBufferAllocateInfo transferBufferInfo{};
+    transferBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    transferBufferInfo.commandPool = transferPool;
+    transferBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    transferBufferInfo.commandBufferCount = 1;
+
+    VkCommandBuffer transferBuffer = VK_NULL_HANDLE;
+    if (device.table().vkAllocateCommandBuffers(device.handle(), &transferBufferInfo, &transferBuffer) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate transfer command buffer");
+    }
+
+    VkCommandBufferBeginInfo transferBeginInfo{};
+    transferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    transferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    device.table().vkBeginCommandBuffer(transferBuffer, &transferBeginInfo);
+
+    VkImageMemoryBarrier imageBarrier{};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; // render pass finalLayout
+    imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.image = image;
+    imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageBarrier.subresourceRange.baseMipLevel = 0;
+    imageBarrier.subresourceRange.levelCount = 1;
+    imageBarrier.subresourceRange.baseArrayLayer = 0;
+    imageBarrier.subresourceRange.layerCount = 1;
+    imageBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    device.table().vkCmdPipelineBarrier(transferBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageOffset = {0, 0, 0};
+    copyRegion.imageExtent = {width, height, 1};
+    device.table().vkCmdCopyImageToBuffer(transferBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &copyRegion);
+    device.table().vkEndCommandBuffer(transferBuffer);
+
+    VkSubmitInfo transferSubmitInfo{};
+    transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    transferSubmitInfo.commandBufferCount = 1;
+    transferSubmitInfo.pCommandBuffers = &transferBuffer;
+    device.table().vkQueueSubmit(device.graphicsQueue(), 1, &transferSubmitInfo, VK_NULL_HANDLE);
+    device.table().vkQueueWaitIdle(device.graphicsQueue());
+
+    void *mapped = nullptr;
+    vmaMapMemory(device.allocator(), stagingAllocation, &mapped);
+    std::filesystem::create_directories(kOutputPath.parent_path());
+    std::ofstream ppm(kOutputPath, std::ios::binary);
+    ppm << "P6\n" << width << " " << height << "\n255\n";
+    const auto *pixels = static_cast<const unsigned char *>(mapped);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const std::size_t idx = (y * width + x) * 4;
+            ppm.write(reinterpret_cast<const char *>(pixels + idx), 3);
+        }
+    }
+    vmaUnmapMemory(device.allocator(), stagingAllocation);
+}
+
+// Blits the offscreen colour image (left in TRANSFER_SRC layout by the render pass) into the next
+// swapchain image and presents it. Returns false if the swapchain needs to be recreated.
+bool presentImage(phox::vk::Device &device, phox::vk::Swapchain &swapchain, FrameResources &res,
+                  VkImage source, uint32_t width, uint32_t height) {
+    const VkDevice dev = device.handle();
+    const auto &t = device.table();
+
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    if (t.vkCreateSemaphore(dev, &semaphoreInfo, nullptr, &res.imageAvailable) != VK_SUCCESS ||
+        t.vkCreateSemaphore(dev, &semaphoreInfo, nullptr, &res.renderFinished) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create semaphores");
+    }
+
+    uint32_t imageIndex = 0;
+    if (!swapchain.acquireNextImage(res.imageAvailable, imageIndex)) {
+        return false;
+    }
+    const VkImage target = swapchain.images().at(imageIndex);
+
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = device.graphicsQueueFamilyIndex();
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    if (t.vkCreateCommandPool(dev, &poolInfo, nullptr, &res.transferPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create present command pool");
+    }
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = res.transferPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (t.vkAllocateCommandBuffers(dev, &allocInfo, &cmd) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate present command buffer");
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    t.vkBeginCommandBuffer(cmd, &beginInfo);
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    // swapchain image: UNDEFINED -> TRANSFER_DST
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    t.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                           0, nullptr, 1, &barrier);
+
+    const VkExtent2D extent = swapchain.extent();
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
+    t.vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+    // swapchain image: TRANSFER_DST -> PRESENT_SRC
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = 0;
+    t.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0,
+                           nullptr, 0, nullptr, 1, &barrier);
+    t.vkEndCommandBuffer(cmd);
+
+    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &res.imageAvailable;
+    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &res.renderFinished;
+    if (t.vkQueueSubmit(device.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit present blit");
+    }
+
+    return swapchain.present(imageIndex, res.renderFinished);
+}
+
+// Picks the best device that can draw (and, with a surface, present and use a swapchain).
+VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface) {
+    uint32_t count = 0;
+    vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    std::vector<VkPhysicalDevice> devices(count);
+    vkEnumeratePhysicalDevices(instance, &count, devices.data());
+
+    VkPhysicalDevice best = VK_NULL_HANDLE;
+    int bestScore = -1;
+    for (VkPhysicalDevice device : devices) {
+        uint32_t nFamilies = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &nFamilies, nullptr);
+        std::vector<VkQueueFamilyProperties> families(nFamilies);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &nFamilies, families.data());
+
+        bool canDraw = false;
+        bool canPresent = surface == VK_NULL_HANDLE;
+        for (uint32_t i = 0; i < nFamilies; i++) {
+            canDraw = canDraw || (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+            if (surface != VK_NULL_HANDLE) {
+                VkBool32 supported = VK_FALSE;
+                vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &supported);
+                canPresent = canPresent || supported == VK_TRUE;
+            }
+        }
+        if (!canDraw || !canPresent) {
+            continue;
+        }
+
+        if (surface != VK_NULL_HANDLE) {
+            uint32_t nExtensions = 0;
+            vkEnumerateDeviceExtensionProperties(device, nullptr, &nExtensions, nullptr);
+            std::vector<VkExtensionProperties> extensions(nExtensions);
+            vkEnumerateDeviceExtensionProperties(device, nullptr, &nExtensions, extensions.data());
+            const bool hasSwapchain = std::any_of(extensions.begin(), extensions.end(), [](const auto &e) {
+                return std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0;
+            });
+            if (!hasSwapchain) {
+                continue;
+            }
+        }
+
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(device, &props);
+        int score = 1;
+        switch (props.deviceType) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score = 1000; break;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 100; break;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score = 50; break;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:            score = 10; break;
+        default: break;
+        }
+        if (score > bestScore) {
+            best = device;
+            bestScore = score;
+        }
+    }
+
+    if (best == VK_NULL_HANDLE) {
+        throw std::runtime_error("No suitable Vulkan device found");
+    }
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(best, &props);
+    std::cerr << "[device] using " << props.deviceName << std::endl;
+    return best;
 }
 
 } // namespace
@@ -150,7 +413,8 @@ namespace vk {
 
 Renderer::Renderer() { }
 
-void Renderer::initialize(bool debug) {
+void Renderer::initialize(bool debug, Window *window) {
+    m_window = window;
     std::cerr << "[init] starting renderer initialization" << std::endl;
     m_enableValidationLayers = debug;
     m_useFallback = false;
@@ -177,7 +441,7 @@ void Renderer::initialize(bool debug) {
 
         if (m_device && m_device->isInitialized()) {
             std::cerr << "[init] initializing swapchain and pipeline" << std::endl;
-            m_swapchain = std::make_unique<Swapchain>(m_device.get(), m_surface);
+            createSwapchain();
             createPipeline();
         }
 
@@ -244,9 +508,24 @@ void Renderer::render(const Scene &scene) {
         return;
     }
 
-    const uint32_t width = 640;
-    const uint32_t height = 480;
-    std::cout << "[render] starting triangle render" << std::endl;
+    const bool windowed = m_window != nullptr && m_surface != VK_NULL_HANDLE;
+    if (windowed) {
+        int windowWidth = 0, windowHeight = 0;
+        m_window->framebufferSize(windowWidth, windowHeight);
+        if (windowWidth <= 0 || windowHeight <= 0) {
+            return; // minimised
+        }
+        if (!m_swapchain || windowWidth != m_windowWidth || windowHeight != m_windowHeight) {
+            recreateSwapchain();
+        }
+        if (!m_swapchain || !m_swapchain->valid()) {
+            return;
+        }
+    }
+    // Windowed frames match the swapchain; headless frames are a fixed size.
+    const uint32_t width = windowed ? m_swapchain->extent().width : 640;
+    const uint32_t height = windowed ? m_swapchain->extent().height : 480;
+    if (m_enableValidationLayers) std::cout << "[render] starting triangle render" << std::endl;
 
     // Flatten the scene into one vertex stream. Material albedo comes from the
     // first object (a single push constant is used for the whole draw).
@@ -272,17 +551,14 @@ void Renderer::render(const Scene &scene) {
     auto &framebuffer = res.framebuffer;
     auto &descriptorPool = res.descriptorPool;
     auto &commandPool = res.commandPool;
-    auto &stagingBuffer = res.stagingBuffer;
-    auto &stagingAllocation = res.stagingAllocation;
-    auto &transferPool = res.transferPool;
 
-    std::cout << "[render] allocating vertex buffer" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] allocating vertex buffer" << std::endl;
     auto vertexBuffer = m_device->allocateBuffer(sizeof(SimpleVertex) * vertices.size(), MemoryLocation::Host);
     auto* vertexBufferVk = dynamic_cast<vk::Buffer*>(vertexBuffer.get());
     if (vertexBufferVk == nullptr) {
         throw std::runtime_error("Failed to create Vulkan vertex buffer");
     }
-    std::cout << "[render] copying vertex data" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] copying vertex data" << std::endl;
     std::memcpy(vertexBufferVk->map(), vertices.data(), sizeof(SimpleVertex) * vertices.size());
     vertexBufferVk->unmap();
 
@@ -295,13 +571,13 @@ void Renderer::render(const Scene &scene) {
         0.0f, 0.0f, 0.0f, 1.0f,
     };
 
-    std::cout << "[render] allocating uniform buffer" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] allocating uniform buffer" << std::endl;
     auto uniformBuffer = m_device->allocateBuffer(sizeof(CameraUniformBuffer), MemoryLocation::Host);
     auto* uniformBufferVk = dynamic_cast<vk::Buffer*>(uniformBuffer.get());
     if (uniformBufferVk == nullptr) {
         throw std::runtime_error("Failed to create Vulkan uniform buffer");
     }
-    std::cout << "[render] copying uniform data" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] copying uniform data" << std::endl;
     std::memcpy(uniformBufferVk->map(), &cameraUniform, sizeof(CameraUniformBuffer));
     uniformBufferVk->unmap();
 
@@ -348,7 +624,7 @@ void Renderer::render(const Scene &scene) {
     framebufferInfo.height = height;
     framebufferInfo.layers = 1;
 
-    std::cout << "[render] creating framebuffer" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] creating framebuffer" << std::endl;
     if (m_device->table().vkCreateFramebuffer(m_device->handle(), &framebufferInfo, nullptr, &framebuffer) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create framebuffer");
     }
@@ -399,7 +675,7 @@ void Renderer::render(const Scene &scene) {
     poolInfo.queueFamilyIndex = m_device->graphicsQueueFamilyIndex();
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
-    std::cout << "[render] creating command pool" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] creating command pool" << std::endl;
     if (m_device->table().vkCreateCommandPool(m_device->handle(), &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create command pool");
     }
@@ -430,7 +706,7 @@ void Renderer::render(const Scene &scene) {
     renderPassBeginInfo.clearValueCount = 1;
     renderPassBeginInfo.pClearValues = &clearColor;
 
-    std::cout << "[render] recording draw commands" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] recording draw commands" << std::endl;
     m_device->table().vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
     m_device->table().vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
@@ -453,101 +729,22 @@ void Renderer::render(const Scene &scene) {
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
-    std::cout << "[render] submitting draw" << std::endl;
+    if (m_enableValidationLayers) std::cout << "[render] submitting draw" << std::endl;
     if (m_device->table().vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit command buffer");
     }
     m_device->table().vkQueueWaitIdle(m_device->graphicsQueue());
 
-    VkBufferCreateInfo stagingBufferInfo{};
-    stagingBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    stagingBufferInfo.size = width * height * 4;
-    stagingBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    VmaAllocationCreateInfo stagingAllocInfo{};
-    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-
-    std::cout << "[render] preparing image copy" << std::endl;
-    if (vmaCreateBuffer(m_device->allocator(), &stagingBufferInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create staging buffer");
-    }
-
-    VkCommandPoolCreateInfo transferPoolInfo{};
-    transferPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    transferPoolInfo.queueFamilyIndex = m_device->graphicsQueueFamilyIndex();
-    transferPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-
-    if (m_device->table().vkCreateCommandPool(m_device->handle(), &transferPoolInfo, nullptr, &transferPool) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create transfer command pool");
-    }
-
-    VkCommandBufferAllocateInfo transferBufferInfo{};
-    transferBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    transferBufferInfo.commandPool = transferPool;
-    transferBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    transferBufferInfo.commandBufferCount = 1;
-
-    VkCommandBuffer transferBuffer = VK_NULL_HANDLE;
-    if (m_device->table().vkAllocateCommandBuffers(m_device->handle(), &transferBufferInfo, &transferBuffer) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate transfer command buffer");
-    }
-
-    VkCommandBufferBeginInfo transferBeginInfo{};
-    transferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    transferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    m_device->table().vkBeginCommandBuffer(transferBuffer, &transferBeginInfo);
-
-    VkImageMemoryBarrier imageBarrier{};
-    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; // render pass finalLayout
-    imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.image = image;
-    imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBarrier.subresourceRange.baseMipLevel = 0;
-    imageBarrier.subresourceRange.levelCount = 1;
-    imageBarrier.subresourceRange.baseArrayLayer = 0;
-    imageBarrier.subresourceRange.layerCount = 1;
-    imageBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    m_device->table().vkCmdPipelineBarrier(transferBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
-
-    VkBufferImageCopy copyRegion{};
-    copyRegion.bufferOffset = 0;
-    copyRegion.bufferRowLength = 0;
-    copyRegion.bufferImageHeight = 0;
-    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copyRegion.imageSubresource.mipLevel = 0;
-    copyRegion.imageSubresource.baseArrayLayer = 0;
-    copyRegion.imageSubresource.layerCount = 1;
-    copyRegion.imageOffset = {0, 0, 0};
-    copyRegion.imageExtent = {width, height, 1};
-    m_device->table().vkCmdCopyImageToBuffer(transferBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, 1, &copyRegion);
-    m_device->table().vkEndCommandBuffer(transferBuffer);
-
-    VkSubmitInfo transferSubmitInfo{};
-    transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    transferSubmitInfo.commandBufferCount = 1;
-    transferSubmitInfo.pCommandBuffers = &transferBuffer;
-    m_device->table().vkQueueSubmit(m_device->graphicsQueue(), 1, &transferSubmitInfo, VK_NULL_HANDLE);
-    m_device->table().vkQueueWaitIdle(m_device->graphicsQueue());
-
-    void *mapped = nullptr;
-    vmaMapMemory(m_device->allocator(), stagingAllocation, &mapped);
-    std::filesystem::create_directories(kOutputPath.parent_path());
-    std::ofstream ppm(kOutputPath, std::ios::binary);
-    ppm << "P6\n" << width << " " << height << "\n255\n";
-    const auto *pixels = static_cast<const unsigned char *>(mapped);
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            const std::size_t idx = (y * width + x) * 4;
-            ppm.write(reinterpret_cast<const char *>(pixels + idx), 3);
+    if (windowed) {
+        // The draw above left the frame in `image`; blit it to the window. Out of date or suboptimal
+        // means the swapchain no longer matches the surface - rebuild it for the next frame.
+        if (!presentImage(*m_device, *m_swapchain, res, image, width, height)) {
+            recreateSwapchain();
         }
+        return;
     }
-    vmaUnmapMemory(m_device->allocator(), stagingAllocation);
+
+    writeFrameToPpm(*m_device, res, width, height, m_enableValidationLayers);
 
     std::cout << "Rendered " << scene.objectCount() << " object(s) and "
               << totalTriangles << " triangle(s)." << std::endl;
@@ -638,20 +835,13 @@ void Renderer::createInstance() {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
-    std::cerr << "[instance] querying platform" << std::endl;
-    std::cerr.flush();
-    switch (GetPlatformType()) {
-    case PlatformType::Linux:
-        extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-        extensions.push_back("VK_KHR_xlib_surface");
-        break;
-    case PlatformType::MacOS:
-        extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-        extensions.push_back("VK_MVK_macos_surface");
-        break;
-    default:
-        throw std::runtime_error("Unsupported platform");
-        break;
+    // Surface extensions come from the window; headless needs none.
+    std::vector<std::string> windowExtensions;
+    if (m_window != nullptr) {
+        windowExtensions = m_window->requiredVulkanExtensions();
+        for (const auto &name : windowExtensions) {
+            extensions.push_back(name.c_str());
+        }
     }
 
     VkInstanceCreateInfo createInfo = {};
@@ -705,20 +895,47 @@ void Renderer::createPipeline() {
 }
 
 void Renderer::createSurface() {
-    std::cerr << "[surface] creating surface (headless)" << std::endl;
     m_surface = VK_NULL_HANDLE;
+    if (m_window == nullptr) {
+        std::cerr << "[surface] headless (no window)" << std::endl;
+        return;
+    }
+    std::cerr << "[surface] creating window surface" << std::endl;
+    std::uint64_t raw = 0;
+    if (!m_window->createVulkanSurface(m_instance, &raw)) {
+        throw std::runtime_error("Failed to create window surface");
+    }
+    std::memcpy(&m_surface, &raw, sizeof(m_surface));
+}
+
+void Renderer::createSwapchain() {
+    m_swapchain.reset();
+    m_windowWidth = m_windowHeight = 0;
+    if (m_window == nullptr || m_surface == VK_NULL_HANDLE) {
+        return; // headless
+    }
+    int width = 0, height = 0;
+    m_window->framebufferSize(width, height);
+    if (width <= 0 || height <= 0) {
+        return; // minimised; retried when the window has a size again
+    }
+    m_swapchain = std::make_unique<Swapchain>(m_device.get(), m_surface, static_cast<uint32_t>(width),
+                                              static_cast<uint32_t>(height));
+    m_windowWidth = width;
+    m_windowHeight = height;
+}
+
+void Renderer::recreateSwapchain() {
+    m_device->table().vkDeviceWaitIdle(m_device->handle());
+    createSwapchain();
 }
 
 void Renderer::createLogicalDevice() {
-    std::cerr << "[device] enumerating physical devices" << std::endl;
-    // auto physDev = pickPhysicalDevice(m_instance, DeviceType::Discrete);
-    uint32_t nPhysDev;
-    vkEnumeratePhysicalDevices(m_instance, &nPhysDev, nullptr);
-    auto physDevs = std::vector<VkPhysicalDevice>(nPhysDev);
-    vkEnumeratePhysicalDevices(m_instance, &nPhysDev, physDevs.data());
+    std::cerr << "[device] selecting physical device" << std::endl;
+    const VkPhysicalDevice physicalDevice = pickPhysicalDevice(m_instance, m_surface);
 
     m_device = std::make_unique<Device>();
-    m_device->Initialize(m_instance, physDevs.at(0), m_surface);
+    m_device->Initialize(m_instance, physicalDevice, m_surface);
 }
 
 Renderer::~Renderer() {

@@ -118,13 +118,19 @@ void Device::Initialize(VkInstance instance, VkPhysicalDevice phys_dev,
         vkGetPhysicalDeviceFeatures(m_physicalDevice, &deviceFeatures);
         // TODO: Enable required features
 
+        // Presenting needs the swapchain extension on the device.
+        std::vector<const char *> deviceExtensions;
+        if (m_surface != VK_NULL_HANDLE) {
+            deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        }
+
         VkDeviceCreateInfo deviceCreateInfo = {};
         deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         deviceCreateInfo.pQueueCreateInfos = queueInfos.data();
         deviceCreateInfo.queueCreateInfoCount = queueInfos.size();
         deviceCreateInfo.pEnabledFeatures = &deviceFeatures;
-        deviceCreateInfo.enabledExtensionCount =
-            0; // TODO: Enable required extensions
+        deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
         deviceCreateInfo.enabledLayerCount = 0; // TODO: Enable requried layers
 
         result = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr,

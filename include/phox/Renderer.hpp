@@ -7,6 +7,8 @@
 
 namespace phox {
 
+class Window;
+
 enum class RendererType {
     Vulkan,
 };
@@ -20,7 +22,11 @@ public:
     static std::unique_ptr<Renderer> Create(const RendererType type);
 
     virtual ~Renderer() = default;
-    virtual void initialize(bool debug = false) = 0;
+    /// @param debug   enable validation layers and verbose logging
+    /// @param window  optional; when given the renderer presents to it. The window must outlive
+    ///                the renderer (call cleanup() before destroying it). Without one, rendering is
+    ///                headless and the frame is written to build/rendered_triangle.ppm.
+    virtual void initialize(bool debug = false, Window *window = nullptr) = 0;
     virtual void cleanup() = 0;
     virtual void render(const Scene &scene) = 0;
 };

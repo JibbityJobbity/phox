@@ -22,8 +22,14 @@ The nix flake provides the toolchain, Vulkan, SDL2 and glm: `nix develop` (or `d
 ```bash
 cmake -S standalone -B build-standalone
 cmake --build build-standalone
-cd /some/scratch/dir && /path/to/build-standalone/PhoxSample   # writes ./build/rendered_triangle.ppm
+cd /some/scratch/dir && /path/to/build-standalone/PhoxSample   # headless: writes ./build/rendered_triangle.ppm
+/path/to/build-standalone/PhoxSample --window                  # open an SDL window and present until closed
+/path/to/build-standalone/PhoxSample --window --frames 120     # ...or for N frames
 ```
+
+Windowed rendering needs SDL2 (provided by the flake). Frames are rendered offscreen and blitted to the
+swapchain, so the pipeline does not depend on the surface format. The window is optional:
+`Renderer::initialize(debug, window)` takes a `phox::Window*` that must outlive the renderer.
 
 Tests:
 

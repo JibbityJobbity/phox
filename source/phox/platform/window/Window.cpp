@@ -12,7 +12,7 @@ std::unique_ptr<Window> Window::Create(const WindowConfig& config) {
     switch (config.backend) {
         case WindowBackend::Default:
         case WindowBackend::SDL:
-            return std::make_unique<SDLWindow>();
+            return std::make_unique<SDLWindow>(config);
         default:
             throw std::runtime_error("Unsupported window backend!");
     }

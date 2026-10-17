@@ -65,6 +65,9 @@ class Device : public phox::Device {
     const VolkDeviceTable& table() const { return m_table; }
     VkQueue graphicsQueue() const { return m_queueInfo.graphicsQueue; }
     uint32_t graphicsQueueFamilyIndex() const { return m_queueInfo.graphicsQueueIndex; }
+    VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
+    VkQueue presentQueue() const { return m_queueInfo.presentQueue; }
+    uint32_t presentQueueFamilyIndex() const { return m_queueInfo.presentQueueIndex; }
     ~Device();
 };
 
