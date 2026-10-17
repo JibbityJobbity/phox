@@ -1,20 +1,11 @@
+#include "Check.hpp"
 #include "ImageCompare.hpp"
 
 #include <array>
-#include <cstdlib>
-#include <iostream>
 
 #ifndef PHOX_GOLDEN_DIR
 #error "PHOX_GOLDEN_DIR must be defined by the build"
 #endif
-
-#define CHECK(cond)                                                           \
-    do {                                                                      \
-        if (!(cond)) {                                                        \
-            std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
-            std::exit(1);                                                     \
-        }                                                                     \
-    } while (0)
 
 namespace {
 

@@ -9,11 +9,6 @@ project(
   LANGUAGES CXX
 )
 
-set(ASSIMP_BUILD_TESTS OFF)
-set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF)
-set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF)
-set(ASSIMP_BUILD_OBJ_IMPORTER ON)
-
 # ---- Include guards ----
 
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
@@ -51,12 +46,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   target_compile_options(VulkanMemoryAllocator INTERFACE -Wno-nullability-completeness)
 endif()
 
-CPMAddPackage(
-  NAME assimp
-  GITHUB_REPOSITORY assimp/assimp
-  VERSION "5.4.3"
-)
-
 # ---- Add source files ----
 
 # Note: globbing sources is considered bad practice as CMake's generators may not detect new files
@@ -67,19 +56,15 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderPipeline.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderTarget.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/SDLWindow.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorSetLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Model.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
 )
 
@@ -89,19 +74,71 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/SDLWindow.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/Window.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorSetLayout.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Device.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Model.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/GraphicsPipeline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Pipeline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
+
+# ---- RHI core and backends ----
+# PhoxCore is the backend-agnostic layer (RHI interfaces, later the render graph) and depends on
+# nothing but the standard library. Each backend is its own target. The old Vulkan renderer in the
+# Phox target below stays in place until it is removed in a later phase.
+
+option(PHOX_BACKEND_VULKAN "Build the Vulkan RHI backend (the target arrives with the RHI Vulkan backend)" ON)
+option(PHOX_BACKEND_NULL "Build the null RHI backend (records commands, draws nothing)" ON)
+
+set(PHOX_CORE_HEADERS
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Backend.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Capabilities.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/CommandList.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Descs.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Device.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Formats.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Handles.hpp
+)
+set(PHOX_CORE_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/Log.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/rhi/Backend.cpp
+)
+
+add_library(PhoxCore STATIC ${PHOX_CORE_HEADERS} ${PHOX_CORE_SOURCES})
+target_compile_features(PhoxCore PUBLIC cxx_std_20)
+set_target_properties(PhoxCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(PHOX_BACKEND_NULL)
+  add_library(
+    PhoxNull STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/include/phox/null/NullDevice.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/source/NullCommandList.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/source/NullDevice.cpp
+  )
+  target_compile_features(PhoxNull PUBLIC cxx_std_20)
+  set_target_properties(PhoxNull PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(PhoxNull PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/include)
+  target_link_libraries(PhoxNull PUBLIC PhoxCore)
+  # Backend.cpp (in PhoxCore) is the one core file that constructs backend devices. The cycle between
+  # these two static libraries is intentional: CMake supports it for static libraries.
+  target_compile_definitions(PhoxCore PRIVATE PHOX_HAS_NULL)
+  target_link_libraries(PhoxCore PRIVATE PhoxNull)
+endif()
+
+foreach(rhi_target PhoxCore PhoxNull)
+  if(TARGET ${rhi_target})
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(${rhi_target} PRIVATE -Wall -Wextra -Wpedantic)
+    elseif(MSVC)
+      target_compile_options(${rhi_target} PRIVATE /W4)
+    endif()
+  endif()
+endforeach()
 
 # ---- Create library ----
 
@@ -122,8 +159,8 @@ endif()
 # The installed vulkan/* headers include volk, VMA and glm, so consumers need their include paths.
 # volk/VMA are fetched via CPM and are not part of our export set, hence BUILD_INTERFACE.
 target_link_libraries(
-  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator>
-  PRIVATE fmt::fmt assimp
+  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:PhoxCore> $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator>
+  PRIVATE fmt::fmt
 )
 
 find_package(glm CONFIG)

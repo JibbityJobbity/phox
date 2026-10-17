@@ -1,5 +1,4 @@
 #include "phox/Camera.hpp"
-#include "phox/RenderPipeline.hpp"
 #include "phox/Renderer.hpp"
 #include "phox/Scene.hpp"
 
@@ -35,7 +34,6 @@ int main() {
     CHECK(std::filesystem::exists(outputPath));
     CHECK(std::filesystem::file_size(outputPath) > 0);
 
-    phox::RenderPipeline pipeline("default", layout);
     CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Position));
     CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Normal));
     CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::TexCoord0));
@@ -44,7 +42,6 @@ int main() {
     CHECK(scene.objects()[0]->mesh().triangleCount() == 1);
     CHECK(scene.objects()[0]->material().name == "test");
     CHECK(camera.position()[2] == 5.0f);
-    CHECK(pipeline.vertexLayout().hasAttribute(phox::VertexAttributeSemantic::Position));
 
     std::cout << "scene test passed" << std::endl;
     return 0;
