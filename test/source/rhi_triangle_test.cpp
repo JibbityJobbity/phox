@@ -161,11 +161,11 @@ int main() {
         std::cout << "device: " << caps.deviceName << " (Vulkan " << caps.apiMajor << "." << caps.apiMinor << ")\n";
 
         // Push-descriptor path (one descriptor set).
-        CHECK(test::countDifferingPixels(drawTriangle(*device, false), golden, 0) == 0);
+        CHECK(test::matchesGolden(drawTriangle(*device, false), golden));
         // Allocated-descriptor-set path (two sets). Same picture, so the same golden image.
-        CHECK(test::countDifferingPixels(drawTriangle(*device, true), golden, 0) == 0);
+        CHECK(test::matchesGolden(drawTriangle(*device, true), golden));
         // The device is reusable after destroying everything: draw again.
-        CHECK(test::countDifferingPixels(drawTriangle(*device, false), golden, 0) == 0);
+        CHECK(test::matchesGolden(drawTriangle(*device, false), golden));
     }
 
     test::checkLogClean();

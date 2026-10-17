@@ -2,6 +2,7 @@
 #define PHOX_TEST_GPU_TEST_HPP
 
 #include "Check.hpp"
+#include "ImageCompare.hpp"
 
 #include "phox/Log.hpp"
 #include "phox/rhi/Backend.hpp"
@@ -20,6 +21,25 @@ namespace phox::test {
 inline bool validationRequested() {
     const char *value = std::getenv("PHOX_VALIDATION");
     return value != nullptr && value[0] == '1';
+}
+
+// Golden images are exact on lavapipe. Drivers on real hardware round differently (the clear colour
+// 0.1 * 255 = 25.5 comes out as 25 on some), so PHOX_GOLDEN_TOLERANCE=2 allows a per-channel difference
+// of 2/255 for at most 0.5% of the pixels. The default is exact.
+inline int goldenTolerance() {
+    const char *value = std::getenv("PHOX_GOLDEN_TOLERANCE");
+    return value != nullptr ? std::atoi(value) : 0;
+}
+
+inline bool matchesGolden(const Image &actual, const Image &golden) {
+    const int tolerance = goldenTolerance();
+    const size_t differing = countDifferingPixels(actual, golden, tolerance);
+    const size_t allowed = tolerance == 0 ? 0 : size_t{actual.width} * actual.height / 200;
+    if (differing > allowed) {
+        std::cerr << differing << " pixels differ from the golden image (tolerance " << tolerance << ", allowed "
+                  << allowed << ")\n";
+    }
+    return differing <= allowed;
 }
 
 // Warning and Error messages from the library (including validation layer output) end up here.

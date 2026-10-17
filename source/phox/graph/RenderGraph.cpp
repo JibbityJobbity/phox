@@ -72,6 +72,20 @@ GraphBuffer GraphBuilder::importBuffer(rhi::BufferHandle handle, rhi::ResourceSt
     return GraphBuffer{static_cast<uint32_t>(m_graph->buffers.size() - 1)};
 }
 
+const rhi::TextureDesc &GraphBuilder::describe(GraphTexture texture) const {
+    if (!texture.valid() || texture.id >= m_graph->textures.size()) {
+        throw GraphError("describe: invalid texture handle");
+    }
+    return m_graph->textures[texture.id].desc;
+}
+
+const rhi::BufferDesc &GraphBuilder::describe(GraphBuffer buffer) const {
+    if (!buffer.valid() || buffer.id >= m_graph->buffers.size()) {
+        throw GraphError("describe: invalid buffer handle");
+    }
+    return m_graph->buffers[buffer.id].desc;
+}
+
 void GraphBuilder::require(rhi::Feature feature) {
     if (std::find(m_graph->required.begin(), m_graph->required.end(), feature) == m_graph->required.end()) {
         m_graph->required.push_back(feature);

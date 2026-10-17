@@ -75,6 +75,24 @@ if(NOT TEST_INSTALLED_VERSION)
   endif()
   add_test(NAME graph COMMAND PhoxGraphTest)
 
+  # Phase 4: scene/camera, and the forward technique recorded on the null backend (no GPU needed).
+  add_executable(PhoxCameraTest source/camera_test.cpp)
+  target_link_libraries(PhoxCameraTest PRIVATE PhoxScene)
+  add_test(NAME camera COMMAND PhoxCameraTest)
+
+  add_executable(PhoxForwardGraphTest source/forward_graph_test.cpp)
+  target_link_libraries(PhoxForwardGraphTest PRIVATE PhoxTechniques PhoxScene PhoxCore PhoxNull)
+  add_test(NAME forward_graph COMMAND PhoxForwardGraphTest)
+
+  foreach(phase4_test PhoxCameraTest PhoxForwardGraphTest)
+    set_target_properties(${phase4_test} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(${phase4_test} PRIVATE -Wall -Wpedantic -Wextra)
+    elseif(MSVC)
+      target_compile_options(${phase4_test} PRIVATE /W4)
+    endif()
+  endforeach()
+
   # Phase 2: the same frame through the Vulkan backend, compared against the golden image.
   if(PHOX_BACKEND_VULKAN AND TARGET PhoxVulkan)
     find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
@@ -111,7 +129,19 @@ if(NOT TEST_INSTALLED_VERSION)
       target_compile_options(PhoxRhiTriangleTest PRIVATE /W4)
     endif()
     add_test(NAME rhi_triangle COMMAND PhoxRhiTriangleTest)
-    set_tests_properties(rhi_triangle PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Phase 4: the baseline frame through the forward technique and the render graph.
+    add_executable(PhoxForwardTest source/forward_test.cpp)
+    target_link_libraries(PhoxForwardTest PRIVATE PhoxTechniques PhoxScene PhoxCore)
+    target_compile_definitions(PhoxForwardTest PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURRENT_LIST_DIR}/golden")
+    set_target_properties(PhoxForwardTest PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(PhoxForwardTest PRIVATE -Wall -Wpedantic -Wextra)
+    elseif(MSVC)
+      target_compile_options(PhoxForwardTest PRIVATE /W4)
+    endif()
+    add_test(NAME forward COMMAND PhoxForwardTest)
+    set_tests_properties(rhi_triangle forward PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
 

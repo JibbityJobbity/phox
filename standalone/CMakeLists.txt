@@ -24,4 +24,4 @@ file(GLOB sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/source/*.cpp)
 
 add_executable(${PROJECT_NAME} ${sources})
 
-target_link_libraries(${PROJECT_NAME} Phox::Phox)
+target_link_libraries(${PROJECT_NAME} PRIVATE PhoxTechniques PhoxScene PhoxCore cxxopts::cxxopts)

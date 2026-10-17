@@ -28,6 +28,11 @@ class GraphBuilder {
     GraphBuffer createBuffer(const rhi::BufferDesc &);    // transient; same rule for usage
     GraphTexture importTexture(rhi::TextureHandle, rhi::ResourceState before, rhi::ResourceState after);
     GraphBuffer importBuffer(rhi::BufferHandle, rhi::ResourceState before, rhi::ResourceState after);
+    /// The declared description (size, format, ...). For a transient the `usage` is not final: it is
+    /// derived from the accesses at compile(). Components use this to size resources they derive from
+    /// an input texture. The reference is valid until the next declaration of a texture or buffer.
+    const rhi::TextureDesc &describe(GraphTexture) const;
+    const rhi::BufferDesc &describe(GraphBuffer) const;
     void require(rhi::Feature);
     void addPass(std::string name,
                  std::function<void(PassBuilder &)> setup,     // runs immediately inside addPass

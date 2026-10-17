@@ -55,11 +55,9 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Common.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderTarget.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorSetLayout.hpp
@@ -73,7 +71,6 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Buffer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorSetLayout.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Device.cpp
@@ -202,7 +199,7 @@ target_link_libraries(
   PRIVATE fmt::fmt
 )
 
-find_package(glm CONFIG)
+find_package(glm CONFIG REQUIRED)
 if(glm_FOUND)
   target_link_libraries(${PROJECT_NAME} PUBLIC glm::glm)
 endif()
@@ -232,6 +229,49 @@ endforeach()
 add_custom_target(PhoxShaders ALL DEPENDS ${PHOX_SHADER_SPV})
 add_dependencies(${PROJECT_NAME} PhoxShaders)
 target_compile_definitions(${PROJECT_NAME} PRIVATE PHOX_SHADER_DIR="${PHOX_SHADER_OUTPUT_DIR}")
+
+# ---- Scene and techniques ----
+# PhoxScene (scene description, camera) and PhoxTechniques (frames built from render graph components)
+# sit on top of PhoxCore and never touch a GPU API.
+
+add_library(
+  PhoxScene STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Camera.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Material.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Mesh.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Scene.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/scene/Camera.cpp
+)
+target_compile_features(PhoxScene PUBLIC cxx_std_20)
+set_target_properties(PhoxScene PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxScene PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(PhoxScene PUBLIC PhoxCore PRIVATE glm::glm)
+
+add_library(
+  PhoxTechniques STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/DrawMeshes.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/ForwardTechnique.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/Readback.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/UploadMeshes.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/DrawMeshes.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/ForwardTechnique.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/Readback.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/UploadMeshes.cpp
+)
+target_compile_features(PhoxTechniques PUBLIC cxx_std_20)
+set_target_properties(PhoxTechniques PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxTechniques PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include)
+target_link_libraries(PhoxTechniques PUBLIC PhoxCore PhoxScene)
+add_dependencies(PhoxTechniques PhoxShaders)
+target_compile_definitions(PhoxTechniques PRIVATE PHOX_SHADER_DIR="${PHOX_SHADER_OUTPUT_DIR}")
+
+foreach(layer_target PhoxScene PhoxTechniques)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_options(${layer_target} PRIVATE -Wall -Wextra -Wpedantic)
+  elseif(MSVC)
+    target_compile_options(${layer_target} PRIVATE /W4)
+  endif()
+endforeach()
 
 target_include_directories(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

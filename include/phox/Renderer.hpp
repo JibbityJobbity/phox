@@ -1,11 +1,14 @@
 #ifndef PHOX_RENDERER_HPP
 #define PHOX_RENDERER_HPP
 
-#include "phox/Scene.hpp"
+#include "phox/scene/Scene.hpp"
 
 #include <memory>
 
 namespace phox {
+
+// Legacy renderer API: the scene types moved to phox::scene. Removed together with this renderer.
+using namespace scene;
 
 enum class RendererType {
     Vulkan,

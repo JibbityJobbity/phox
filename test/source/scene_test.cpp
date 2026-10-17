@@ -1,27 +1,21 @@
-#include "phox/Camera.hpp"
-#include "phox/Renderer.hpp"
-#include "phox/Scene.hpp"
+// Smoke test for the legacy renderer (removed together with it). It also exercises the scene types.
 
-#include <cstdlib>
+#include "Check.hpp"
+
+#include "phox/Renderer.hpp"
+#include "phox/scene/Camera.hpp"
+#include "phox/scene/Scene.hpp"
+
 #include <filesystem>
 #include <iostream>
 
-#define CHECK(cond)                                                           \
-    do {                                                                      \
-        if (!(cond)) {                                                        \
-            std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
-            std::exit(1);                                                     \
-        }                                                                     \
-    } while (0)
-
 int main() {
-    phox::Scene scene;
-    phox::VertexLayout layout = phox::VertexLayout::positionNormalTexcoord();
-    phox::Material material{"test", "default", layout};
-    auto triangle = phox::ObjectFactory::createTriangle("triangle", std::move(material));
+    phox::scene::Scene scene;
+    phox::scene::Material material{"test", "default"};
+    auto triangle = phox::scene::ObjectFactory::createTriangle("triangle", std::move(material));
     scene.addObject(std::move(triangle));
 
-    phox::Camera camera;
+    phox::scene::Camera camera;
     camera.setPosition({0.0f, 0.0f, 5.0f});
     camera.setFovY(60.0f);
 
@@ -34,9 +28,6 @@ int main() {
     CHECK(std::filesystem::exists(outputPath));
     CHECK(std::filesystem::file_size(outputPath) > 0);
 
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Position));
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Normal));
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::TexCoord0));
     CHECK(scene.objectCount() == 1);
     CHECK(scene.objects().size() == 1);
     CHECK(scene.objects()[0]->mesh().triangleCount() == 1);
