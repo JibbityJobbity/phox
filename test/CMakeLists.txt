@@ -42,6 +42,12 @@ endif()
 enable_testing()
 add_test(NAME scene_smoke COMMAND ${PROJECT_NAME} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Phase 0: golden image + comparison helper (no dependency on the renderer).
+add_executable(PhoxImageCompareTest source/image_compare_test.cpp)
+target_compile_definitions(PhoxImageCompareTest PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURRENT_LIST_DIR}/golden")
+set_target_properties(PhoxImageCompareTest PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+add_test(NAME image_compare COMMAND PhoxImageCompareTest)
+
 # ---- code coverage ----
 
 if(ENABLE_TEST_COVERAGE)
