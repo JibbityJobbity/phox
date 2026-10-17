@@ -90,7 +90,7 @@ set(sources
 # nothing but the standard library. Each backend is its own target. The old Vulkan renderer in the
 # Phox target below stays in place until it is removed in a later phase.
 
-option(PHOX_BACKEND_VULKAN "Build the Vulkan RHI backend (the target arrives with the RHI Vulkan backend)" ON)
+option(PHOX_BACKEND_VULKAN "Build the Vulkan RHI backend" ON)
 option(PHOX_BACKEND_NULL "Build the null RHI backend (records commands, draws nothing)" ON)
 
 set(PHOX_CORE_HEADERS
@@ -130,10 +130,41 @@ if(PHOX_BACKEND_NULL)
   target_link_libraries(PhoxCore PRIVATE PhoxNull)
 endif()
 
-foreach(rhi_target PhoxCore PhoxNull)
+if(PHOX_BACKEND_VULKAN)
+  add_library(
+    PhoxVulkan STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/include/phox/vk/VulkanBackend.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/Pool.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/States.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VkCommon.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanCommandList.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanDevice.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/States.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VmaImpl.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanBackend.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanCommandList.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanDevice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanPipelines.cpp
+  )
+  target_compile_features(PhoxVulkan PUBLIC cxx_std_20)
+  set_target_properties(PhoxVulkan PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(
+    PhoxVulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source
+  )
+  target_link_libraries(PhoxVulkan PUBLIC PhoxCore PRIVATE volk::volk VulkanMemoryAllocator)
+  target_compile_definitions(PhoxCore PRIVATE PHOX_HAS_VULKAN)
+  target_link_libraries(PhoxCore PRIVATE PhoxVulkan)
+endif()
+
+foreach(rhi_target PhoxCore PhoxNull PhoxVulkan)
   if(TARGET ${rhi_target})
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
       target_compile_options(${rhi_target} PRIVATE -Wall -Wextra -Wpedantic)
+      if(${rhi_target} STREQUAL PhoxVulkan)
+        # `VkFoo info{VK_STRUCTURE_TYPE_FOO};` is the standard Vulkan idiom and trips this warning.
+        target_compile_options(${rhi_target} PRIVATE -Wno-missing-field-initializers)
+      endif()
     elseif(MSVC)
       target_compile_options(${rhi_target} PRIVATE /W4)
     endif()

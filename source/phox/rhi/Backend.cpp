@@ -3,19 +3,24 @@
 #ifdef PHOX_HAS_NULL
 #include "phox/null/NullDevice.hpp"
 #endif
+#ifdef PHOX_HAS_VULKAN
+#include "phox/vk/VulkanBackend.hpp"
+#endif
 
 #include <stdexcept>
 
 namespace phox::rhi {
 
 std::unique_ptr<Device> createDevice(Backend backend, const DeviceOptions &options) {
+#if !defined(PHOX_HAS_VULKAN)
     (void)options;
+#endif
     switch (backend) {
     case Backend::Vulkan:
 #ifdef PHOX_HAS_VULKAN
-        throw std::logic_error("PHOX_HAS_VULKAN is defined but no factory is wired up yet");
+        return vulkan::createDevice(options);
 #else
-        throw std::runtime_error("Vulkan backend is not available: this build has no RHI Vulkan backend");
+        throw std::runtime_error("Vulkan backend is not available: built with PHOX_BACKEND_VULKAN=OFF");
 #endif
     case Backend::Null:
 #ifdef PHOX_HAS_NULL

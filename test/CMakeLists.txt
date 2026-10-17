@@ -63,6 +63,45 @@ if(NOT TEST_INSTALLED_VERSION)
     target_compile_definitions(PhoxRhiNullTest PRIVATE PHOX_TEST_VULKAN_ENABLED)
   endif()
   add_test(NAME rhi_null COMMAND PhoxRhiNullTest)
+
+  # Phase 2: the same frame through the Vulkan backend, compared against the golden image.
+  if(PHOX_BACKEND_VULKAN AND TARGET PhoxVulkan)
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
+    get_target_property(PHOX_SOURCE_BINARY_DIR Phox BINARY_DIR)
+    set(PHOX_TEST_SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+    set(PHOX_TEST_SHADER_SPV)
+    foreach(shader two_sets.vert two_sets.frag)
+      set(spv ${PHOX_TEST_SHADER_OUTPUT_DIR}/${shader}.spv)
+      add_custom_command(
+        OUTPUT ${spv}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${PHOX_TEST_SHADER_OUTPUT_DIR}
+        COMMAND ${GLSLANG_VALIDATOR} -V ${CMAKE_CURRENT_LIST_DIR}/shaders/${shader} -o ${spv}
+        DEPENDS ${CMAKE_CURRENT_LIST_DIR}/shaders/${shader}
+        COMMENT "Compiling test shader ${shader}"
+        VERBATIM
+      )
+      list(APPEND PHOX_TEST_SHADER_SPV ${spv})
+    endforeach()
+    add_custom_target(PhoxTestShaders ALL DEPENDS ${PHOX_TEST_SHADER_SPV})
+
+    add_executable(PhoxRhiTriangleTest source/rhi_triangle_test.cpp)
+    target_link_libraries(PhoxRhiTriangleTest PRIVATE PhoxCore PhoxVulkan)
+    add_dependencies(PhoxRhiTriangleTest PhoxShaders PhoxTestShaders)
+    target_compile_definitions(
+      PhoxRhiTriangleTest
+      PRIVATE PHOX_SHADER_DIR="${PHOX_SOURCE_BINARY_DIR}/shaders"
+              PHOX_TEST_SHADER_DIR="${PHOX_TEST_SHADER_OUTPUT_DIR}"
+              PHOX_GOLDEN_DIR="${CMAKE_CURRENT_LIST_DIR}/golden"
+    )
+    set_target_properties(PhoxRhiTriangleTest PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(PhoxRhiTriangleTest PRIVATE -Wall -Wpedantic -Wextra)
+    elseif(MSVC)
+      target_compile_options(PhoxRhiTriangleTest PRIVATE /W4)
+    endif()
+    add_test(NAME rhi_triangle COMMAND PhoxRhiTriangleTest)
+    set_tests_properties(rhi_triangle PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()
 
 # ---- code coverage ----
