@@ -379,6 +379,21 @@ std::unique_ptr<phox::Image> Device::allocateImage(const size_t width, const siz
     return std::make_unique<Image>(this, image, allocation);
 }
 
+namespace {
+
+VkFormat toVkFormat(VertexAttributeFormat format) {
+    switch (format) {
+    case VertexAttributeFormat::Float32:   return VK_FORMAT_R32_SFLOAT;
+    case VertexAttributeFormat::Float32x2: return VK_FORMAT_R32G32_SFLOAT;
+    case VertexAttributeFormat::Float32x3: return VK_FORMAT_R32G32B32_SFLOAT;
+    case VertexAttributeFormat::Float32x4: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case VertexAttributeFormat::UInt32:    return VK_FORMAT_R32_UINT;
+    }
+    throw std::runtime_error("Unknown vertex attribute format");
+}
+
+} // namespace
+
 std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::Shader*>& shaders) {
     uint8_t compat_mask = 0;
     vector<VkPipelineShaderStageCreateInfo> shader_modules;
@@ -418,8 +433,137 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
         throw std::runtime_error(
             "Graphics pipeline requires vertex and fragment shaders");
     }
-    throw std::runtime_error(
-        "createPipeline is not implemented: render pass and pipeline layout API missing");
+
+    // Everything below is owned by `pipeline` as soon as it is created, so a throw at any
+    // point releases whatever exists so far.
+    auto pipeline = std::make_unique<GraphicsPipeline>(this);
+
+    // Fixed interface for now: position/normal/uv vertices, one camera UBO (set 0, binding 0),
+    // an RGBA albedo push constant, and an offscreen RGBA8 target left in TRANSFER_SRC layout.
+    const VertexLayout vertexLayout = VertexLayout::positionNormalTexcoord();
+    pipeline->m_descriptorSetLayout = std::make_unique<DescriptorSetLayout>(this, vertexLayout);
+    const VkDescriptorSetLayout setLayout = pipeline->m_descriptorSetLayout->handle();
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(float) * 4;
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &setLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
+    if (m_table.vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &pipeline->m_pipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create pipeline layout");
+    }
+
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    if (m_table.vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &pipeline->m_renderPass) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create render pass");
+    }
+
+    VkVertexInputBindingDescription bindingDescription{};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = vertexLayout.stride();
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    std::vector<VkVertexInputAttributeDescription> attributes;
+    for (const auto &attribute : vertexLayout.attributes()) {
+        VkVertexInputAttributeDescription desc{};
+        desc.location = static_cast<uint32_t>(attributes.size());
+        desc.binding = 0;
+        desc.format = toVkFormat(attribute.format);
+        desc.offset = attribute.offset;
+        attributes.push_back(desc);
+    }
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &bindingDescription;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+    vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    // Viewport/scissor are dynamic so the pipeline is independent of the target size.
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+    const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &blendAttachment;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = static_cast<uint32_t>(shader_modules.size());
+    pipelineInfo.pStages = shader_modules.data();
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = pipeline->m_pipelineLayout;
+    pipelineInfo.renderPass = pipeline->m_renderPass;
+    pipelineInfo.subpass = 0;
+    if (m_table.vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+                                          &pipeline->m_pipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create graphics pipeline");
+    }
+
+    return pipeline;
 }
 
 const VolkDeviceTable* Device::deviceTable() {

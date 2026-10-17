@@ -10,9 +10,10 @@ namespace phox {
 };
 
 #include "phox/Renderer.hpp"
-#include "phox/vulkan/DescriptorSetLayout.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/Swapchain.hpp"
+#include "phox/vulkan/pipeline/GraphicsPipeline.hpp"
+#include "phox/vulkan/pipeline/Shader.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
 
@@ -27,7 +28,10 @@ class Renderer : public phox::Renderer {
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
     std::unique_ptr<Swapchain> m_swapchain;
-    std::unique_ptr<DescriptorSetLayout> m_descriptorSetLayout;
+    // Created once in initialize(); render() only builds per-frame objects.
+    std::unique_ptr<Shader> m_vertShader;
+    std::unique_ptr<Shader> m_fragShader;
+    std::unique_ptr<GraphicsPipeline> m_pipeline;
     bool m_enableValidationLayers = false;
     bool m_initialized = false;
     bool m_useFallback = false;
@@ -37,6 +41,7 @@ class Renderer : public phox::Renderer {
     void setupDebugMessenger();
     void createSurface();
     void createLogicalDevice();
+    void createPipeline();
 
   public:
     Renderer();

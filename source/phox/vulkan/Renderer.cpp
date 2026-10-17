@@ -33,35 +33,7 @@ struct CameraUniformBuffer {
     std::array<float, 16> viewProjection{};
 };
 
-std::vector<char> readFile(const std::string &path) {
-    std::ifstream file(path, std::ios::ate | std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open shader file: " + path);
-    }
-
-    const std::size_t size = static_cast<std::size_t>(file.tellg());
-    std::vector<char> buffer(size);
-    file.seekg(0);
-    file.read(buffer.data(), size);
-    return buffer;
-}
-
-VkShaderModule createShaderModule(phox::vk::Device &device,
-                                  const std::vector<char> &code) {
-    VkShaderModuleCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t *>(code.data());
-
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
-    if (device.table().vkCreateShaderModule(device.handle(), &createInfo, nullptr,
-                                             &shaderModule) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create shader module");
-    }
-    return shaderModule;
-}
-
-// Owns every transient Vulkan object created while rendering one frame, so an
+// Owns every per-frame Vulkan object (render target, descriptors, command pools, readback), so an
 // exception anywhere in render() cannot leak them. Handles are destroyed in
 // reverse dependency order; destroying a null handle is a no-op.
 struct FrameResources {
@@ -81,32 +53,20 @@ struct FrameResources {
         }
         t.vkDestroyCommandPool(dev, transferPool, nullptr);
         t.vkDestroyCommandPool(dev, commandPool, nullptr);
-        t.vkDestroyPipeline(dev, pipeline, nullptr);
         t.vkDestroyFramebuffer(dev, framebuffer, nullptr);
         t.vkDestroyImageView(dev, imageView, nullptr);
         if (image != VK_NULL_HANDLE || imageAllocation != VK_NULL_HANDLE) {
             vmaDestroyImage(device.allocator(), image, imageAllocation);
         }
-        t.vkDestroyRenderPass(dev, renderPass, nullptr);
-        t.vkDestroyPipelineLayout(dev, pipelineLayout, nullptr);
         t.vkDestroyDescriptorPool(dev, descriptorPool, nullptr);
-        t.vkDestroyDescriptorSetLayout(dev, descriptorSetLayout, nullptr);
-        t.vkDestroyShaderModule(dev, fragShader, nullptr);
-        t.vkDestroyShaderModule(dev, vertShader, nullptr);
     }
 
     phox::vk::Device &device;
-    VkShaderModule vertShader = VK_NULL_HANDLE;
-    VkShaderModule fragShader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkRenderPass renderPass = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation imageAllocation = VK_NULL_HANDLE;
     VkImageView imageView = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VmaAllocation stagingAllocation = VK_NULL_HANDLE;
@@ -216,9 +176,9 @@ void Renderer::initialize(bool debug) {
         createLogicalDevice();
 
         if (m_device && m_device->isInitialized()) {
-            std::cerr << "[init] initializing swapchain and descriptor layout" << std::endl;
+            std::cerr << "[init] initializing swapchain and pipeline" << std::endl;
             m_swapchain = std::make_unique<Swapchain>(m_device.get(), m_surface);
-            m_descriptorSetLayout = std::make_unique<DescriptorSetLayout>(m_device.get(), VertexLayout::positionNormalTexcoord());
+            createPipeline();
         }
 
         m_initialized = true;
@@ -236,7 +196,9 @@ void Renderer::cleanup() {
     if (m_device && m_device->isInitialized()) {
         m_device->table().vkDeviceWaitIdle(m_device->handle());
     }
-    m_descriptorSetLayout.reset();
+    m_pipeline.reset();
+    m_fragShader.reset();
+    m_vertShader.reset();
     m_swapchain.reset();
     if (m_device) {
         m_device->cleanup();
@@ -267,7 +229,7 @@ void Renderer::render(const Scene &scene) {
         return;
     }
 
-    if (!m_device || !m_device->isInitialized()) {
+    if (!m_device || !m_device->isInitialized() || !m_pipeline) {
         renderFallback(scene);
         return;
     }
@@ -300,17 +262,15 @@ void Renderer::render(const Scene &scene) {
     }
 
     FrameResources res(*m_device);
-    auto &vertShader = res.vertShader;
-    auto &fragShader = res.fragShader;
-    auto &descriptorSetLayout = res.descriptorSetLayout;
-    auto &pipelineLayout = res.pipelineLayout;
-    auto &renderPass = res.renderPass;
+    const VkRenderPass renderPass = m_pipeline->renderPass();
+    const VkPipelineLayout pipelineLayout = m_pipeline->layout();
+    const VkDescriptorSetLayout descriptorSetLayout = m_pipeline->descriptorSetLayout();
+    const VkPipeline pipeline = m_pipeline->handle();
     auto &image = res.image;
     auto &imageAllocation = res.imageAllocation;
     auto &imageView = res.imageView;
     auto &framebuffer = res.framebuffer;
     auto &descriptorPool = res.descriptorPool;
-    auto &pipeline = res.pipeline;
     auto &commandPool = res.commandPool;
     auto &stagingBuffer = res.stagingBuffer;
     auto &stagingAllocation = res.stagingAllocation;
@@ -344,79 +304,6 @@ void Renderer::render(const Scene &scene) {
     std::cout << "[render] copying uniform data" << std::endl;
     std::memcpy(uniformBufferVk->map(), &cameraUniform, sizeof(CameraUniformBuffer));
     uniformBufferVk->unmap();
-
-    std::cout << "[render] loading shaders" << std::endl;
-    const auto vertCode = readFile((kShaderDir / "basic.vert.spv").string());
-    const auto fragCode = readFile((kShaderDir / "basic.frag.spv").string());
-    std::cout << "[render] creating shaders" << std::endl;
-    vertShader = createShaderModule(*m_device, vertCode);
-    fragShader = createShaderModule(*m_device, fragCode);
-
-    VkDescriptorSetLayoutBinding uboBinding{};
-    uboBinding.binding = 0;
-    uboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    uboBinding.descriptorCount = 1;
-    uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-    VkDescriptorSetLayoutCreateInfo descriptorLayoutInfo{};
-    descriptorLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    descriptorLayoutInfo.bindingCount = 1;
-    descriptorLayoutInfo.pBindings = &uboBinding;
-
-    std::cout << "[render] creating descriptor layout" << std::endl;
-    if (m_device->table().vkCreateDescriptorSetLayout(m_device->handle(), &descriptorLayoutInfo, nullptr,
-                                                     &descriptorSetLayout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create descriptor set layout");
-    }
-
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(float) * 4;
-
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-
-    std::cout << "[render] creating pipeline layout" << std::endl;
-    if (m_device->table().vkCreatePipelineLayout(m_device->handle(), &pipelineLayoutInfo, nullptr,
-                                                 &pipelineLayout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create pipeline layout");
-    }
-
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-
-    VkAttachmentReference colorAttachmentRef{};
-    colorAttachmentRef.attachment = 0;
-    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorAttachmentRef;
-
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-
-    std::cout << "[render] creating render pass" << std::endl;
-    if (m_device->table().vkCreateRenderPass(m_device->handle(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create render pass");
-    }
 
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -507,108 +394,6 @@ void Renderer::render(const Scene &scene) {
 
     m_device->table().vkUpdateDescriptorSets(m_device->handle(), 1, &descriptorWrite, 0, nullptr);
 
-    VkPipelineShaderStageCreateInfo stageInfos[2]{};
-    stageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stageInfos[0].module = vertShader;
-    stageInfos[0].pName = "main";
-    stageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stageInfos[1].module = fragShader;
-    stageInfos[1].pName = "main";
-
-    VkVertexInputBindingDescription bindingDescription{};
-    bindingDescription.binding = 0;
-    bindingDescription.stride = sizeof(SimpleVertex);
-    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[0].offset = offsetof(SimpleVertex, position);
-    attributeDescriptions[1].binding = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[1].offset = offsetof(SimpleVertex, normal);
-    attributeDescriptions[2].binding = 0;
-    attributeDescriptions[2].location = 2;
-    attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
-    attributeDescriptions[2].offset = offsetof(SimpleVertex, texCoord);
-
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 1;
-    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(width);
-    viewport.height = static_cast<float>(height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-
-    VkRect2D scissor{{0, 0}, {width, height}};
-
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.pViewports = &viewport;
-    viewportState.scissorCount = 1;
-    viewportState.pScissors = &scissor;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.depthClampEnable = VK_FALSE;
-    rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;
-    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-    rasterizer.depthBiasEnable = VK_FALSE;
-
-    VkPipelineMultisampleStateCreateInfo multisampling{};
-    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.sampleShadingEnable = VK_FALSE;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    colorBlendAttachment.blendEnable = VK_FALSE;
-
-    VkPipelineColorBlendStateCreateInfo colorBlending{};
-    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.logicOpEnable = VK_FALSE;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &colorBlendAttachment;
-
-    VkGraphicsPipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = stageInfos;
-    pipelineInfo.pVertexInputState = &vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &rasterizer;
-    pipelineInfo.pMultisampleState = &multisampling;
-    pipelineInfo.pColorBlendState = &colorBlending;
-    pipelineInfo.layout = pipelineLayout;
-    pipelineInfo.renderPass = renderPass;
-    pipelineInfo.subpass = 0;
-
-    std::cout << "[render] creating graphics pipeline" << std::endl;
-    if (m_device->table().vkCreateGraphicsPipelines(m_device->handle(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create graphics pipeline");
-    }
-
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.queueFamilyIndex = m_device->graphicsQueueFamilyIndex();
@@ -648,6 +433,10 @@ void Renderer::render(const Scene &scene) {
     std::cout << "[render] recording draw commands" << std::endl;
     m_device->table().vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
     m_device->table().vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+    const VkRect2D scissor{{0, 0}, {width, height}};
+    m_device->table().vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    m_device->table().vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
     VkBuffer vertexBufferHandle = vertexBufferVk->handle();
     VkDeviceSize offsets[] = {0};
     m_device->table().vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBufferHandle, offsets);
@@ -768,7 +557,8 @@ void Renderer::render(const Scene &scene) {
 void Renderer::renderFallback(const Scene &scene) {
     constexpr uint32_t width = 640;
     constexpr uint32_t height = 480;
-    std::vector<std::array<uint8_t, 4>> pixels(width * height, {0x1a, 0x1a, 0x1a, 0xff});
+    // Same clear colour as the GPU path (0.1, 0.2, 0.3) so both backends produce the same image.
+    std::vector<std::array<uint8_t, 4>> pixels(width * height, {26, 51, 76, 0xff});
 
     const auto toScreen = [&](float x, float y) {
         return std::array<float, 2>{
@@ -896,6 +686,22 @@ void Renderer::setupDebugMessenger() {
 
     vkCreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr,
                                    &m_debugMessenger);
+}
+
+void Renderer::createPipeline() {
+    std::cerr << "[pipeline] loading shaders from " << kShaderDir.string() << std::endl;
+    m_vertShader = Shader::fromFile(*m_device, (kShaderDir / "basic.vert.spv").string(), ShaderType::VERTEX);
+    m_fragShader = Shader::fromFile(*m_device, (kShaderDir / "basic.frag.spv").string(), ShaderType::FRAGMENT);
+
+    std::vector<phox::Shader *> shaders = {m_vertShader.get(), m_fragShader.get()};
+    std::unique_ptr<phox::Pipeline> pipeline = m_device->createPipeline(shaders);
+    auto *graphics = dynamic_cast<GraphicsPipeline *>(pipeline.get());
+    if (graphics == nullptr) {
+        throw std::runtime_error("Device::createPipeline did not return a Vulkan graphics pipeline");
+    }
+    pipeline.release();
+    m_pipeline.reset(graphics);
+    std::cerr << "[pipeline] graphics pipeline created" << std::endl;
 }
 
 void Renderer::createSurface() {

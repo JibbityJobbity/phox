@@ -33,6 +33,8 @@
         # Optional: setup environment variables for Vulkan SDK (some build systems expect this)
         shellHook = ''
           export VULKAN_SDK=${pkgs.vulkan-headers}/
+          # volk dlopen()s libvulkan.so.1; mkShell doesn't put it on the loader path by default.
+          export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           echo "Vulkan SDK path set to $VULKAN_SDK"
         '';
       };

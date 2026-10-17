@@ -2,6 +2,8 @@
 
 #include "phox/vulkan/Device.hpp"
 
+#include <stdexcept>
+
 namespace phox {
 namespace vk {
 
@@ -9,7 +11,7 @@ DescriptorSetLayout::DescriptorSetLayout(Device* device, const VertexLayout& lay
     : m_device(device) {
     (void)layout;
     if (m_device == nullptr || m_device->handle() == VK_NULL_HANDLE) {
-        return;
+        throw std::runtime_error("DescriptorSetLayout requires an initialized device");
     }
 
     std::vector<VkDescriptorSetLayoutBinding> bindings;
@@ -25,8 +27,9 @@ DescriptorSetLayout::DescriptorSetLayout(Device* device, const VertexLayout& lay
     createInfo.bindingCount = static_cast<uint32_t>(bindings.size());
     createInfo.pBindings = bindings.data();
 
-    if (m_device->table().vkCreateDescriptorSetLayout != nullptr) {
-        m_device->table().vkCreateDescriptorSetLayout(m_device->handle(), &createInfo, nullptr, &m_layout);
+    if (m_device->table().vkCreateDescriptorSetLayout(m_device->handle(), &createInfo, nullptr, &m_layout) !=
+        VK_SUCCESS) {
+        throw std::runtime_error("Failed to create descriptor set layout");
     }
 }
 

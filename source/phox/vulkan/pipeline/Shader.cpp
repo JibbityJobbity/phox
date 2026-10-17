@@ -15,21 +15,23 @@ vk::Shader::Shader(Device* device, VkShaderModule shaderModule, ShaderType type)
 vk::Shader::~Shader() {
     if (m_shaderModule != VK_NULL_HANDLE && m_device != nullptr &&
         m_device->m_device != VK_NULL_HANDLE) {
-        vkDestroyShaderModule(m_device->m_device, m_shaderModule, nullptr);
+        m_device->m_table.vkDestroyShaderModule(m_device->m_device, m_shaderModule, nullptr);
     }
     m_shaderModule = VK_NULL_HANDLE;
 }
 
 std::unique_ptr<vk::Shader> vk::Shader::fromSpirv(phox::Device& device, const uint8_t *code, const size_t length, ShaderType type) {
-    assert(code != NULL && length > 0);
+    if (code == nullptr || length == 0 || (length % 4) != 0) {
+        throw std::runtime_error("Invalid SPIR-V blob");
+    }
     vk::Device& vk_device = static_cast<vk::Device&>(device);
     VkShaderModuleCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     createInfo.codeSize = length;
     createInfo.pCode = reinterpret_cast<const uint32_t*>(code);
 
-    VkShaderModule shaderModule;
-    if (vkCreateShaderModule(vk_device.m_device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    if (vk_device.m_table.vkCreateShaderModule(vk_device.m_device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create shader module");
     }
 
