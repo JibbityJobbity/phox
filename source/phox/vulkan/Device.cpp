@@ -445,7 +445,7 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
     auto pipeline = std::make_unique<GraphicsPipeline>(this);
 
     // Fixed interface for now: position/normal/uv vertices, one camera UBO (set 0, binding 0),
-    // an RGBA albedo push constant, and an offscreen RGBA8 target left in TRANSFER_SRC layout.
+    // an RGBA albedo push constant, and and an offscreen RGBA8 colour target.
     const VertexLayout vertexLayout = VertexLayout::positionNormalTexcoord();
     pipeline->m_descriptorSetLayout = std::make_unique<DescriptorSetLayout>(this, vertexLayout);
     const VkDescriptorSetLayout setLayout = pipeline->m_descriptorSetLayout->handle();
@@ -472,8 +472,9 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    // The render graph transitions the target into and out of COLOR_ATTACHMENT_OPTIMAL itself.
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkAttachmentReference colorAttachmentRef{};
     colorAttachmentRef.attachment = 0;

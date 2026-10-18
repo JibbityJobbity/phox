@@ -39,4 +39,23 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 
 Shader paths are baked in at build time (`PHOX_SHADER_DIR`), so the binary can run from any directory.
 
+## Render graph
+
+`phox/RenderGraph.hpp` is a small backend-agnostic frame graph. Each frame, `vk::Renderer` declares its passes and
+the images they touch; the graph does the bookkeeping:
+
+```
+scene --writes--> color (transient) --read--> present (blit to swapchain)   [windowed]
+                                      --read--> readback (copy to staging)  [headless]
+```
+
+- passes run in the order added; passes whose results nothing consumes are culled
+- layout transitions and barriers are derived from how each pass uses an image (`ImageUsage`), including
+  write-after-write hazards, instead of being written by hand
+- transient images are allocated at first use and live until the last pass that uses them
+- `vk::GraphExecutor` is the Vulkan backend: it records the whole frame into one command buffer
+
+Scope today: images only (buffers, e.g. the vertex/uniform buffers, are still managed per frame outside the graph),
+no resource aliasing, no pass reordering. `test/source/render_graph_test.cpp` tests the graph logic without a GPU.
+
 Derived from [ModernCppStarter](https://github.com/TheLartians/ModernCppStarter).

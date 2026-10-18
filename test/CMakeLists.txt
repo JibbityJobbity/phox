@@ -36,11 +36,24 @@ if(NOT TEST_INSTALLED_VERSION)
   endif()
 endif()
 
+# Pure graph logic: no GPU needed.
+add_executable(PhoxGraphTests source/render_graph_test.cpp)
+target_link_libraries(PhoxGraphTests PRIVATE Phox::Phox)
+set_target_properties(PhoxGraphTests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+if(NOT TEST_INSTALLED_VERSION)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_options(PhoxGraphTests PRIVATE -Wall -Wpedantic -Wextra)
+  elseif(MSVC)
+    target_compile_options(PhoxGraphTests PRIVATE /W4)
+  endif()
+endif()
+
 # ---- Register the test ----
 # Run from the build dir: the renderer writes build/rendered_triangle.ppm relative to the cwd.
 
 enable_testing()
 add_test(NAME scene_smoke COMMAND ${PROJECT_NAME} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME render_graph COMMAND PhoxGraphTests)
 
 # ---- code coverage ----
 
