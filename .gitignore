@@ -5,3 +5,5 @@
 /.direnv
 .DS_Store
 ._*
+/compile_commands.json
+/.claude/worktrees
