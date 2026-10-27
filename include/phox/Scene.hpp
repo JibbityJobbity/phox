@@ -2,7 +2,6 @@
 #define PHOX_SCENE_HPP
 
 #include "phox/Common.hpp"
-#include "phox/RenderPipeline.hpp"
 #include "phox/VertexLayout.hpp"
 
 #include <array>

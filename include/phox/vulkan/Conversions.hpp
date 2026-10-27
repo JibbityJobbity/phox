@@ -2,11 +2,13 @@
 #define PHOX_VULKAN_CONVERSIONS_HPP
 
 #include "phox/Resources.hpp"
+#include "phox/VertexLayout.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
 namespace phox::vk {
 
 VkFormat toVkFormat(Format format);
+VkFormat toVkFormat(VertexAttributeFormat format);
 /// Format::Undefined for formats Phox has no name for.
 Format fromVkFormat(VkFormat format);
 VkImageAspectFlags aspectMask(Format format);

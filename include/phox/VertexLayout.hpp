@@ -31,6 +31,7 @@ struct VertexAttribute {
     VertexAttributeFormat format = VertexAttributeFormat::Float32x3;
     std::uint32_t offset = 0;
     std::uint32_t size = 0;
+    friend bool operator==(const VertexAttribute &, const VertexAttribute &) = default;
 };
 
 class VertexLayout {
@@ -68,6 +69,8 @@ public:
         }
         return size;
     }
+
+    friend bool operator==(const VertexLayout &, const VertexLayout &) = default;
 
 private:
     std::vector<VertexAttribute> m_attributes;

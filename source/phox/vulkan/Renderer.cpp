@@ -11,8 +11,9 @@
 #include "phox/vulkan/GraphExecutor.hpp"
 #include "phox/vulkan/Swapchain.hpp"
 #include "phox/vulkan/TransientPool.hpp"
-#include "phox/vulkan/pipeline/GraphicsPipeline.hpp"
-#include "phox/vulkan/pipeline/Shader.hpp"
+#include "phox/vulkan/PipelineCache.hpp"
+#include "phox/vulkan/ShaderInterface.hpp"
+#include "phox/vulkan/ShaderLibrary.hpp"
 
 #include <algorithm>
 #include <array>
@@ -39,9 +40,18 @@ struct SimpleVertex {
     float texCoord[2];
 };
 
-struct CameraUniformBuffer {
-    std::array<float, 16> viewProjection{};
-};
+// The forward pass's pipeline for a colour target format.
+phox::PipelineDesc forwardPipeline(phox::Format colorFormat) {
+    phox::PipelineDesc desc;
+    desc.name = "forward";
+    desc.vertexShader = "forward.vert";
+    desc.fragmentShader = "forward.frag";
+    desc.vertexLayout = phox::VertexLayout::positionNormalTexcoord();
+    desc.colorFormats = {colorFormat};
+    desc.pushConstants = {{phox::kVertexStage | phox::kFragmentStage, 0, sizeof(phox::vk::DrawPushConstants)}};
+    desc.setLayouts = {phox::SetLayout::Frame};
+    return desc;
+}
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                            VkDebugUtilsMessageTypeFlagsEXT type,
@@ -240,7 +250,7 @@ void Renderer::initialize(const RendererConfig &config) {
             m_frames[i] = std::make_unique<FrameContext>(*m_device, i);
         }
         m_transients = std::make_unique<TransientPool>(*m_device);
-        createPipeline();
+        createPipelines();
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
@@ -269,9 +279,8 @@ void Renderer::releaseVulkan() {
         frame.reset();
     }
     m_transients.reset();
-    m_pipeline.reset();
-    m_fragShader.reset();
-    m_vertShader.reset();
+    m_pipelines.reset();
+    m_shaders.reset();
     for (VkSemaphore semaphore : m_renderFinished) {
         m_device->table().vkDestroySemaphore(m_device->handle(), semaphore, nullptr);
     }
@@ -384,8 +393,11 @@ void Renderer::render(const Scene &scene) {
             }
         }
     }
-    const std::array<float, 4> albedo =
-        scene.objects().empty() ? std::array<float, 4>{} : scene.objects().front()->material().albedo;
+    DrawPushConstants draw;
+    if (!scene.objects().empty()) {
+        const auto &albedo = scene.objects().front()->material().albedo;
+        draw.albedo = {albedo[0], albedo[1], albedo[2], albedo[3]};
+    }
 
     // Per-frame data lives in the frame's upload arena, recycled once the GPU has finished with it.
     UploadArena &arena = frame.arena();
@@ -393,21 +405,19 @@ void Renderer::render(const Scene &scene) {
     if (!vertices.empty()) {
         vertexData = arena.upload(vertices.data(), sizeof(SimpleVertex) * vertices.size());
     }
-    CameraUniformBuffer camera{};
+    FrameUniforms uniforms;
     // Scene [-0.5, 0.5] fills the target, +y is up (matches renderFallback).
-    camera.viewProjection = {
-        2.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, -2.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-    };
-    const UploadArena::Allocation cameraData = arena.uploadUniform(camera);
+    uniforms.proj = mat4(2.0f, 0.0f, 0.0f, 0.0f, 0.0f, -2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+    uniforms.viewProj = uniforms.proj * uniforms.view;
+    uniforms.resolution = {float(extent.width), float(extent.height), 1.0f / float(extent.width),
+                           1.0f / float(extent.height)};
+    const UploadArena::Allocation frameData = arena.uploadUniform(uniforms);
 
-    const VkDescriptorSet descriptorSet = frame.descriptors().allocate(m_pipeline->descriptorSetLayout());
-    VkDescriptorBufferInfo bufferInfo{cameraData.buffer, cameraData.offset, sizeof(CameraUniformBuffer)};
+    const VkDescriptorSet frameSet = frame.descriptors().allocate(m_pipelines->setLayout(SetLayout::Frame));
+    VkDescriptorBufferInfo bufferInfo{frameData.buffer, frameData.offset, sizeof(FrameUniforms)};
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptorSet;
+    write.dstSet = frameSet;
     write.dstBinding = 0;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -444,8 +454,7 @@ void Renderer::render(const Scene &scene) {
     struct SceneOutput {
         ImageHandle color;
     };
-    const VkPipelineLayout pipelineLayout = m_pipeline->layout();
-    const VkPipeline pipeline = m_pipeline->handle();
+    const Pipeline &forward = m_pipelines->get(forwardPipeline(Format::RGBA8Unorm));
     const SceneOutput &sceneOutput = graph.addPass<SceneOutput>(
         "scene", PassType::Graphics,
         [&](PassBuilder &builder, SceneOutput &out) {
@@ -456,11 +465,12 @@ void Renderer::render(const Scene &scene) {
             if (vertices.empty()) {
                 return;
             }
-            table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, forward.handle());
             table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexData.buffer, &vertexData.offset);
-            table.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0,
+            table.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, forward.layout(), 0, 1, &frameSet, 0,
                                           nullptr);
-            table.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(albedo), albedo.data());
+            table.vkCmdPushConstants(cmd, forward.layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                     sizeof(draw), &draw);
             table.vkCmdDraw(cmd, static_cast<std::uint32_t>(vertices.size()), 1, 0, 0);
         });
 
@@ -708,10 +718,12 @@ void Renderer::setupDebugMessenger() {
     }
 }
 
-void Renderer::createPipeline() {
-    m_vertShader = Shader::fromFile(*m_device, (kShaderDir / "basic.vert.spv").string(), ShaderType::VERTEX);
-    m_fragShader = Shader::fromFile(*m_device, (kShaderDir / "basic.frag.spv").string(), ShaderType::FRAGMENT);
-    m_pipeline = m_device->createPipeline({m_vertShader.get(), m_fragShader.get()});
+void Renderer::createPipelines() {
+    m_shaders = std::make_unique<ShaderLibrary>(*m_device, kShaderDir);
+    m_pipelines = std::make_unique<PipelineCache>(*m_device, *m_shaders);
+    // Build the main pipeline now, so missing or broken shaders fail initialization (and select the
+    // software fallback) instead of the first frame.
+    m_pipelines->get(forwardPipeline(Format::RGBA8Unorm));
 }
 
 void Renderer::createSurface() {

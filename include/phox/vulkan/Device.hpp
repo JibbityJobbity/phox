@@ -6,17 +6,11 @@
 
 #include <memory>
 #include <string>
-#include <vector>
-
-namespace phox {
-class Shader;
-}
 
 namespace phox::vk {
 
 class Buffer;
 class Image;
-class GraphicsPipeline;
 
 /// The logical device, its queues and the memory allocator. Every Vulkan buffer and image in Phox is
 /// created here. Objects created from a Device must be destroyed before it.
@@ -39,7 +33,6 @@ public:
     std::unique_ptr<Buffer> makeBuffer(const BufferCreateInfo &info);
     std::unique_ptr<Image> makeImage(const ImageCreateInfo &info);
 
-    std::unique_ptr<GraphicsPipeline> createPipeline(const std::vector<phox::Shader *> &shaders);
 
     /// Names an object for debuggers and validation messages. Does nothing without debug utils.
     void setObjectName(VkObjectType type, std::uint64_t handle, const std::string &name) const;

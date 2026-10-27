@@ -16,8 +16,8 @@ namespace phox::vk {
 class Buffer;
 class Device;
 class FrameContext;
-class GraphicsPipeline;
-class Shader;
+class PipelineCache;
+class ShaderLibrary;
 class Swapchain;
 class TransientPool;
 
@@ -46,7 +46,7 @@ private:
     void setupDebugMessenger();
     void createSurface();
     void createDevice();
-    void createPipeline();
+    void createPipelines();
     /// Destroys every Vulkan object, waiting for the GPU first. Safe on a partially initialised renderer.
     void releaseVulkan();
 
@@ -75,10 +75,8 @@ private:
     std::unique_ptr<TransientPool> m_transients;
     std::unique_ptr<Buffer> m_readback; ///< headless only
 
-    // Created once in initialize(); render() only builds per-frame objects.
-    std::unique_ptr<Shader> m_vertShader;
-    std::unique_ptr<Shader> m_fragShader;
-    std::unique_ptr<GraphicsPipeline> m_pipeline;
+    std::unique_ptr<ShaderLibrary> m_shaders;
+    std::unique_ptr<PipelineCache> m_pipelines;
 
     CpuImage m_lastFrame;
     std::string m_deviceName;

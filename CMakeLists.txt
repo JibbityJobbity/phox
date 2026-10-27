@@ -51,6 +51,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   target_compile_options(VulkanMemoryAllocator INTERFACE -Wno-nullability-completeness)
 endif()
 
+# Math types (phox/Math.hpp). Uses an installed glm when there is one.
+CPMFindPackage(
+  NAME glm
+  GITHUB_REPOSITORY g-truc/glm
+  GIT_TAG 1.0.1
+)
+
 CPMAddPackage(
   NAME assimp
   GITHUB_REPOSITORY assimp/assimp
@@ -69,34 +76,40 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Math.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderGraph.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderPipeline.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderTarget.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Resources.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/Pipeline.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/PipelineDesc.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/Shader.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/SDLWindow.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Conversions.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorAllocator.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorSetLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/FrameContext.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PipelineCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderInterface.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderLibrary.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/VulkanCommon.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/pipeline/Shader.hpp
 )
 
 # List source files
 set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/PipelineDesc.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderGraph.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
@@ -106,16 +119,16 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Conversions.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorAllocator.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorSetLayout.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Device.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/FrameContext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PipelineCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/ShaderLibrary.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/GraphicsPipeline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
 
@@ -147,10 +160,9 @@ target_link_libraries(
 find_package(SDL2 REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
 
-find_package(glm CONFIG)
-if(glm_FOUND)
-  target_link_libraries(${PROJECT_NAME} PUBLIC glm::glm)
-endif()
+# Public headers use glm (phox/Math.hpp); everyone must agree on its configuration.
+target_link_libraries(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:glm::glm>)
+target_compile_definitions(${PROJECT_NAME} PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 # ---- Shaders ----
 # Compiled to SPIR-V at build time; the renderer finds them via PHOX_SHADER_DIR (absolute path).
@@ -162,13 +174,14 @@ endif()
 
 set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
-foreach(shader basic.vert basic.frag)
+set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl)
+foreach(shader forward.vert forward.frag)
   set(spv ${PHOX_SHADER_OUTPUT_DIR}/${shader}.spv)
   add_custom_command(
     OUTPUT ${spv}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${PHOX_SHADER_OUTPUT_DIR}
     COMMAND ${GLSLANG_VALIDATOR} -V ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} -o ${spv}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} ${PHOX_SHADER_INCLUDES}
     COMMENT "Compiling shader ${shader}"
     VERBATIM
   )

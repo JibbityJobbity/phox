@@ -106,7 +106,6 @@ Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint3
 
     m_format = chosen.format;
     m_extent = extent;
-    setExtent(extent.width, extent.height);
 }
 
 Swapchain::~Swapchain() { m_device.table().vkDestroySwapchainKHR(m_device.handle(), m_swapchain, nullptr); }

@@ -19,6 +19,17 @@ VkFormat toVkFormat(Format format) {
     throw std::logic_error("unknown Format");
 }
 
+VkFormat toVkFormat(VertexAttributeFormat format) {
+    switch (format) {
+    case VertexAttributeFormat::Float32: return VK_FORMAT_R32_SFLOAT;
+    case VertexAttributeFormat::Float32x2: return VK_FORMAT_R32G32_SFLOAT;
+    case VertexAttributeFormat::Float32x3: return VK_FORMAT_R32G32B32_SFLOAT;
+    case VertexAttributeFormat::Float32x4: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case VertexAttributeFormat::UInt32: return VK_FORMAT_R32_UINT;
+    }
+    throw std::logic_error("unknown VertexAttributeFormat");
+}
+
 Format fromVkFormat(VkFormat format) {
     switch (format) {
     case VK_FORMAT_R8G8B8A8_UNORM: return Format::RGBA8Unorm;

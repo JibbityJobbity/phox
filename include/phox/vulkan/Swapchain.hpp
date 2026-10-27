@@ -1,7 +1,6 @@
 #ifndef PHOX_VULKAN_SWAPCHAIN_HPP
 #define PHOX_VULKAN_SWAPCHAIN_HPP
 
-#include "phox/Swapchain.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
 #include <vector>
@@ -12,7 +11,7 @@ namespace vk {
 class Device;
 
 /// A presentable set of images for a surface.
-class Swapchain : public phox::Swapchain {
+class Swapchain {
 public:
     /// @param width,height  requested size; used only when the surface does not dictate one
     /// @param previous      the swapchain being replaced, if any (lets the driver hand resources over)
