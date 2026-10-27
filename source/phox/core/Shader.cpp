@@ -2,7 +2,7 @@
 
 namespace phox {
 
-Shader::Shader(const ShaderType type) : type(type) {
+Shader::Shader(const ShaderType shaderType) : type(shaderType) {
 }
 
 }

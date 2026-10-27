@@ -12,7 +12,7 @@ enum class ShaderType {
 class Shader {
     public:
         const ShaderType type;
-        Shader(const ShaderType type);
+        explicit Shader(const ShaderType shaderType);
         virtual ~Shader() = default;
 };
 

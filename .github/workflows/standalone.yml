@@ -15,21 +15,28 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/cache@v3
-        with:
-          path: "**/cpm_modules"
-          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+      - uses: ./.github/actions/setup-phox
 
       - name: configure
-        run: cmake -Sstandalone -Bbuild -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -Sstandalone -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Debug
 
       - name: build
         run: cmake --build build -j4
 
       - name: run
-        run: ./build/PhoxSample
+        run: |
+          mkdir -p out
+          for scene in triangle cubes; do
+            ./build/PhoxSample --scene "$scene" --time 1 --debug \
+              --output "out/$scene.ppm" --dump-graph "out/$scene.dot"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renders
+          path: out/

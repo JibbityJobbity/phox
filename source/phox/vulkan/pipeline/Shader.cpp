@@ -8,8 +8,8 @@
 
 namespace phox::vk {
 
-Shader::Shader(Device &device, VkShaderModule module, ShaderType type)
-    : phox::Shader(type), m_device(device), m_module(module) {}
+Shader::Shader(Device &device, VkShaderModule module, ShaderType stage)
+    : phox::Shader(stage), m_device(device), m_module(module) {}
 
 Shader::~Shader() { m_device.table().vkDestroyShaderModule(m_device.handle(), m_module, nullptr); }
 

@@ -14,21 +14,22 @@ env:
   CTEST_OUTPUT_ON_FAILURE: 1
   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
+  # Rendering runs on lavapipe (set up below). The golden test must not skip for want of a device, and
+  # runs with the validation layer, failing on any message, including synchronization hazards.
+  PHOX_REQUIRE_GPU: 1
+  PHOX_VALIDATION: 1
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/cache@v3
-        with:
-          path: "**/cpm_modules"
-          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+      - uses: ./.github/actions/setup-phox
 
       - name: configure
-        run: cmake -Stest -Bbuild -DENABLE_TEST_COVERAGE=1 -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -Stest -Bbuild -GNinja -DENABLE_TEST_COVERAGE=1 -DCMAKE_BUILD_TYPE=Debug
 
       - name: build
         run: cmake --build build -j4
@@ -37,6 +38,14 @@ jobs:
         run: |
           cd build
           ctest --build-config Debug
+
+      - name: upload images that did not match their golden
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-mismatches
+          path: build/golden_out/
+          if-no-files-found: ignore
 
       - name: collect code coverage
         run: bash <(curl -s https://codecov.io/bash) || echo "Codecov did not collect coverage reports"

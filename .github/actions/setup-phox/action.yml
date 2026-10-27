@@ -1,0 +1,24 @@
+name: Set up Phox build dependencies
+description: >
+  Installs what Phox needs to build and to render without a GPU: SDL2, glslang, the Vulkan loader and
+  headers, Mesa's lavapipe (a CPU Vulkan driver) and the Khronos validation layer.
+  Also restores the CPM source cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Install packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          ninja-build libsdl2-dev glslang-tools libvulkan-dev mesa-vulkan-drivers vulkan-validationlayers
+        # Point the Vulkan loader at lavapipe only, so tests never depend on whatever else is present.
+        icd=$(ls /usr/share/vulkan/icd.d/lvp_icd.*.json | head -n 1)
+        echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+        echo "Using Vulkan driver manifest $icd"
+
+    - uses: actions/cache@v4
+      with:
+        path: "**/cpm_modules"
+        key: ${{ runner.os }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}

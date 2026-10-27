@@ -164,6 +164,11 @@ target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 
 # being a cross-platform target, we enforce standards conformance on MSVC
 target_compile_options(${PROJECT_NAME} PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->")
+# Warnings for Phox's own sources only (dependencies are built separately).
+target_compile_options(
+  ${PROJECT_NAME} PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Wshadow>
+                          $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4>
+)
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   find_path(MOLTENVK_INCLUDE_DIR vulkan/vulkan.h HINTS "/opt/homebrew/include" "/usr/local/include" "/usr/local/opt/molten-vk/include")

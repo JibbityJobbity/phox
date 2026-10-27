@@ -15,7 +15,7 @@ class Device;
 /// A SPIR-V shader module.
 class Shader final : public phox::Shader {
 public:
-    Shader(Device &device, VkShaderModule module, ShaderType type);
+    Shader(Device &device, VkShaderModule module, ShaderType stage);
     ~Shader() override;
 
     VkShaderModule module() const { return m_module; }
