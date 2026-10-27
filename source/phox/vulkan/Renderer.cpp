@@ -3,22 +3,25 @@
 
 #include "phox/Log.hpp"
 #include "phox/RenderGraph.hpp"
+#include "phox/RenderView.hpp"
+#include "phox/SoftwareRasterizer.hpp"
 #include "phox/Window.hpp"
 #include "phox/vulkan/Buffer.hpp"
 #include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
-#include "phox/vulkan/Swapchain.hpp"
-#include "phox/vulkan/TransientPool.hpp"
+#include "phox/vulkan/MeshCache.hpp"
 #include "phox/vulkan/PipelineCache.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 #include "phox/vulkan/ShaderLibrary.hpp"
+#include "phox/vulkan/Swapchain.hpp"
+#include "phox/vulkan/TransientPool.hpp"
+#include "phox/vulkan/passes/CopyPasses.hpp"
+#include "phox/vulkan/passes/ForwardPass.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -34,24 +37,8 @@ namespace {
 
 const std::filesystem::path kShaderDir = PHOX_SHADER_DIR;
 
-struct SimpleVertex {
-    float position[3];
-    float normal[3];
-    float texCoord[2];
-};
-
-// The forward pass's pipeline for a colour target format.
-phox::PipelineDesc forwardPipeline(phox::Format colorFormat) {
-    phox::PipelineDesc desc;
-    desc.name = "forward";
-    desc.vertexShader = "forward.vert";
-    desc.fragmentShader = "forward.frag";
-    desc.vertexLayout = phox::VertexLayout::positionNormalTexcoord();
-    desc.colorFormats = {colorFormat};
-    desc.pushConstants = {{phox::kVertexStage | phox::kFragmentStage, 0, sizeof(phox::vk::DrawPushConstants)}};
-    desc.setLayouts = {phox::SetLayout::Frame};
-    return desc;
-}
+// The forward pass renders here; headless frames are read back from it, so it is 8-bit RGBA.
+constexpr phox::Format kSceneColorFormat = phox::Format::RGBA8Unorm;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                            VkDebugUtilsMessageTypeFlagsEXT type,
@@ -112,14 +99,6 @@ bool layerHasExtension(const char *layer, const char *extension) {
 }
 
 constexpr const char *kValidationLayer = "VK_LAYER_KHRONOS_validation";
-
-std::array<uint8_t, 4> makeColor(const std::array<float, 4> &albedo) {
-    auto clamp = [](float value) {
-        return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f);
-    };
-
-    return {clamp(albedo[0]), clamp(albedo[1]), clamp(albedo[2]), clamp(albedo[3])};
-}
 
 std::string toLower(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -214,6 +193,34 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
     return best;
 }
 
+// Uploads the view's FrameUniforms and returns a set 0 descriptor set pointing at them.
+VkDescriptorSet writeFrameUniforms(phox::vk::Device &device, phox::vk::FrameContext &frame,
+                                   phox::vk::PipelineCache &pipelines, const phox::RenderView &view) {
+    phox::vk::FrameUniforms uniforms;
+    uniforms.view = view.view;
+    uniforms.proj = view.proj;
+    uniforms.viewProj = view.viewProj;
+    uniforms.cameraPosition = phox::vec4(view.cameraPosition, 1.0f);
+    uniforms.lightDirection = phox::vec4(view.lightDirection, view.ambient);
+    uniforms.lightColor = phox::vec4(view.lightColor, 1.0f);
+    const float width = static_cast<float>(view.extent.width);
+    const float height = static_cast<float>(view.extent.height);
+    uniforms.resolution = {width, height, 1.0f / width, 1.0f / height};
+    const phox::vk::UploadArena::Allocation data = frame.arena().uploadUniform(uniforms);
+
+    const VkDescriptorSet set = frame.descriptors().allocate(pipelines.setLayout(phox::SetLayout::Frame));
+    const VkDescriptorBufferInfo bufferInfo{data.buffer, data.offset, sizeof(uniforms)};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &bufferInfo;
+    device.table().vkUpdateDescriptorSets(device.handle(), 1, &write, 0, nullptr);
+    return set;
+}
+
 } // namespace
 
 namespace phox::vk {
@@ -250,6 +257,7 @@ void Renderer::initialize(const RendererConfig &config) {
             m_frames[i] = std::make_unique<FrameContext>(*m_device, i);
         }
         m_transients = std::make_unique<TransientPool>(*m_device);
+        m_meshes = std::make_unique<MeshCache>(*m_device);
         createPipelines();
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
@@ -278,6 +286,7 @@ void Renderer::releaseVulkan() {
     for (auto &frame : m_frames) {
         frame.reset();
     }
+    m_meshes.reset();
     m_transients.reset();
     m_pipelines.reset();
     m_shaders.reset();
@@ -376,6 +385,7 @@ void Renderer::render(const Scene &scene) {
     FrameContext &frame = *m_frames[m_frameNumber % kFramesInFlight];
     frame.begin();
     m_transients->collect(m_frameNumber);
+    m_meshes->collect(m_frameNumber);
 
     std::uint32_t imageIndex = 0;
     if (windowed && !m_swapchain->acquireNextImage(frame.imageAvailable(), imageIndex)) {
@@ -383,57 +393,14 @@ void Renderer::render(const Scene &scene) {
         return;
     }
 
-    // Flatten the scene into one vertex stream. Material albedo comes from the first object (a single
-    // push constant is used for the whole draw).
-    std::vector<SimpleVertex> vertices;
-    for (const auto &object : scene.objects()) {
-        for (const auto &triangle : object->mesh().triangles()) {
-            for (const MeshVertex *v : {&triangle.a, &triangle.b, &triangle.c}) {
-                vertices.push_back({{v->x, v->y, v->z}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}});
-            }
-        }
-    }
-    DrawPushConstants draw;
-    if (!scene.objects().empty()) {
-        const auto &albedo = scene.objects().front()->material().albedo;
-        draw.albedo = {albedo[0], albedo[1], albedo[2], albedo[3]};
-    }
-
-    // Per-frame data lives in the frame's upload arena, recycled once the GPU has finished with it.
-    UploadArena &arena = frame.arena();
-    UploadArena::Allocation vertexData{};
-    if (!vertices.empty()) {
-        vertexData = arena.upload(vertices.data(), sizeof(SimpleVertex) * vertices.size());
-    }
-    FrameUniforms uniforms;
-    // Scene [-0.5, 0.5] fills the target, +y is up (matches renderFallback).
-    uniforms.proj = mat4(2.0f, 0.0f, 0.0f, 0.0f, 0.0f, -2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
-    uniforms.viewProj = uniforms.proj * uniforms.view;
-    uniforms.resolution = {float(extent.width), float(extent.height), 1.0f / float(extent.width),
-                           1.0f / float(extent.height)};
-    const UploadArena::Allocation frameData = arena.uploadUniform(uniforms);
-
-    const VkDescriptorSet frameSet = frame.descriptors().allocate(m_pipelines->setLayout(SetLayout::Frame));
-    VkDescriptorBufferInfo bufferInfo{frameData.buffer, frameData.offset, sizeof(FrameUniforms)};
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = frameSet;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write.pBufferInfo = &bufferInfo;
-    table.vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
-
+    const RenderView view = extractView(scene, extent);
+    const VkDescriptorSet frameSet = writeFrameUniforms(*m_device, frame, *m_pipelines, view);
     if (!windowed) {
         const std::uint64_t bytes = static_cast<std::uint64_t>(extent.width) * extent.height * 4;
         if (!m_readback || m_readback->size() != bytes) {
             m_readback.reset(); // the previous headless frame has completed (render() waits for it)
-            BufferCreateInfo info;
-            info.size = bytes;
-            info.usage = usageBit(BufferUsage::TransferDst);
-            info.memory = MemoryLocation::Readback;
-            info.name = "readback";
-            m_readback = m_device->makeBuffer(info);
+            m_readback = m_device->makeBuffer(
+                {bytes, usageBit(BufferUsage::TransferDst), MemoryLocation::Readback, "readback"});
         }
     }
 
@@ -444,90 +411,40 @@ void Renderer::render(const Scene &scene) {
     if (table.vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
         throw std::runtime_error("failed to begin the frame command buffer");
     }
+    m_meshes->prepare(view, frame, cmd, m_frameNumber);
 
     // ---- Frame graph -------------------------------------------------------------------------
-    //   scene -> color -> present  (blit into the swapchain image)   [windowed]
-    //   scene -> color -> readback (copy into a host-visible buffer) [headless]
+    //   forward -> scene color -> blit     -> backbuffer   [windowed]
+    //   forward -> scene color -> readback -> host buffer  [headless]
     RenderGraph graph(extent);
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
-
-    struct SceneOutput {
-        ImageHandle color;
-    };
-    const Pipeline &forward = m_pipelines->get(forwardPipeline(Format::RGBA8Unorm));
-    const SceneOutput &sceneOutput = graph.addPass<SceneOutput>(
-        "scene", PassType::Graphics,
-        [&](PassBuilder &builder, SceneOutput &out) {
-            const ImageHandle color = graph.createImage("color", ImageDesc{RelativeExtent{1.0f}, Format::RGBA8Unorm});
-            out.color = builder.colorAttachment(color, LoadOp::Clear, StoreOp::Store, {0.1f, 0.2f, 0.3f, 1.0f});
-        },
-        [&](const SceneOutput &, phox::PassContext &) {
-            if (vertices.empty()) {
-                return;
-            }
-            table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, forward.handle());
-            table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexData.buffer, &vertexData.offset);
-            table.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, forward.layout(), 0, 1, &frameSet, 0,
-                                          nullptr);
-            table.vkCmdPushConstants(cmd, forward.layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                                     sizeof(draw), &draw);
-            table.vkCmdDraw(cmd, static_cast<std::uint32_t>(vertices.size()), 1, 0, 0);
-        });
+    const ImageHandle color = graph.createImage("scene color", ImageDesc{RelativeExtent{1.0f}, kSceneColorFormat});
+    const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
+    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, color, depth, *m_meshes, *m_pipelines);
 
     ImageHandle backbuffer;
     if (windowed) {
-        const VkExtent2D swapExtent = m_swapchain->extent();
-        Format swapFormat = fromVkFormat(m_swapchain->format());
-        backbuffer = graph.importImage("backbuffer",
-                                       ImageDesc{Extent2D{swapExtent.width, swapExtent.height},
-                                                 swapFormat == Format::Undefined ? Format::BGRA8Unorm : swapFormat},
-                                       ImageUsage::Undefined, ImageUsage::Present);
+        const Format swapFormat = fromVkFormat(m_swapchain->format());
+        backbuffer = graph.importImage(
+            "backbuffer",
+            ImageDesc{extent, swapFormat == Format::Undefined ? Format::BGRA8Unorm : swapFormat},
+            ImageUsage::Undefined, ImageUsage::Present);
         executor.bindImage(backbuffer, m_swapchain->images().at(imageIndex));
-        graph.addPass(
-            "present", PassType::Transfer,
-            [&](PassBuilder &builder) {
-                builder.read(sceneOutput.color, ImageUsage::TransferSrc);
-                builder.write(backbuffer, ImageUsage::TransferDst);
-            },
-            [&, color = sceneOutput.color](phox::PassContext &context) {
-                auto &ctx = PassContext::from(context);
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                blit.srcOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
-                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                blit.dstOffsets[1] = {static_cast<int32_t>(swapExtent.width), static_cast<int32_t>(swapExtent.height), 1};
-                table.vkCmdBlitImage(ctx.cmd(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                     ctx.image(backbuffer), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                                     VK_FILTER_NEAREST);
-            });
+        addBlitPass(graph, forward.color, backbuffer);
     } else {
         // The graph makes the copy visible to the host (final state HostRead); the fence orders the read.
         const BufferHandle readback = graph.importBuffer("readback", BufferDesc{m_readback->size()},
                                                          BufferUsage::Undefined, BufferUsage::HostRead);
         executor.bindBuffer(readback, m_readback->handle());
-        graph.addPass(
-            "readback", PassType::Transfer,
-            [&](PassBuilder &builder) {
-                builder.read(sceneOutput.color, ImageUsage::TransferSrc);
-                builder.write(readback, BufferUsage::TransferDst);
-            },
-            [&, color = sceneOutput.color](phox::PassContext &context) {
-                auto &ctx = PassContext::from(context);
-                VkBufferImageCopy region{};
-                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                region.imageExtent = {extent.width, extent.height, 1};
-                table.vkCmdCopyImageToBuffer(ctx.cmd(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                             ctx.buffer(readback), 1, &region);
-            });
+        addReadbackPass(graph, forward.color, readback);
     }
-
     graph.compile();
     graph.execute(executor);
 
     if (table.vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         throw std::runtime_error("failed to end the frame command buffer");
     }
-    arena.flush();
+    frame.arena().flush();
 
     VkCommandBufferSubmitInfo commandInfo{};
     commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
@@ -575,7 +492,7 @@ void Renderer::render(const Scene &scene) {
     m_lastFrame.width = extent.width;
     m_lastFrame.height = extent.height;
     m_lastFrame.rgba.assign(pixels, pixels + m_readback->size());
-    log::debug("rendered {} object(s), {} vertices", scene.objectCount(), vertices.size());
+    log::debug("rendered {} draw(s), {} culled", view.draws.size(), view.culled);
 }
 
 void Renderer::renderFallback(const Scene &scene) {
@@ -587,62 +504,7 @@ void Renderer::renderFallback(const Scene &scene) {
         }
         return;
     }
-    const uint32_t width = m_config.headlessExtent.width;
-    const uint32_t height = m_config.headlessExtent.height;
-    // Same clear colour as the GPU path (0.1, 0.2, 0.3) so both backends produce the same image.
-    std::vector<std::array<uint8_t, 4>> pixels(static_cast<std::size_t>(width) * height, {26, 51, 76, 0xff});
-
-    const auto toScreen = [&](float x, float y) {
-        return std::array<float, 2>{
-            (x + 0.5f) * static_cast<float>(width),
-            (1.0f - (y + 0.5f)) * static_cast<float>(height),
-        };
-    };
-
-    const auto rasterizeTriangle = [&](const Triangle &triangle, const std::array<float, 4> &albedo) {
-        const auto p0 = toScreen(triangle.a.x, triangle.a.y);
-        const auto p1 = toScreen(triangle.b.x, triangle.b.y);
-        const auto p2 = toScreen(triangle.c.x, triangle.c.y);
-
-        const float det = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1]);
-        if (std::abs(det) < 1e-6f) {
-            return;
-        }
-
-        const auto color = makeColor(albedo);
-        const int minX = std::max(0, static_cast<int>(std::floor(std::min({p0[0], p1[0], p2[0]}))));
-        const int maxX = std::min(static_cast<int>(width) - 1, static_cast<int>(std::ceil(std::max({p0[0], p1[0], p2[0]}))));
-        const int minY = std::max(0, static_cast<int>(std::floor(std::min({p0[1], p1[1], p2[1]}))));
-        const int maxY = std::min(static_cast<int>(height) - 1, static_cast<int>(std::ceil(std::max({p0[1], p1[1], p2[1]}))));
-
-        for (int y = minY; y <= maxY; ++y) {
-            for (int x = minX; x <= maxX; ++x) {
-                const float px = static_cast<float>(x) + 0.5f;
-                const float py = static_cast<float>(y) + 0.5f;
-
-                const float l0 = ((p1[1] - p2[1]) * (px - p2[0]) + (p2[0] - p1[0]) * (py - p2[1])) / det;
-                const float l1 = ((p2[1] - p0[1]) * (px - p2[0]) + (p0[0] - p2[0]) * (py - p2[1])) / det;
-                const float l2 = 1.0f - l0 - l1;
-
-                if (l0 >= 0.0f && l1 >= 0.0f && l2 >= 0.0f) {
-                    const size_t idx = static_cast<size_t>(y) * width + static_cast<size_t>(x);
-                    pixels[idx] = color;
-                }
-            }
-        }
-    };
-
-    for (const auto &object : scene.objects()) {
-        const auto &mesh = object->mesh();
-        for (const auto &triangle : mesh.triangles()) {
-            rasterizeTriangle(triangle, object->material().albedo);
-        }
-    }
-
-    m_lastFrame.width = width;
-    m_lastFrame.height = height;
-    m_lastFrame.rgba.resize(pixels.size() * 4);
-    std::memcpy(m_lastFrame.rgba.data(), pixels.data(), m_lastFrame.rgba.size());
+    m_lastFrame = rasterize(extractView(scene, m_config.headlessExtent));
 }
 
 void Renderer::createInstance() {
@@ -719,11 +581,18 @@ void Renderer::setupDebugMessenger() {
 }
 
 void Renderer::createPipelines() {
+    // Depth: 32-bit float where it can be an attachment (nearly everywhere), else 24-bit with stencil.
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(m_device->physicalDevice(), VK_FORMAT_D32_SFLOAT, &properties);
+    m_depthFormat = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0
+                        ? Format::D32Float
+                        : Format::D24UnormS8;
+
     m_shaders = std::make_unique<ShaderLibrary>(*m_device, kShaderDir);
     m_pipelines = std::make_unique<PipelineCache>(*m_device, *m_shaders);
     // Build the main pipeline now, so missing or broken shaders fail initialization (and select the
     // software fallback) instead of the first frame.
-    m_pipelines->get(forwardPipeline(Format::RGBA8Unorm));
+    m_pipelines->get(forwardPipelineDesc(kSceneColorFormat, m_depthFormat));
 }
 
 void Renderer::createSurface() {

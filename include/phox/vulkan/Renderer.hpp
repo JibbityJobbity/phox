@@ -16,6 +16,7 @@ namespace phox::vk {
 class Buffer;
 class Device;
 class FrameContext;
+class MeshCache;
 class PipelineCache;
 class ShaderLibrary;
 class Swapchain;
@@ -73,10 +74,12 @@ private:
     std::array<std::unique_ptr<FrameContext>, kFramesInFlight> m_frames;
     std::uint64_t m_frameNumber = 0;
     std::unique_ptr<TransientPool> m_transients;
+    std::unique_ptr<MeshCache> m_meshes;
     std::unique_ptr<Buffer> m_readback; ///< headless only
 
     std::unique_ptr<ShaderLibrary> m_shaders;
     std::unique_ptr<PipelineCache> m_pipelines;
+    Format m_depthFormat = Format::D32Float;
 
     CpuImage m_lastFrame;
     std::string m_deviceName;

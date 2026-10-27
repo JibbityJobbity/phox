@@ -1,65 +1,65 @@
-#include "phox/Camera.hpp"
+// Smoke test: builds the sample scenes and renders a frame headless, on the GPU if there is one and on
+// the software fallback otherwise.
 #include "phox/Renderer.hpp"
+#include "phox/SampleScenes.hpp"
 #include "phox/Scene.hpp"
 
 #include <cstdlib>
 #include <iostream>
 
-#define CHECK(cond)                                                           \
-    do {                                                                      \
-        if (!(cond)) {                                                        \
+#define CHECK(cond)                                                                           \
+    do {                                                                                      \
+        if (!(cond)) {                                                                        \
             std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
-            std::exit(1);                                                     \
-        }                                                                     \
+            std::exit(1);                                                                     \
+        }                                                                                     \
     } while (0)
 
 namespace {
 
-bool containsColor(const phox::CpuImage &image, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+std::size_t pixelsUnlike(const phox::CpuImage &image, std::array<std::uint8_t, 4> background) {
+    std::size_t count = 0;
     for (std::size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
-        if (image.rgba[i] == r && image.rgba[i + 1] == g && image.rgba[i + 2] == b) {
-            return true;
+        if (image.rgba[i] != background[0] || image.rgba[i + 1] != background[1] || image.rgba[i + 2] != background[2]) {
+            ++count;
         }
     }
-    return false;
+    return count;
 }
 
 } // namespace
 
 int main() {
-    phox::Scene scene;
-    phox::VertexLayout layout = phox::VertexLayout::positionNormalTexcoord();
-    phox::Material material{"test", "default", layout};
-    auto triangle = phox::ObjectFactory::createTriangle("triangle", std::move(material));
-    scene.addObject(std::move(triangle));
+    CHECK(phox::sampleSceneNames().size() == 2);
+    phox::SampleScene cubes = phox::makeSampleScene("cubes");
+    CHECK(cubes.scene.objectCount() == 6);
+    CHECK(cubes.scene.find("red") != nullptr);
+    CHECK(cubes.scene.find("nothing") == nullptr);
+    const phox::quat before = cubes.scene.find("red")->transform().rotation;
+    cubes.animate(cubes.scene, 1.0f);
+    CHECK(cubes.scene.find("red")->transform().rotation != before);
 
-    phox::Camera camera;
-    camera.setPosition({0.0f, 0.0f, 5.0f});
-    camera.setFovY(60.0f);
+    bool threw = false;
+    try {
+        phox::makeSampleScene("nope");
+    } catch (const std::invalid_argument &) {
+        threw = true;
+    }
+    CHECK(threw);
 
-    // Runs on the GPU when there is one, otherwise on the software fallback; both must produce a frame.
     auto renderer = phox::Renderer::Create(phox::RendererType::Vulkan);
     phox::RendererConfig config;
     config.headlessExtent = {160, 120};
     renderer->initialize(config);
-    renderer->render(scene);
+    renderer->render(cubes.scene);
     const phox::CpuImage frame = renderer->lastFrame();
     std::cout << "rendered on " << renderer->info().deviceName << std::endl;
     renderer->cleanup();
 
     CHECK(frame.width == 160 && frame.height == 120);
     CHECK(frame.rgba.size() == 160u * 120u * 4u);
-    CHECK(containsColor(frame, 255, 51, 102)); // the material albedo
-    CHECK(!containsColor(frame, 0, 0, 0));     // nothing left uncleared
-
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Position));
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::Normal));
-    CHECK(layout.hasAttribute(phox::VertexAttributeSemantic::TexCoord0));
-    CHECK(scene.objectCount() == 1);
-    CHECK(scene.objects().size() == 1);
-    CHECK(scene.objects()[0]->mesh().triangleCount() == 1);
-    CHECK(scene.objects()[0]->material().name == "test");
-    CHECK(camera.position()[2] == 5.0f);
+    // The background is (0.1, 0.2, 0.3); the cubes and floor must cover a good part of the frame.
+    CHECK(pixelsUnlike(frame, {26, 51, 76, 255}) > frame.width * frame.height / 4);
 
     std::cout << "scene test passed" << std::endl;
     return 0;

@@ -7,12 +7,13 @@
 //   PHOX_DEVICE=<name>    render on the device whose name contains <name>, e.g. "llvmpipe"
 #include "phox/CpuImage.hpp"
 #include "phox/Renderer.hpp"
-#include "phox/Scene.hpp"
+#include "phox/RenderView.hpp"
+#include "phox/SampleScenes.hpp"
+#include "phox/SoftwareRasterizer.hpp"
 
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -41,19 +42,15 @@ bool envFlag(const char *name) {
 
 struct GoldenCase {
     std::string name;
-    std::function<phox::Scene()> build;
+    std::string scene;
+    float time; ///< animation time the scene is posed at
 };
 
-std::vector<GoldenCase> cases() {
-    return {
-        {"triangle",
-         [] {
-             phox::Scene scene;
-             scene.addObject(phox::ObjectFactory::createTriangle("triangle", phox::Material{"basic", "default", {}}));
-             return scene;
-         }},
-    };
-}
+const std::vector<GoldenCase> kCases = {
+    {"triangle", "triangle", 0.0f},
+    {"triangle_turned", "triangle", 2.0f}, // past 90 degrees: the back face, lit from behind
+    {"cubes", "cubes", 0.7f},
+};
 
 } // namespace
 
@@ -80,10 +77,11 @@ int main() {
     std::cout << "device: " << info.deviceName << (validation ? " (validation on)" : "") << std::endl;
 
     int failures = 0;
-    for (const GoldenCase &c : cases()) {
-        const phox::Scene scene = c.build();
+    for (const GoldenCase &c : kCases) {
+        phox::SampleScene sample = phox::makeSampleScene(c.scene);
+        sample.animate(sample.scene, c.time);
         for (int i = 0; i < kFramesPerCase; ++i) {
-            renderer->render(scene);
+            renderer->render(sample.scene);
         }
         const phox::CpuImage &actual = renderer->lastFrame();
         const std::filesystem::path golden = goldenDir / (c.name + ".ppm");
@@ -106,6 +104,20 @@ int main() {
             const std::filesystem::path out = std::filesystem::path("golden_out") / (c.name + ".ppm");
             phox::writePpm(out, actual);
             std::cout << "  actual image written to " << std::filesystem::absolute(out).string() << std::endl;
+            ++failures;
+        }
+
+        // The software fallback shares the view maths and lighting, so it should agree except along edges.
+        const phox::CpuImage software = phox::rasterize(phox::extractView(sample.scene, config.headlessExtent));
+        const phox::ImageDiff softDiff = phox::compareImages(software, expected, kChannelTolerance);
+        const bool softPass = !softDiff.sizeMismatch && softDiff.pixelsOverTolerance <= allowed;
+        std::cout << (softPass ? "PASS " : "FAIL ") << c.name << " (software): max channel delta "
+                  << softDiff.maxChannelDelta << ", " << softDiff.pixelsOverTolerance << " pixel(s) over tolerance (allowed "
+                  << allowed << ")" << std::endl;
+        if (!softPass) {
+            const std::filesystem::path out = std::filesystem::path("golden_out") / (c.name + ".software.ppm");
+            phox::writePpm(out, software);
+            std::cout << "  software image written to " << std::filesystem::absolute(out).string() << std::endl;
             ++failures;
         }
     }

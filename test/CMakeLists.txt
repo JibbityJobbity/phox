@@ -43,6 +43,8 @@ endfunction()
 phox_add_test_executable(${PROJECT_NAME} source/scene_test.cpp)
 # Pure graph logic: no GPU needed.
 phox_add_test_executable(PhoxGraphTests source/render_graph_test.cpp)
+# Scene, camera, view extraction, software rasterizer, mesh loading: no GPU needed.
+phox_add_test_executable(PhoxViewTests source/render_view_test.cpp)
 # Renders headless and compares with test/golden/*.ppm (see the comment at the top of the source).
 phox_add_test_executable(PhoxGoldenTests source/golden_test.cpp)
 target_compile_definitions(PhoxGoldenTests PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
@@ -52,6 +54,7 @@ target_compile_definitions(PhoxGoldenTests PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURR
 enable_testing()
 add_test(NAME scene_smoke COMMAND ${PROJECT_NAME})
 add_test(NAME render_graph COMMAND PhoxGraphTests)
+add_test(NAME render_view COMMAND PhoxViewTests)
 add_test(NAME golden COMMAND PhoxGoldenTests WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # 77: no Vulkan device (set PHOX_REQUIRE_GPU=1 to make that a failure instead).
 set_tests_properties(golden PROPERTIES SKIP_RETURN_CODE 77)

@@ -71,21 +71,28 @@ CPMAddPackage(
 set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Common.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/CpuImage.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Math.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/MeshLoader.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderGraph.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderView.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Resources.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SampleScenes.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SoftwareRasterizer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/Pipeline.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/PipelineDesc.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/Shader.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/Platform.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/PlatformLinux.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/PlatformMacOS.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/PlatformWindow.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/SDLWindow.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Conversions.hpp
@@ -94,6 +101,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/FrameContext.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PipelineCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderInterface.hpp
@@ -102,18 +110,26 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/VulkanCommon.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/CopyPasses.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/ForwardPass.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/phox.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/pipeline/Shader.hpp
 )
 
 # List source files
 set(sources
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Camera.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/MeshLoader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/PipelineDesc.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderGraph.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderView.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/SampleScenes.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/SoftwareRasterizer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/SDLWindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/Window.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
@@ -123,12 +139,15 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/FrameContext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PipelineCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/ShaderLibrary.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/CopyPasses.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ForwardPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
 
