@@ -8,14 +8,10 @@
 namespace phox {
 namespace vk {
 
-Swapchain::Swapchain(Device* device, VkSurfaceKHR surface, uint32_t width, uint32_t height)
+Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+                     const Swapchain *previous)
     : m_device(device) {
-    if (m_device == nullptr || m_device->handle() == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
-        // Headless: no surface, nothing to create.
-        return;
-    }
-
-    const VkPhysicalDevice physicalDevice = m_device->physicalDevice();
+    const VkPhysicalDevice physicalDevice = m_device.physicalDevice();
 
     VkSurfaceCapabilitiesKHR caps{};
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps) != VK_SUCCESS) {
@@ -74,7 +70,7 @@ Swapchain::Swapchain(Device* device, VkSurfaceKHR surface, uint32_t width, uint3
         }
     }
 
-    const uint32_t queueFamilies[] = {m_device->graphicsQueueFamilyIndex(), m_device->presentQueueFamilyIndex()};
+    const uint32_t queueFamilies[] = {m_device.graphicsQueueFamilyIndex(), m_device.presentQueueFamilyIndex()};
 
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -96,31 +92,28 @@ Swapchain::Swapchain(Device* device, VkSurfaceKHR surface, uint32_t width, uint3
     createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = presentMode;
     createInfo.clipped = VK_TRUE;
+    createInfo.oldSwapchain = previous != nullptr ? previous->handle() : VK_NULL_HANDLE;
 
-    const auto &table = m_device->table();
-    if (table.vkCreateSwapchainKHR(m_device->handle(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS) {
+    const auto &table = m_device.table();
+    if (table.vkCreateSwapchainKHR(m_device.handle(), &createInfo, nullptr, &m_swapchain) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create swapchain");
     }
 
     uint32_t nImages = 0;
-    table.vkGetSwapchainImagesKHR(m_device->handle(), m_swapchain, &nImages, nullptr);
+    table.vkGetSwapchainImagesKHR(m_device.handle(), m_swapchain, &nImages, nullptr);
     m_images.resize(nImages);
-    table.vkGetSwapchainImagesKHR(m_device->handle(), m_swapchain, &nImages, m_images.data());
+    table.vkGetSwapchainImagesKHR(m_device.handle(), m_swapchain, &nImages, m_images.data());
 
     m_format = chosen.format;
     m_extent = extent;
     setExtent(extent.width, extent.height);
 }
 
-Swapchain::~Swapchain() {
-    if (m_swapchain != VK_NULL_HANDLE && m_device != nullptr && m_device->handle() != VK_NULL_HANDLE) {
-        m_device->table().vkDestroySwapchainKHR(m_device->handle(), m_swapchain, nullptr);
-    }
-}
+Swapchain::~Swapchain() { m_device.table().vkDestroySwapchainKHR(m_device.handle(), m_swapchain, nullptr); }
 
 bool Swapchain::acquireNextImage(VkSemaphore signal, uint32_t &imageIndex) {
-    const VkResult result = m_device->table().vkAcquireNextImageKHR(
-        m_device->handle(), m_swapchain, UINT64_MAX, signal, VK_NULL_HANDLE, &imageIndex);
+    const VkResult result = m_device.table().vkAcquireNextImageKHR(
+        m_device.handle(), m_swapchain, UINT64_MAX, signal, VK_NULL_HANDLE, &imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         return false;
     }
@@ -140,7 +133,7 @@ bool Swapchain::present(uint32_t imageIndex, VkSemaphore wait) {
     info.pSwapchains = &m_swapchain;
     info.pImageIndices = &imageIndex;
 
-    const VkResult result = m_device->table().vkQueuePresentKHR(m_device->presentQueue(), &info);
+    const VkResult result = m_device.table().vkQueuePresentKHR(m_device.presentQueue(), &info);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         return false;
     }

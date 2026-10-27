@@ -63,52 +63,59 @@ CPMAddPackage(
 # automatically. Keep that in mind when changing files, or explicitly mention them here.# List header files
 set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Buffer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Common.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/CpuImage.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderGraph.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderPipeline.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderTarget.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Resources.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/platform/SDLWindow.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Buffer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Conversions.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorAllocator.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/DescriptorSetLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Device.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/FrameContext.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Model.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Swapchain.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
 )
 
 # List source files
 set(sources
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Buffer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderGraph.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/SDLWindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/Window.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Conversions.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorAllocator.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/DescriptorSetLayout.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Device.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/FrameContext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Model.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/GraphicsPipeline.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Pipeline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
 

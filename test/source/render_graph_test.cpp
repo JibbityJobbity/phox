@@ -25,6 +25,7 @@ const char *name(ImageUsage u) {
     case ImageUsage::TransferSrc: return "TransferSrc";
     case ImageUsage::TransferDst: return "TransferDst";
     case ImageUsage::Present: return "Present";
+    default: return "Other";
     }
     return "?";
 }
@@ -43,7 +44,7 @@ public:
     PassContext &passContext() override { return *this; }
 };
 
-constexpr ImageDesc kDesc{64, 64, ImageFormat::RGBA8};
+constexpr ImageDesc kDesc{64, 64, Format::RGBA8Unorm};
 
 std::function<void(PassContext &)> mark(RecordingBackend &backend, std::string passName) {
     return [&backend, passName](PassContext &) { backend.log.push_back("pass " + passName); };

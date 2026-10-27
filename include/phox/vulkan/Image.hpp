@@ -1,28 +1,29 @@
 #ifndef PHOX_VULKAN_IMAGE_HPP
 #define PHOX_VULKAN_IMAGE_HPP
 
-#include "phox/Common.hpp"
 #include "phox/Image.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
-#include "phox/vulkan/Device.hpp"
 
-namespace phox {
+namespace phox::vk {
 
-namespace vk {
+class Device;
 
-class Image : public phox::Image {
-  private:
-    Device* m_device = nullptr;
+/// An image, its memory and a view of all of its mips and layers.
+class Image final : public phox::Image {
+public:
+    Image(Device &device, const ImageCreateInfo &info, VkImage image, VmaAllocation allocation, VkImageView view);
+    ~Image() override;
+
+    VkImage handle() const { return m_image; }
+    VkImageView view() const { return m_view; }
+
+private:
+    Device &m_device;
     VkImage m_image = VK_NULL_HANDLE;
     VmaAllocation m_allocation = nullptr;
-
-  public:
-    Image(Device* device, VkImage image, VmaAllocation allocation);
-    ~Image();
+    VkImageView m_view = VK_NULL_HANDLE;
 };
 
-}
-
-} // namespace phox
+} // namespace phox::vk
 
 #endif // PHOX_VULKAN_IMAGE_HPP

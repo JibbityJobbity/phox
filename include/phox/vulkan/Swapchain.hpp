@@ -11,18 +11,18 @@ namespace vk {
 
 class Device;
 
-/// A presentable set of images for a surface. Constructing one without a surface (headless)
-/// yields an inert object for which valid() is false.
+/// A presentable set of images for a surface.
 class Swapchain : public phox::Swapchain {
 public:
     /// @param width,height  requested size; used only when the surface does not dictate one
+    /// @param previous      the swapchain being replaced, if any (lets the driver hand resources over)
     /// @throws std::runtime_error if the surface/device cannot support a swapchain
-    Swapchain(Device* device, VkSurfaceKHR surface, uint32_t width, uint32_t height);
+    Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+              const Swapchain *previous = nullptr);
     ~Swapchain();
     Swapchain(const Swapchain &) = delete;
     Swapchain &operator=(const Swapchain &) = delete;
 
-    bool valid() const { return m_swapchain != VK_NULL_HANDLE; }
     VkSwapchainKHR handle() const { return m_swapchain; }
     VkFormat format() const { return m_format; }
     VkExtent2D extent() const { return m_extent; }
@@ -37,7 +37,7 @@ public:
     bool present(uint32_t imageIndex, VkSemaphore wait);
 
 private:
-    Device* m_device = nullptr;
+    Device &m_device;
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_format = VK_FORMAT_UNDEFINED;
     VkExtent2D m_extent{};

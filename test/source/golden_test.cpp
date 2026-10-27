@@ -30,6 +30,10 @@ constexpr int kSkip = 77;
 constexpr std::uint32_t kChannelTolerance = 2;
 constexpr double kMaxFractionOverTolerance = 0.005;
 
+// Each case renders a few frames so the frames in flight and pooled images are reused (and checked by
+// validation) before the last frame is compared.
+constexpr int kFramesPerCase = 3;
+
 bool envFlag(const char *name) {
     const char *value = std::getenv(name);
     return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
@@ -45,7 +49,7 @@ std::vector<GoldenCase> cases() {
         {"triangle",
          [] {
              phox::Scene scene;
-             scene.addObject(phox::ObjectFactory::createTriangle("triangle", phox::Material{"basic", "default"}));
+             scene.addObject(phox::ObjectFactory::createTriangle("triangle", phox::Material{"basic", "default", {}}));
              return scene;
          }},
     };
@@ -77,7 +81,10 @@ int main() {
 
     int failures = 0;
     for (const GoldenCase &c : cases()) {
-        renderer->render(c.build());
+        const phox::Scene scene = c.build();
+        for (int i = 0; i < kFramesPerCase; ++i) {
+            renderer->render(scene);
+        }
         const phox::CpuImage &actual = renderer->lastFrame();
         const std::filesystem::path golden = goldenDir / (c.name + ".ppm");
 

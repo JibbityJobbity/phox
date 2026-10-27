@@ -1,35 +1,35 @@
 #ifndef PHOX_VULKAN_SHADER_HPP
 #define PHOX_VULKAN_SHADER_HPP
 
-#include "phox/Common.hpp"
-#include "phox/Buffer.hpp"
 #include "phox/pipeline/Shader.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
-#include "phox/vulkan/Device.hpp"
 
-namespace phox {
+#include <cstdint>
+#include <memory>
+#include <string>
 
-namespace vk {
+namespace phox::vk {
 
-class Shader : public phox::Shader {
-    private:
-        Device* m_device = nullptr;
-        VkShaderModule m_shaderModule = VK_NULL_HANDLE;
-        ShaderType m_type;
+class Device;
 
-    public:
-        Shader(Device* device, VkShaderModule shaderModule, ShaderType type);
+/// A SPIR-V shader module.
+class Shader final : public phox::Shader {
+public:
+    Shader(Device &device, VkShaderModule module, ShaderType type);
+    ~Shader() override;
 
-        ~Shader();
+    VkShaderModule module() const { return m_module; }
 
-        VkShaderModule getShaderModule();
-        static std::unique_ptr<Shader> fromFile(phox::Device& device, const std::string& path, ShaderType type);
-        static std::unique_ptr<Shader> fromSpirv(phox::Device& device, const uint8_t* code, const size_t length, ShaderType type);
-        static std::unique_ptr<Shader> fromGlsl(phox::Device& device, const std::string& source, ShaderType type);
+    /// @throws std::runtime_error if the file is missing or not SPIR-V
+    static std::unique_ptr<Shader> fromFile(Device &device, const std::string &path, ShaderType type);
+    static std::unique_ptr<Shader> fromSpirv(Device &device, const std::uint8_t *code, std::size_t length,
+                                             ShaderType type);
+
+private:
+    Device &m_device;
+    VkShaderModule m_module = VK_NULL_HANDLE;
 };
 
-}
-
-}
+} // namespace phox::vk
 
 #endif // PHOX_VULKAN_SHADER_HPP

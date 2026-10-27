@@ -1,42 +1,30 @@
 #ifndef PHOX_VULKAN_BUFFER_HPP
 #define PHOX_VULKAN_BUFFER_HPP
 
-namespace phox {
-  namespace vk {
-    class Device;
-    class Buffer;
-  }
-};
-
-#include "phox/Common.hpp"
 #include "phox/Buffer.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
-#include "phox/vulkan/Device.hpp"
 
-namespace phox {
+namespace phox::vk {
 
-namespace vk {
+class Device;
 
-class Buffer : public phox::Buffer {
-  friend class Device;
-  public:
-    Buffer(Device *device, VkDeviceSize size, VkBuffer buffer, VmaAllocation allocation);
-    VkBuffer handle() const { return m_buffer; }
-    VmaAllocation allocation() const { return m_allocation; }
-    void *map() override;
-    void unmap() override;
-    void free() override;
+class Buffer final : public phox::Buffer {
+public:
+    Buffer(Device &device, VkBuffer buffer, VmaAllocation allocation, std::uint64_t size, void *mapped);
     ~Buffer() override;
 
-  private:
-    void *m_ptr = nullptr;
-    Device *m_device = nullptr;
+    VkBuffer handle() const { return m_buffer; }
+    void *mapped() const override { return m_mapped; }
+    void flush(std::uint64_t offset = 0, std::uint64_t size = UINT64_MAX) override;
+    void invalidate(std::uint64_t offset = 0, std::uint64_t size = UINT64_MAX) override;
+
+private:
+    Device &m_device;
     VkBuffer m_buffer = VK_NULL_HANDLE;
     VmaAllocation m_allocation = nullptr;
+    void *m_mapped = nullptr;
 };
 
-}
-
-} // namespace phox
+} // namespace phox::vk
 
 #endif // PHOX_VULKAN_BUFFER_HPP

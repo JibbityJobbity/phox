@@ -4,35 +4,35 @@
 #include "phox/RenderGraph.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
+#include <cstdint>
 #include <vector>
 
-namespace phox {
-namespace vk {
+namespace phox::vk {
 
 class Device;
+class Image;
+class TransientPool;
 
-/// Runs a RenderGraph by recording into a single command buffer. It is also the PassContext handed to
-/// pass callbacks, which downcast to this type to get the command buffer and image handles.
+/// Runs a RenderGraph by recording into one command buffer. It is also the PassContext handed to pass
+/// callbacks, which downcast to this type to get the command buffer and image handles.
 ///
-/// Transient images are created on allocate() and freed when the executor is destroyed (the destructor
-/// waits for the device first), because the recorded commands may still be in flight when the graph
-/// "releases" them.
+/// Transient images come from a TransientPool and go back to it when the graph releases them. The
+/// executor owns nothing across frames, so it is created per frame.
 class GraphExecutor : public phox::GraphBackend, public phox::PassContext {
 public:
-    explicit GraphExecutor(Device &device);
+    GraphExecutor(Device &device, TransientPool &pool, std::uint64_t frame, VkCommandBuffer commandBuffer);
+    /// Returns images still held, e.g. after an exception while recording.
     ~GraphExecutor() override;
     GraphExecutor(const GraphExecutor &) = delete;
     GraphExecutor &operator=(const GraphExecutor &) = delete;
 
-    void setCommandBuffer(VkCommandBuffer commandBuffer) { m_commandBuffer = commandBuffer; }
     VkCommandBuffer commandBuffer() const { return m_commandBuffer; }
     Device &device() const { return m_device; }
 
     /// Registers the VkImage behind an imported graph image (e.g. the acquired swapchain image).
-    void bindImported(ResourceHandle handle, VkImage image);
+    void bindImported(ResourceHandle handle, VkImage image, VkImageView view = VK_NULL_HANDLE);
 
     VkImage image(ResourceHandle handle) const;
-    /// Colour view of a graph-owned image.
     VkImageView view(ResourceHandle handle) const;
 
     // GraphBackend
@@ -44,20 +44,20 @@ public:
 private:
     struct Slot {
         VkImage image = VK_NULL_HANDLE;
-        VmaAllocation allocation = nullptr;
         VkImageView view = VK_NULL_HANDLE;
-        bool owned = false;
+        Image *pooled = nullptr; ///< set while a transient is held from the pool
     };
 
     Slot &slot(ResourceHandle handle);
     const Slot &slot(ResourceHandle handle) const;
 
     Device &m_device;
-    VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
+    TransientPool &m_pool;
+    std::uint64_t m_frame;
+    VkCommandBuffer m_commandBuffer;
     std::vector<Slot> m_slots;
 };
 
-} // namespace vk
-} // namespace phox
+} // namespace phox::vk
 
 #endif // PHOX_VULKAN_GRAPH_EXECUTOR_HPP

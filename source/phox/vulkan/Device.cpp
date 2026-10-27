@@ -2,387 +2,238 @@
 
 #include "phox/vulkan/Device.hpp"
 
+#include "phox/Log.hpp"
+#include "phox/VertexLayout.hpp"
+#include "phox/vulkan/Buffer.hpp"
+#include "phox/vulkan/Conversions.hpp"
+#include "phox/vulkan/Image.hpp"
 #include "phox/vulkan/pipeline/GraphicsPipeline.hpp"
+#include "phox/vulkan/pipeline/Shader.hpp"
 
-#include <iostream>
 #include <stdexcept>
 #include <vector>
 
-using namespace std;
+namespace phox::vk {
 
-namespace phox {
+namespace {
 
-namespace vk {
+struct QueueFamilies {
+    std::uint32_t graphics = UINT32_MAX;
+    std::uint32_t present = UINT32_MAX;
+};
 
-VkPhysicalDevice Device::pickPhysicalDevice(const DeviceType type = DeviceType::Discrete) {
-    uint32_t nPhysDev;
-    vkEnumeratePhysicalDevices(m_instance, &nPhysDev, nullptr);
-    auto physDevs = vector<VkPhysicalDevice>(nPhysDev);
-    vkEnumeratePhysicalDevices(m_instance, &nPhysDev, physDevs.data());
+// Prefers one family that can both draw and present, so images never change queue ownership.
+QueueFamilies pickQueueFamilies(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface) {
+    std::uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, families.data());
 
-    VkPhysicalDeviceType physDevType;
-    switch (type) {
-    case DeviceType::Discrete:
-        physDevType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-        break;
-    case DeviceType::Integrated:
-        physDevType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
-        break;
-    case DeviceType::Virtual:
-        physDevType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
-        break;
-    case DeviceType::CPU:
-        physDevType = VK_PHYSICAL_DEVICE_TYPE_CPU;
-        break;
-    default:
-        physDevType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
-        break;
-    };
-
-    VkPhysicalDevice out = VK_NULL_HANDLE;
-
-    for (size_t i = 0; i < nPhysDev; i++) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(physDevs[i], &props);
-        if (props.deviceType == physDevType) {
-            out = physDevs[i];
-            break;
+    QueueFamilies result;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const bool graphics = (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        VkBool32 present = VK_FALSE;
+        if (surface != VK_NULL_HANDLE) {
+            vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &present);
         }
+        if (graphics && (present == VK_TRUE || surface == VK_NULL_HANDLE)) {
+            return {i, i};
+        }
+        if (graphics && result.graphics == UINT32_MAX) result.graphics = i;
+        if (present == VK_TRUE && result.present == UINT32_MAX) result.present = i;
     }
-
-    return out;
+    if (result.graphics == UINT32_MAX) {
+        throw std::runtime_error("the device has no graphics queue");
+    }
+    if (surface != VK_NULL_HANDLE && result.present == UINT32_MAX) {
+        throw std::runtime_error("the device cannot present to the window surface");
+    }
+    return result;
 }
 
-void Device::Initialize(VkInstance instance, VkPhysicalDevice phys_dev,
-                        VkSurfaceKHR surface) {
-    m_instance = instance;
-    m_physicalDevice = phys_dev;
-    m_surface = surface;
-    VkResult result;
-    // Pick queue families
-    uint32_t nQueueFamilies = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &nQueueFamilies,
-                                             nullptr);
-    auto *queueFamilies = new VkQueueFamilyProperties[nQueueFamilies];
-    vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &nQueueFamilies,
-                                             queueFamilies);
-    uint32_t graphicsFamily = UINT32_MAX;
-    uint32_t presentFamily = UINT32_MAX;
-    VkBool32 presentSupport = VK_FALSE;
-    for (uint32_t i = 0; i < nQueueFamilies; i++) {
-        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            graphicsFamily = i;
+VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
+    VmaAllocationCreateInfo info{};
+    switch (memory) {
+    case MemoryLocation::DeviceLocal:
+        info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        break;
+    case MemoryLocation::Upload:
+        info.usage = VMA_MEMORY_USAGE_AUTO;
+        info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        break;
+    case MemoryLocation::Readback:
+        info.usage = VMA_MEMORY_USAGE_AUTO;
+        info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        break;
+    }
+    return info;
+}
+
+} // namespace
+
+Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames)
+    : m_instance(instance), m_physicalDevice(physicalDevice), m_objectNames(objectNames) {
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &m_properties);
+    const QueueFamilies families = pickQueueFamilies(m_physicalDevice, surface);
+    m_graphicsFamily = families.graphics;
+    m_presentFamily = surface != VK_NULL_HANDLE ? families.present : families.graphics;
+
+    const float priority = 1.0f;
+    std::vector<VkDeviceQueueCreateInfo> queueInfos;
+    for (std::uint32_t family : {m_graphicsFamily, m_presentFamily}) {
+        if (!queueInfos.empty() && queueInfos.front().queueFamilyIndex == family) {
+            continue;
         }
-        if (m_surface != VK_NULL_HANDLE) {
-            vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, i, m_surface,
-                                                 &presentSupport);
-            if (presentSupport) {
-                presentFamily = i;
-            }
-        }
+        VkDeviceQueueCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        info.queueFamilyIndex = family;
+        info.queueCount = 1;
+        info.pQueuePriorities = &priority;
+        queueInfos.push_back(info);
     }
 
-    delete[] queueFamilies;
-    if (graphicsFamily == UINT32_MAX) {
-        throw std::runtime_error("Failed to find graphics queue family");
-    }
-    if (presentFamily == UINT32_MAX) {
-        // Allow headless execution paths that don't create a present surface yet.
-        presentFamily = graphicsFamily;
+    std::vector<const char *> extensions;
+    if (surface != VK_NULL_HANDLE) {
+        extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
 
-    // Create logical device
-    {
-        float queuePriority = 1.0f;
-        VkDeviceQueueCreateInfo graphicsQueueCreateInfo = {};
-        graphicsQueueCreateInfo.sType =
-            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        graphicsQueueCreateInfo.queueFamilyIndex = graphicsFamily;
-        graphicsQueueCreateInfo.queueCount = 1;
-        graphicsQueueCreateInfo.pQueuePriorities = &queuePriority;
-
-        VkDeviceQueueCreateInfo presentQueueCreateInfo = {};
-        presentQueueCreateInfo.sType =
-            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        presentQueueCreateInfo.queueFamilyIndex = presentFamily;
-        presentQueueCreateInfo.queueCount = 1;
-        presentQueueCreateInfo.pQueuePriorities = &queuePriority;
-
-        std::vector<VkDeviceQueueCreateInfo> queueInfos;
-        queueInfos.push_back(graphicsQueueCreateInfo);
-        if (presentFamily != graphicsFamily) {
-            queueInfos.push_back(presentQueueCreateInfo);
-        }
-
-        VkPhysicalDeviceFeatures deviceFeatures = {};
-        vkGetPhysicalDeviceFeatures(m_physicalDevice, &deviceFeatures);
-        // TODO: Enable required features
-
-        // Presenting needs the swapchain extension on the device.
-        std::vector<const char *> deviceExtensions;
-        if (m_surface != VK_NULL_HANDLE) {
-            deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-        }
-
-        VkDeviceCreateInfo deviceCreateInfo = {};
-        deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        deviceCreateInfo.pQueueCreateInfos = queueInfos.data();
-        deviceCreateInfo.queueCreateInfoCount = queueInfos.size();
-        deviceCreateInfo.pEnabledFeatures = &deviceFeatures;
-        deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-        deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
-        deviceCreateInfo.enabledLayerCount = 0; // TODO: Enable requried layers
-
-        result = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr,
-                                &m_device);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create logical device!");
-        }
+    VkDeviceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
+    createInfo.pQueueCreateInfos = queueInfos.data();
+    createInfo.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+    if (vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create the logical device");
     }
-
     volkLoadDeviceTable(&m_table, m_device);
+    m_table.vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
+    m_table.vkGetDeviceQueue(m_device, m_presentFamily, 0, &m_presentQueue);
 
-    {
-        m_table.vkGetDeviceQueue(m_device, graphicsFamily, 0,
-                                 &m_queueInfo.graphicsQueue);
-        m_table.vkGetDeviceQueue(m_device, presentFamily, 0,
-                                 &m_queueInfo.presentQueue);
-        m_queueInfo.graphicsQueueIndex = graphicsFamily;
-        m_queueInfo.presentQueueIndex = presentFamily;
+    // VMA is built without static or dynamic function loading, so it gets every entry point from here.
+    VmaVulkanFunctions functions{};
+    functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+    functions.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
+    functions.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
+    functions.vkAllocateMemory = m_table.vkAllocateMemory;
+    functions.vkFreeMemory = m_table.vkFreeMemory;
+    functions.vkMapMemory = m_table.vkMapMemory;
+    functions.vkUnmapMemory = m_table.vkUnmapMemory;
+    functions.vkFlushMappedMemoryRanges = m_table.vkFlushMappedMemoryRanges;
+    functions.vkInvalidateMappedMemoryRanges = m_table.vkInvalidateMappedMemoryRanges;
+    functions.vkBindBufferMemory = m_table.vkBindBufferMemory;
+    functions.vkBindImageMemory = m_table.vkBindImageMemory;
+    functions.vkGetBufferMemoryRequirements = m_table.vkGetBufferMemoryRequirements;
+    functions.vkGetImageMemoryRequirements = m_table.vkGetImageMemoryRequirements;
+    functions.vkCreateBuffer = m_table.vkCreateBuffer;
+    functions.vkDestroyBuffer = m_table.vkDestroyBuffer;
+    functions.vkCreateImage = m_table.vkCreateImage;
+    functions.vkDestroyImage = m_table.vkDestroyImage;
+    functions.vkCmdCopyBuffer = m_table.vkCmdCopyBuffer;
+    // Vulkan 1.1 core entry points; VMA reads them through its *2KHR slots.
+    functions.vkGetBufferMemoryRequirements2KHR = m_table.vkGetBufferMemoryRequirements2;
+    functions.vkGetImageMemoryRequirements2KHR = m_table.vkGetImageMemoryRequirements2;
+    functions.vkBindBufferMemory2KHR = m_table.vkBindBufferMemory2;
+    functions.vkBindImageMemory2KHR = m_table.vkBindImageMemory2;
+    functions.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
+
+    VmaAllocatorCreateInfo allocatorInfo{};
+    allocatorInfo.physicalDevice = m_physicalDevice;
+    allocatorInfo.device = m_device;
+    allocatorInfo.instance = m_instance;
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2; // must match the instance
+    allocatorInfo.pVulkanFunctions = &functions;
+    if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
+        m_table.vkDestroyDevice(m_device, nullptr);
+        throw std::runtime_error("failed to create the memory allocator");
     }
-
-    // Memory allocator
-    {
-        VmaVulkanFunctions vulkanFunctions = {};
-        vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
-        vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-        vulkanFunctions.vkGetPhysicalDeviceProperties =
-            vkGetPhysicalDeviceProperties;
-        vulkanFunctions.vkGetPhysicalDeviceMemoryProperties =
-            vkGetPhysicalDeviceMemoryProperties;
-        vulkanFunctions.vkAllocateMemory = m_table.vkAllocateMemory;
-        vulkanFunctions.vkFreeMemory = m_table.vkFreeMemory;
-        vulkanFunctions.vkMapMemory = m_table.vkMapMemory;
-        vulkanFunctions.vkUnmapMemory = m_table.vkUnmapMemory;
-        vulkanFunctions.vkFlushMappedMemoryRanges =
-            m_table.vkFlushMappedMemoryRanges;
-        vulkanFunctions.vkInvalidateMappedMemoryRanges =
-            m_table.vkInvalidateMappedMemoryRanges;
-        vulkanFunctions.vkBindBufferMemory = m_table.vkBindBufferMemory;
-        vulkanFunctions.vkBindImageMemory = m_table.vkBindImageMemory;
-        vulkanFunctions.vkGetBufferMemoryRequirements =
-            m_table.vkGetBufferMemoryRequirements;
-        vulkanFunctions.vkGetImageMemoryRequirements =
-            m_table.vkGetImageMemoryRequirements;
-        vulkanFunctions.vkCreateBuffer = m_table.vkCreateBuffer;
-        vulkanFunctions.vkDestroyBuffer = m_table.vkDestroyBuffer;
-        vulkanFunctions.vkCreateImage = m_table.vkCreateImage;
-        vulkanFunctions.vkDestroyImage = m_table.vkDestroyImage;
-        vulkanFunctions.vkCmdCopyBuffer = m_table.vkCmdCopyBuffer;
-        // Vulkan 1.1 core entry points; VMA reads them through its *2KHR slots.
-        vulkanFunctions.vkGetBufferMemoryRequirements2KHR =
-            m_table.vkGetBufferMemoryRequirements2;
-        vulkanFunctions.vkGetImageMemoryRequirements2KHR =
-            m_table.vkGetImageMemoryRequirements2;
-        vulkanFunctions.vkBindBufferMemory2KHR = m_table.vkBindBufferMemory2;
-        vulkanFunctions.vkBindImageMemory2KHR = m_table.vkBindImageMemory2;
-        vulkanFunctions.vkGetPhysicalDeviceMemoryProperties2KHR =
-            vkGetPhysicalDeviceMemoryProperties2;
-
-        VmaAllocatorCreateInfo allocatorInfo = {};
-        allocatorInfo.physicalDevice = m_physicalDevice;
-        allocatorInfo.device = m_device;
-        allocatorInfo.instance = m_instance;
-        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2; // must match the instance
-        allocatorInfo.pVulkanFunctions = &vulkanFunctions;
-        result = vmaCreateAllocator(&allocatorInfo, &m_allocator);
-
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create memory allocator!");
-        }
-    }
-
-    m_initialized = true;
 }
 
-void Device::cleanup() {
-    if (m_device != VK_NULL_HANDLE && m_table.vkDeviceWaitIdle != nullptr) {
-        m_table.vkDeviceWaitIdle(m_device);
-    }
-
-    if (m_allocator != VK_NULL_HANDLE) {
-        vmaDestroyAllocator(m_allocator);
-        m_allocator = VK_NULL_HANDLE;
-    }
-
-    if (m_device != VK_NULL_HANDLE) {
-        if (m_table.vkDestroyDevice != nullptr) {
-            m_table.vkDestroyDevice(m_device, nullptr);
-        }
-        m_queueInfo.graphicsQueue = VK_NULL_HANDLE;
-        m_queueInfo.presentQueue = VK_NULL_HANDLE;
-        m_device = VK_NULL_HANDLE;
-    }
-    // Device doesn't own these
-    m_physicalDevice = VK_NULL_HANDLE;
-    m_instance = VK_NULL_HANDLE;
-    m_initialized = false;
+Device::~Device() {
+    m_table.vkDeviceWaitIdle(m_device);
+    vmaDestroyAllocator(m_allocator);
+    m_table.vkDestroyDevice(m_device, nullptr);
 }
 
-bool Device::isInitialized() { return m_initialized; }
+void Device::waitIdle() { m_table.vkDeviceWaitIdle(m_device); }
 
-Device::~Device() { cleanup(); }
-
-std::unique_ptr<phox::Buffer> Device::allocateBuffer(const size_t size,
-                       const MemoryLocation memoryLocation = MemoryLocation::Auto) {
-    const VmaMemoryUsage memLocationToUsage[] = {
-        VMA_MEMORY_USAGE_AUTO,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        VMA_MEMORY_USAGE_CPU_ONLY,
-        VMA_MEMORY_USAGE_CPU_COPY,
-    };
-
-    VkBuffer buf;
-    VmaAllocation allocation;
-
-    uint32_t queueFamilyIndices[] = {m_queueInfo.presentQueueIndex,
-                                     m_queueInfo.graphicsQueueIndex};
-
-    VkBufferCreateInfo bufferCreateInfo{};
-    bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferCreateInfo.pNext = nullptr;
-    bufferCreateInfo.flags = 0;
-    bufferCreateInfo.size = size;
-    bufferCreateInfo.usage =
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    // CONCURRENT sharing requires distinct family indices; headless uses one family.
-    if (m_queueInfo.presentQueueIndex != m_queueInfo.graphicsQueueIndex) {
-        bufferCreateInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-        bufferCreateInfo.queueFamilyIndexCount = 2;
-        bufferCreateInfo.pQueueFamilyIndices = queueFamilyIndices;
-    } else {
-        bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+void Device::setObjectName(VkObjectType type, std::uint64_t handle, const std::string &name) const {
+    if (!m_objectNames || name.empty() || vkSetDebugUtilsObjectNameEXT == nullptr) {
+        return;
     }
-
-    VmaAllocationCreateInfo allocationCreateInfo{};
-    allocationCreateInfo.usage = memLocationToUsage[(size_t)memoryLocation];
-
-    const VkResult createResult =
-        vmaCreateBuffer(m_allocator, &bufferCreateInfo, &allocationCreateInfo,
-                        &buf, &allocation, nullptr);
-    if (createResult != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create buffer");
-    }
-
-    return std::make_unique<Buffer>(this, size, buf, allocation);
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType = type;
+    info.objectHandle = handle;
+    info.pObjectName = name.c_str();
+    vkSetDebugUtilsObjectNameEXT(m_device, &info);
 }
 
-std::unique_ptr<phox::Buffer> Device::copyBuffer(phox::Buffer &buffer, MemoryLocation memoryLocation) {
-    const size_t size = buffer.getSize();
-    auto copyBuffer = allocateBuffer(size, memoryLocation);
-    auto* srcBuffer = dynamic_cast<vk::Buffer*>(&buffer);
-    auto* dstBuffer = dynamic_cast<vk::Buffer*>(copyBuffer.get());
-    if (srcBuffer == nullptr || dstBuffer == nullptr) {
-        throw std::runtime_error("copyBuffer requires Vulkan buffers");
+std::unique_ptr<phox::Buffer> Device::createBuffer(const BufferCreateInfo &info) { return makeBuffer(info); }
+
+std::unique_ptr<phox::Image> Device::createImage(const ImageCreateInfo &info) { return makeImage(info); }
+
+std::unique_ptr<Buffer> Device::makeBuffer(const BufferCreateInfo &info) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = info.size;
+    bufferInfo.usage = toVkBufferUsage(info.usage);
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // buffers are only used on the graphics queue
+    if (bufferInfo.usage == 0) {
+        throw std::logic_error("buffer '" + info.name + "' has no GPU usage");
     }
 
-    VkCommandPoolCreateInfo poolCreateInfo{};
-    poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    poolCreateInfo.queueFamilyIndex = m_queueInfo.graphicsQueueIndex;
-
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    VkResult result = m_table.vkCreateCommandPool(m_device, &poolCreateInfo,
-                                                  nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create command pool for copy");
+    const VmaAllocationCreateInfo allocationInfo = allocationInfoFor(info.memory);
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VmaAllocationInfo allocated{};
+    if (vmaCreateBuffer(m_allocator, &bufferInfo, &allocationInfo, &buffer, &allocation, &allocated) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create buffer '" + info.name + "'");
     }
-
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    result = m_table.vkAllocateCommandBuffers(m_device, &allocInfo,
-                                              &commandBuffer);
-    if (result != VK_SUCCESS) {
-        m_table.vkDestroyCommandPool(m_device, commandPool, nullptr);
-        throw std::runtime_error("Failed to allocate command buffer for copy");
-    }
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    m_table.vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    VkBufferCopy copyRegion{};
-    copyRegion.size = size;
-    m_table.vkCmdCopyBuffer(commandBuffer, srcBuffer->m_buffer, dstBuffer->m_buffer,
-                            1, &copyRegion);
-    m_table.vkEndCommandBuffer(commandBuffer);
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    result = m_table.vkQueueSubmit(m_queueInfo.graphicsQueue, 1, &submitInfo,
-                                   VK_NULL_HANDLE);
-    if (result != VK_SUCCESS) {
-        m_table.vkDestroyCommandPool(m_device, commandPool, nullptr);
-        throw std::runtime_error("Failed to submit buffer copy");
-    }
-    m_table.vkQueueWaitIdle(m_queueInfo.graphicsQueue);
-    m_table.vkDestroyCommandPool(m_device, commandPool, nullptr);
-
-    return copyBuffer;
+    setObjectName(VK_OBJECT_TYPE_BUFFER, reinterpret_cast<std::uint64_t>(buffer), info.name);
+    return std::make_unique<Buffer>(*this, buffer, allocation, info.size, allocated.pMappedData);
 }
 
-void Device::freeBuffer(phox::Buffer &buffer) { buffer.free(); }
+std::unique_ptr<Image> Device::makeImage(const ImageCreateInfo &info) {
+    const VkFormat format = toVkFormat(info.format);
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent = {info.extent.width, info.extent.height, 1};
+    imageInfo.mipLevels = info.mipLevels;
+    imageInfo.arrayLayers = info.arrayLayers;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = toVkImageUsage(info.usage);
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (imageInfo.usage == 0) {
+        throw std::logic_error("image '" + info.name + "' has no GPU usage");
+    }
 
-std::unique_ptr<phox::Image> Device::allocateImage(const size_t width, const size_t height) {
-    VkResult res;
-    VmaAllocation allocation;
+    const VmaAllocationCreateInfo allocationInfo = allocationInfoFor(MemoryLocation::DeviceLocal);
     VkImage image = VK_NULL_HANDLE;
-    uint32_t queueFamilyIndices[] = {m_queueInfo.presentQueueIndex,
-                                     m_queueInfo.graphicsQueueIndex};
-    VkImageCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    createInfo.imageType = VK_IMAGE_TYPE_2D;
-    createInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-    createInfo.extent.width = static_cast<uint32_t>(width);
-    createInfo.extent.height = static_cast<uint32_t>(height);
-    createInfo.extent.depth = 1;
-    createInfo.mipLevels = 1;
-    createInfo.arrayLayers = 1;
-    createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    createInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                       VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (m_queueInfo.presentQueueIndex != m_queueInfo.graphicsQueueIndex) {
-        createInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-        createInfo.queueFamilyIndexCount = 2;
-        createInfo.pQueueFamilyIndices = queueFamilyIndices;
-    } else {
-        createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    }
-    createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VmaAllocationCreateInfo allocationCreateInfo{};
-    allocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-    res = vmaCreateImage(m_allocator, &createInfo, &allocationCreateInfo,
-                         &image, &allocation, nullptr);
-    if (res != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create image!");
+    VmaAllocation allocation = nullptr;
+    if (vmaCreateImage(m_allocator, &imageInfo, &allocationInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create image '" + info.name + "'");
     }
 
-    return std::make_unique<Image>(this, image, allocation);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = image;
+    viewInfo.viewType = info.arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {aspectMask(info.format), 0, info.mipLevels, 0, info.arrayLayers};
+    VkImageView view = VK_NULL_HANDLE;
+    if (m_table.vkCreateImageView(m_device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
+        vmaDestroyImage(m_allocator, image, allocation);
+        throw std::runtime_error("failed to create a view of image '" + info.name + "'");
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, reinterpret_cast<std::uint64_t>(image), info.name);
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, reinterpret_cast<std::uint64_t>(view), info.name);
+    return std::make_unique<Image>(*this, info, image, allocation, view);
 }
 
 namespace {
@@ -400,9 +251,9 @@ VkFormat toVkFormat(VertexAttributeFormat format) {
 
 } // namespace
 
-std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::Shader*>& shaders) {
+std::unique_ptr<GraphicsPipeline> Device::createPipeline(const std::vector<phox::Shader*>& shaders) {
     uint8_t compat_mask = 0;
-    vector<VkPipelineShaderStageCreateInfo> shader_modules;
+    std::vector<VkPipelineShaderStageCreateInfo> shader_modules;
     shader_modules.reserve(shaders.size());
 
     for (auto& shader : shaders) {
@@ -425,12 +276,12 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
                 stage = VK_SHADER_STAGE_VERTEX_BIT;
                 break;
             default:
-                throw runtime_error("Invalid shader type provided");
+                throw std::runtime_error("Invalid shader type provided");
         }
         shader_modules.emplace_back(VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = stage,
-            .module = vulkan_shader->getShaderModule(),
+            .module = vulkan_shader->module(),
             .pName = "main",
         });
     }
@@ -445,7 +296,7 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
     auto pipeline = std::make_unique<GraphicsPipeline>(this);
 
     // Fixed interface for now: position/normal/uv vertices, one camera UBO (set 0, binding 0),
-    // an RGBA albedo push constant, and and an offscreen RGBA8 colour target.
+    // an RGBA albedo push constant, and an offscreen RGBA8 colour target.
     const VertexLayout vertexLayout = VertexLayout::positionNormalTexcoord();
     pipeline->m_descriptorSetLayout = std::make_unique<DescriptorSetLayout>(this, vertexLayout);
     const VkDescriptorSetLayout setLayout = pipeline->m_descriptorSetLayout->handle();
@@ -573,10 +424,4 @@ std::unique_ptr<phox::Pipeline> Device::createPipeline(const std::vector<phox::S
     return pipeline;
 }
 
-const VolkDeviceTable* Device::deviceTable() {
-    return &m_table;
-}
-
-}
-
-} // namespace phox
+} // namespace phox::vk

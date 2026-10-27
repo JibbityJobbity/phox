@@ -1,6 +1,8 @@
 #ifndef PHOX_RENDER_GRAPH_HPP
 #define PHOX_RENDER_GRAPH_HPP
 
+#include "phox/Resources.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -8,18 +10,10 @@
 
 namespace phox {
 
-enum class ImageFormat { RGBA8 };
-
-/// How a pass touches an image. The backend maps each usage to a layout/access/stage; the graph only
-/// needs to know when the usage changes between passes.
-enum class ImageUsage { Undefined, ColorAttachment, TransferSrc, TransferDst, Present };
-
-constexpr std::uint32_t usageBit(ImageUsage usage) { return 1u << static_cast<std::uint32_t>(usage); }
-
 struct ImageDesc {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    ImageFormat format = ImageFormat::RGBA8;
+    Format format = Format::RGBA8Unorm;
 };
 
 struct ResourceHandle {

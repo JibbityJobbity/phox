@@ -1,37 +1,23 @@
 #ifndef PHOX_DEVICE_HPP
 #define PHOX_DEVICE_HPP
 
-#include "phox/Common.hpp"
-
 #include "phox/Buffer.hpp"
 #include "phox/Image.hpp"
-#include "phox/pipeline/Pipeline.hpp"
+#include "phox/Resources.hpp"
+
+#include <memory>
 
 namespace phox {
 
-enum class MemoryLocation { Auto, Device, Host, HostVisible };
-
-enum class DeviceType { Discrete, Integrated, Virtual, CPU, Unknown };
-
+/// Creates GPU resources. Backends add their own entry points; this is the part that needs no
+/// backend types.
 class Device {
-  public:
+public:
     virtual ~Device() = default;
-    virtual std::unique_ptr<Buffer> allocateBuffer(const size_t size, const MemoryLocation memoryLocation) = 0;
-    virtual std::unique_ptr<Image> allocateImage(size_t width, size_t height) = 0;
-    virtual std::unique_ptr<Buffer> copyBuffer(Buffer &buffer, MemoryLocation memoryLocation) = 0;
-    /**
-     * @brief Create a Pipeline
-     *
-     * Creates a new pipeline based on the provided shaders. Duplicate shader types are prohibited.
-     * To create a graphics pipeline, provide a shader of both a Vertex and Fragment shader.
-     *
-     * @param shaders
-     * @return std::unique_ptr<Pipeline>
-     */
-    virtual std::unique_ptr<Pipeline> createPipeline(const std::vector<Shader*>& shaders) = 0;
-    virtual void freeBuffer(Buffer &buffer) = 0;
-    virtual bool isInitialized() = 0;
-    virtual void cleanup() = 0;
+    virtual std::unique_ptr<Buffer> createBuffer(const BufferCreateInfo &info) = 0;
+    virtual std::unique_ptr<Image> createImage(const ImageCreateInfo &info) = 0;
+    /// Blocks until the GPU is idle. For teardown and swapchain recreation, not for every frame.
+    virtual void waitIdle() = 0;
 };
 
 }
