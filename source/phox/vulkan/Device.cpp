@@ -97,8 +97,19 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
         extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
 
+    // Required by Phox (checked when the device is picked): barriers and submits use synchronization2,
+    // and graphics passes use dynamic rendering instead of render pass objects.
+    VkPhysicalDeviceVulkan13Features features13{};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.synchronization2 = VK_TRUE;
+    features13.dynamicRendering = VK_TRUE;
+    VkPhysicalDeviceFeatures2 features{};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features.pNext = &features13;
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = &features;
     createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
@@ -137,12 +148,15 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     functions.vkBindBufferMemory2KHR = m_table.vkBindBufferMemory2;
     functions.vkBindImageMemory2KHR = m_table.vkBindImageMemory2;
     functions.vkGetPhysicalDeviceMemoryProperties2KHR = vkGetPhysicalDeviceMemoryProperties2;
+    // Vulkan 1.3 core.
+    functions.vkGetDeviceBufferMemoryRequirements = m_table.vkGetDeviceBufferMemoryRequirements;
+    functions.vkGetDeviceImageMemoryRequirements = m_table.vkGetDeviceImageMemoryRequirements;
 
     VmaAllocatorCreateInfo allocatorInfo{};
     allocatorInfo.physicalDevice = m_physicalDevice;
     allocatorInfo.device = m_device;
     allocatorInfo.instance = m_instance;
-    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2; // must match the instance
+    allocatorInfo.vulkanApiVersion = PHOX_VULKAN_API_VERSION; // must match the instance
     allocatorInfo.pVulkanFunctions = &functions;
     if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
         m_table.vkDestroyDevice(m_device, nullptr);
@@ -316,35 +330,12 @@ std::unique_ptr<GraphicsPipeline> Device::createPipeline(const std::vector<phox:
         throw std::runtime_error("Failed to create pipeline layout");
     }
 
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    // The render graph transitions the target into and out of COLOR_ATTACHMENT_OPTIMAL itself.
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference colorAttachmentRef{};
-    colorAttachmentRef.attachment = 0;
-    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorAttachmentRef;
-
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-    if (m_table.vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &pipeline->m_renderPass) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create render pass");
-    }
+    // Dynamic rendering: the pipeline names its attachment formats instead of a render pass.
+    const VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
 
     VkVertexInputBindingDescription bindingDescription{};
     bindingDescription.binding = 0;
@@ -404,6 +395,7 @@ std::unique_ptr<GraphicsPipeline> Device::createPipeline(const std::vector<phox:
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &renderingInfo;
     pipelineInfo.stageCount = static_cast<uint32_t>(shader_modules.size());
     pipelineInfo.pStages = shader_modules.data();
     pipelineInfo.pVertexInputState = &vertexInput;
@@ -414,8 +406,6 @@ std::unique_ptr<GraphicsPipeline> Device::createPipeline(const std::vector<phox:
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = pipeline->m_pipelineLayout;
-    pipelineInfo.renderPass = pipeline->m_renderPass;
-    pipelineInfo.subpass = 0;
     if (m_table.vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
                                           &pipeline->m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create graphics pipeline");

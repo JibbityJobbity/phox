@@ -13,10 +13,8 @@ vk::GraphicsPipeline::~GraphicsPipeline() {
     const auto &table = m_device->table();
     // Reverse of creation order; destroying a null handle is a no-op.
     table.vkDestroyPipeline(dev, m_pipeline, nullptr);
-    table.vkDestroyRenderPass(dev, m_renderPass, nullptr);
     table.vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);
     m_descriptorSetLayout.reset();
     m_pipeline = VK_NULL_HANDLE;
-    m_renderPass = VK_NULL_HANDLE;
     m_pipelineLayout = VK_NULL_HANDLE;
 }

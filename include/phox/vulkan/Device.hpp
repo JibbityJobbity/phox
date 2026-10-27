@@ -43,6 +43,8 @@ public:
 
     /// Names an object for debuggers and validation messages. Does nothing without debug utils.
     void setObjectName(VkObjectType type, std::uint64_t handle, const std::string &name) const;
+    /// VK_EXT_debug_utils is enabled: objects can be named and command buffers labelled.
+    bool debugUtils() const { return m_objectNames; }
 
     VkDevice handle() const { return m_device; }
     VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }

@@ -5,6 +5,7 @@
 #include "phox/RenderGraph.hpp"
 #include "phox/Window.hpp"
 #include "phox/vulkan/Buffer.hpp"
+#include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
@@ -53,7 +54,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSe
     const bool fromValidation =
         (type & (VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)) != 0;
     if (!fromValidation) {
-        phox::log::debug("[vulkan] {}: {}", id, data->pMessage);
+        if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+            phox::log::debug("[vulkan] {}: {}", id, data->pMessage); // loader info chatter is dropped
+        }
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         counters->errors++;
         phox::log::error("[vulkan] {}: {}", id, data->pMessage);
@@ -150,6 +153,20 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
             continue;
         }
 
+        // Phox records with synchronization2 and dynamic rendering (core in Vulkan 1.3).
+        VkPhysicalDeviceProperties versionProps;
+        vkGetPhysicalDeviceProperties(device, &versionProps);
+        VkPhysicalDeviceVulkan13Features features13{};
+        features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        VkPhysicalDeviceFeatures2 features{};
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features.pNext = &features13;
+        vkGetPhysicalDeviceFeatures2(device, &features);
+        if (versionProps.apiVersion < PHOX_VULKAN_API_VERSION || !features13.synchronization2 ||
+            !features13.dynamicRendering) {
+            continue;
+        }
+
         if (surface != VK_NULL_HANDLE) {
             uint32_t nExtensions = 0;
             vkEnumerateDeviceExtensionProperties(device, nullptr, &nExtensions, nullptr);
@@ -180,8 +197,9 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
     }
 
     if (best == VK_NULL_HANDLE) {
-        throw std::runtime_error(preferred.empty() ? std::string("No suitable Vulkan device found")
-                                                   : "No suitable Vulkan device matching '" + preferred + "'");
+        throw std::runtime_error((preferred.empty() ? std::string("No suitable Vulkan device found")
+                                                    : "No suitable Vulkan device matching '" + preferred + "'") +
+                                 " (Phox needs Vulkan 1.3 with synchronization2 and dynamic rendering)");
     }
     return best;
 }
@@ -202,8 +220,8 @@ void Renderer::initialize(const RendererConfig &config) {
             m_config.preferredDevice = env;
         }
     }
-    if (m_config.debug) {
-        log::setLevel(log::Level::Debug);
+    if (m_config.debug && std::getenv("PHOX_LOG") == nullptr) {
+        log::setLevel(log::Level::Debug); // an explicit PHOX_LOG wins
     }
     m_useFallback = false;
 
@@ -418,108 +436,82 @@ void Renderer::render(const Scene &scene) {
     }
 
     // ---- Frame graph -------------------------------------------------------------------------
-    //   scene -> color (transient) -> present (blit into the backbuffer)     [windowed]
-    //   scene -> color (transient) -> readback (copy into a host buffer)     [headless]
-    GraphExecutor executor(*m_device, *m_transients, m_frameNumber, cmd);
-    RenderGraph graph;
-    const ResourceHandle color = graph.createImage("color", ImageDesc{extent.width, extent.height, Format::RGBA8Unorm});
+    //   scene -> color -> present  (blit into the swapchain image)   [windowed]
+    //   scene -> color -> readback (copy into a host-visible buffer) [headless]
+    RenderGraph graph(extent);
+    GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
 
-    const VkRenderPass renderPass = m_pipeline->renderPass();
+    struct SceneOutput {
+        ImageHandle color;
+    };
     const VkPipelineLayout pipelineLayout = m_pipeline->layout();
     const VkPipeline pipeline = m_pipeline->handle();
-    graph.addPass(
-        "scene", [&](PassBuilder &b) { b.write(color, ImageUsage::ColorAttachment); },
-        [&](PassContext &ctx) {
-            auto &gx = static_cast<GraphExecutor &>(ctx);
-            const VkImageView colorView = gx.view(color);
-
-            VkFramebufferCreateInfo framebufferInfo{};
-            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            framebufferInfo.renderPass = renderPass;
-            framebufferInfo.attachmentCount = 1;
-            framebufferInfo.pAttachments = &colorView;
-            framebufferInfo.width = extent.width;
-            framebufferInfo.height = extent.height;
-            framebufferInfo.layers = 1;
-            VkFramebuffer framebuffer = VK_NULL_HANDLE;
-            if (table.vkCreateFramebuffer(dev, &framebufferInfo, nullptr, &framebuffer) != VK_SUCCESS) {
-                throw std::runtime_error("failed to create framebuffer");
+    const SceneOutput &sceneOutput = graph.addPass<SceneOutput>(
+        "scene", PassType::Graphics,
+        [&](PassBuilder &builder, SceneOutput &out) {
+            const ImageHandle color = graph.createImage("color", ImageDesc{RelativeExtent{1.0f}, Format::RGBA8Unorm});
+            out.color = builder.colorAttachment(color, LoadOp::Clear, StoreOp::Store, {0.1f, 0.2f, 0.3f, 1.0f});
+        },
+        [&](const SceneOutput &, phox::PassContext &) {
+            if (vertices.empty()) {
+                return;
             }
-            frame.deferred().push([&table, dev, framebuffer] { table.vkDestroyFramebuffer(dev, framebuffer, nullptr); });
-
-            VkClearValue clearColor{{{0.1f, 0.2f, 0.3f, 1.0f}}};
-            VkRenderPassBeginInfo passInfo{};
-            passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            passInfo.renderPass = renderPass;
-            passInfo.framebuffer = framebuffer;
-            passInfo.renderArea = {{0, 0}, {extent.width, extent.height}};
-            passInfo.clearValueCount = 1;
-            passInfo.pClearValues = &clearColor;
-
-            table.vkCmdBeginRenderPass(cmd, &passInfo, VK_SUBPASS_CONTENTS_INLINE);
-            if (!vertices.empty()) {
-                table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-                const VkViewport viewport{0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f};
-                const VkRect2D scissor{{0, 0}, {extent.width, extent.height}};
-                table.vkCmdSetViewport(cmd, 0, 1, &viewport);
-                table.vkCmdSetScissor(cmd, 0, 1, &scissor);
-                table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexData.buffer, &vertexData.offset);
-                table.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1,
-                                              &descriptorSet, 0, nullptr);
-                table.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(albedo),
-                                         albedo.data());
-                table.vkCmdDraw(cmd, static_cast<std::uint32_t>(vertices.size()), 1, 0, 0);
-            }
-            table.vkCmdEndRenderPass(cmd);
+            table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexData.buffer, &vertexData.offset);
+            table.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0,
+                                          nullptr);
+            table.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(albedo), albedo.data());
+            table.vkCmdDraw(cmd, static_cast<std::uint32_t>(vertices.size()), 1, 0, 0);
         });
 
+    ImageHandle backbuffer;
     if (windowed) {
         const VkExtent2D swapExtent = m_swapchain->extent();
-        const ResourceHandle backbuffer =
-            graph.importImage("backbuffer", ImageDesc{swapExtent.width, swapExtent.height, Format::BGRA8Unorm},
-                              ImageUsage::Undefined, ImageUsage::Present);
-        executor.bindImported(backbuffer, m_swapchain->images().at(imageIndex));
+        Format swapFormat = fromVkFormat(m_swapchain->format());
+        backbuffer = graph.importImage("backbuffer",
+                                       ImageDesc{Extent2D{swapExtent.width, swapExtent.height},
+                                                 swapFormat == Format::Undefined ? Format::BGRA8Unorm : swapFormat},
+                                       ImageUsage::Undefined, ImageUsage::Present);
+        executor.bindImage(backbuffer, m_swapchain->images().at(imageIndex));
         graph.addPass(
-            "present",
-            [&](PassBuilder &b) {
-                b.read(color, ImageUsage::TransferSrc);
-                b.write(backbuffer, ImageUsage::TransferDst);
+            "present", PassType::Transfer,
+            [&](PassBuilder &builder) {
+                builder.read(sceneOutput.color, ImageUsage::TransferSrc);
+                builder.write(backbuffer, ImageUsage::TransferDst);
             },
-            [&](PassContext &ctx) {
-                auto &gx = static_cast<GraphExecutor &>(ctx);
+            [&, color = sceneOutput.color](phox::PassContext &context) {
+                auto &ctx = PassContext::from(context);
                 VkImageBlit blit{};
                 blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 blit.srcOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
                 blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 blit.dstOffsets[1] = {static_cast<int32_t>(swapExtent.width), static_cast<int32_t>(swapExtent.height), 1};
-                table.vkCmdBlitImage(cmd, gx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, gx.image(backbuffer),
-                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+                table.vkCmdBlitImage(ctx.cmd(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     ctx.image(backbuffer), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                                     VK_FILTER_NEAREST);
             });
     } else {
-        const VkBuffer readback = m_readback->handle();
+        // The graph makes the copy visible to the host (final state HostRead); the fence orders the read.
+        const BufferHandle readback = graph.importBuffer("readback", BufferDesc{m_readback->size()},
+                                                         BufferUsage::Undefined, BufferUsage::HostRead);
+        executor.bindBuffer(readback, m_readback->handle());
         graph.addPass(
-            "readback",
-            [&](PassBuilder &b) {
-                b.read(color, ImageUsage::TransferSrc);
-                b.sideEffects(); // the result leaves the graph through the host-visible readback buffer
+            "readback", PassType::Transfer,
+            [&](PassBuilder &builder) {
+                builder.read(sceneOutput.color, ImageUsage::TransferSrc);
+                builder.write(readback, BufferUsage::TransferDst);
             },
-            [&](PassContext &ctx) {
-                auto &gx = static_cast<GraphExecutor &>(ctx);
+            [&, color = sceneOutput.color](phox::PassContext &context) {
+                auto &ctx = PassContext::from(context);
                 VkBufferImageCopy region{};
                 region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 region.imageExtent = {extent.width, extent.height, 1};
-                table.vkCmdCopyImageToBuffer(cmd, gx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1,
-                                             &region);
-                // Make the copy visible to the host once the fence has signalled.
-                VkMemoryBarrier toHost{};
-                toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-                table.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
-                                           &toHost, 0, nullptr, 0, nullptr);
+                table.vkCmdCopyImageToBuffer(ctx.cmd(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                             ctx.buffer(readback), 1, &region);
             });
     }
 
+    graph.compile();
     graph.execute(executor);
 
     if (table.vkEndCommandBuffer(cmd) != VK_SUCCESS) {
@@ -527,31 +519,38 @@ void Renderer::render(const Scene &scene) {
     }
     arena.flush();
 
-    // The backbuffer is first used by a transfer (the blit), so that is the stage that waits for it.
-    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    const VkSemaphore imageAvailable = frame.imageAvailable();
-    const VkSemaphore renderFinished = windowed ? m_renderFinished[imageIndex] : VK_NULL_HANDLE;
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
+    VkCommandBufferSubmitInfo commandInfo{};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    commandInfo.commandBuffer = cmd;
+    VkSemaphoreSubmitInfo waitInfo{};
+    VkSemaphoreSubmitInfo signalInfo{};
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandInfo;
     if (windowed) {
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &imageAvailable;
-        submitInfo.pWaitDstStageMask = &waitStage;
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &renderFinished;
+        // Block only the stage that first touches the swapchain image, as reported by the graph.
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitInfo.semaphore = frame.imageAvailable();
+        waitInfo.stageMask = firstUseStage(graph, backbuffer);
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderFinished[imageIndex];
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        submitInfo.waitSemaphoreInfoCount = 1;
+        submitInfo.pWaitSemaphoreInfos = &waitInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
     }
     // Reset only now: had we returned early with the fence unsignalled, the next begin() would hang.
     const VkFence fence = frame.fence();
     table.vkResetFences(dev, 1, &fence);
-    if (table.vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS) {
+    if (table.vkQueueSubmit2(m_device->graphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS) {
         throw std::runtime_error("failed to submit the frame");
     }
     ++m_frameNumber;
 
     if (windowed) {
-        if (!m_swapchain->present(imageIndex, renderFinished)) {
+        if (!m_swapchain->present(imageIndex, m_renderFinished[imageIndex])) {
             recreateSwapchain(); // out of date or suboptimal
         }
         return;
@@ -643,7 +642,7 @@ void Renderer::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "Phox";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    appInfo.apiVersion = PHOX_VULKAN_API_VERSION;
 
     m_validation = m_config.debug;
     if (m_validation && !hasInstanceLayer(kValidationLayer)) {

@@ -9,54 +9,93 @@
 
 namespace phox::vk {
 
+class Buffer;
 class Device;
+class FrameContext;
+class GraphExecutor;
 class Image;
 class TransientPool;
 
-/// Runs a RenderGraph by recording into one command buffer. It is also the PassContext handed to pass
-/// callbacks, which downcast to this type to get the command buffer and image handles.
-///
-/// Transient images come from a TransientPool and go back to it when the graph releases them. The
-/// executor owns nothing across frames, so it is created per frame.
-class GraphExecutor : public phox::GraphBackend, public phox::PassContext {
+/// What a pass body receives: the command buffer, and the Vulkan objects behind the graph's handles.
+class PassContext final : public phox::PassContext {
 public:
-    GraphExecutor(Device &device, TransientPool &pool, std::uint64_t frame, VkCommandBuffer commandBuffer);
-    /// Returns images still held, e.g. after an exception while recording.
+    /// Pass callbacks get a phox::PassContext; this is the Vulkan one behind it.
+    static PassContext &from(phox::PassContext &context) { return static_cast<PassContext &>(context); }
+
+    VkCommandBuffer cmd() const;
+    VkImage image(ImageHandle handle) const;
+    VkImageView view(ImageHandle handle) const;
+    Extent2D extent(ImageHandle handle) const;
+    VkBuffer buffer(BufferHandle handle) const;
+    Device &device() const;
+    /// Per-frame memory (UploadArena), descriptor sets and deferred deletion.
+    FrameContext &frame() const;
+
+private:
+    friend class GraphExecutor;
+    explicit PassContext(GraphExecutor &executor) : m_executor(executor) {}
+    GraphExecutor &m_executor;
+};
+
+/// Executes a RenderGraph into one command buffer: synchronization2 barriers batched per pass, dynamic
+/// rendering for graphics passes, and transient images and buffers from a TransientPool. Created per
+/// frame; it owns nothing across frames.
+class GraphExecutor final : public phox::GraphBackend {
+public:
+    GraphExecutor(const RenderGraph &graph, Device &device, TransientPool &pool, FrameContext &frame,
+                  std::uint64_t frameNumber, VkCommandBuffer commandBuffer);
+    /// Returns pooled resources still held, e.g. after an exception while recording.
     ~GraphExecutor() override;
     GraphExecutor(const GraphExecutor &) = delete;
     GraphExecutor &operator=(const GraphExecutor &) = delete;
 
-    VkCommandBuffer commandBuffer() const { return m_commandBuffer; }
-    Device &device() const { return m_device; }
-
-    /// Registers the VkImage behind an imported graph image (e.g. the acquired swapchain image).
-    void bindImported(ResourceHandle handle, VkImage image, VkImageView view = VK_NULL_HANDLE);
-
-    VkImage image(ResourceHandle handle) const;
-    VkImageView view(ResourceHandle handle) const;
+    /// Supplies the Vulkan objects behind an imported image. @p view is needed only if a pass binds the
+    /// image as an attachment or asks for its view.
+    void bindImage(ImageHandle handle, VkImage image, VkImageView view = VK_NULL_HANDLE);
+    void bindBuffer(BufferHandle handle, VkBuffer buffer);
 
     // GraphBackend
-    void allocate(const ImageInfo &image) override;
+    void acquire(const ImageInfo &image) override;
+    void acquire(const BufferInfo &buffer) override;
     void release(const ImageInfo &image) override;
-    void transition(const ImageInfo &image, ImageUsage from, ImageUsage to) override;
-    PassContext &passContext() override { return *this; }
+    void release(const BufferInfo &buffer) override;
+    void barriers(const BarrierBatch &batch) override;
+    void beginPass(const CompiledPass &pass) override;
+    void endPass(const CompiledPass &pass) override;
+    phox::PassContext &passContext() override { return m_context; }
 
 private:
-    struct Slot {
+    friend class PassContext;
+
+    struct ImageSlot {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
-        Image *pooled = nullptr; ///< set while a transient is held from the pool
+        Image *pooled = nullptr;
+    };
+    struct BufferSlot {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        Buffer *pooled = nullptr;
     };
 
-    Slot &slot(ResourceHandle handle);
-    const Slot &slot(ResourceHandle handle) const;
+    ImageSlot &imageSlot(std::uint32_t index);
+    const ImageSlot &boundImage(std::uint32_t index) const;
+    BufferSlot &bufferSlot(std::uint32_t index);
+    const BufferSlot &boundBuffer(std::uint32_t index) const;
 
+    const RenderGraph &m_graph;
     Device &m_device;
     TransientPool &m_pool;
-    std::uint64_t m_frame;
+    FrameContext &m_frame;
+    std::uint64_t m_frameNumber;
     VkCommandBuffer m_commandBuffer;
-    std::vector<Slot> m_slots;
+    PassContext m_context;
+    std::vector<ImageSlot> m_images;
+    std::vector<BufferSlot> m_buffers;
 };
+
+/// The pipeline stage at which the compiled graph first touches @p image: the stage a submission must
+/// block when the image arrives through a semaphore (e.g. an acquired swapchain image).
+VkPipelineStageFlags2 firstUseStage(const RenderGraph &graph, ImageHandle image);
 
 } // namespace phox::vk
 
