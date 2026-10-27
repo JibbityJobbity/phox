@@ -1,6 +1,7 @@
 #ifndef PHOX_VULKAN_RENDERER_HPP
 #define PHOX_VULKAN_RENDERER_HPP
 
+#include <atomic>
 #include <vector>
 
 namespace phox {
@@ -21,6 +22,12 @@ namespace phox {
 
 namespace vk {
 
+/// Messages counted by the debug messenger (written from the validation layer's callback).
+struct ValidationCounters {
+    std::atomic<uint32_t> errors{0};
+    std::atomic<uint32_t> warnings{0};
+};
+
 class Renderer : public phox::Renderer {
   private:
     std::unique_ptr<Device> m_device;
@@ -32,6 +39,10 @@ class Renderer : public phox::Renderer {
     std::unique_ptr<Shader> m_vertShader;
     std::unique_ptr<Shader> m_fragShader;
     std::unique_ptr<GraphicsPipeline> m_pipeline;
+    RendererConfig m_config;
+    CpuImage m_lastFrame;
+    std::string m_deviceName;
+    ValidationCounters m_validationCounters;
     bool m_enableValidationLayers = false;
     bool m_initialized = false;
     bool m_useFallback = false;
@@ -50,7 +61,9 @@ class Renderer : public phox::Renderer {
 
   public:
     Renderer();
-    void initialize(bool debug, Window *window) override;
+    void initialize(const RendererConfig &config) override;
+    const CpuImage &lastFrame() const override { return m_lastFrame; }
+    RendererInfo info() const override;
     void cleanup() override;
     void render(const Scene &scene) override;
     ~Renderer() override;

@@ -64,13 +64,16 @@ CPMAddPackage(
 set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Common.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/CpuImage.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderGraph.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderPipeline.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderTarget.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Renderer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Resources.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Swapchain.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
@@ -88,6 +91,8 @@ set(headers
 # List source files
 set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Buffer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderGraph.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
@@ -113,6 +118,8 @@ set(sources
 # target: add_library(${PROJECT_NAME} INTERFACE)
 add_library(${PROJECT_NAME} ${headers} ${sources})
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+# Public headers use C++20 (defaulted comparisons, etc.), so consumers need it too.
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 
 # being a cross-platform target, we enforce standards conformance on MSVC
 target_compile_options(${PROJECT_NAME} PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->")
@@ -126,8 +133,8 @@ endif()
 # The installed vulkan/* headers include volk, VMA and glm, so consumers need their include paths.
 # volk/VMA are fetched via CPM and are not part of our export set, hence BUILD_INTERFACE.
 target_link_libraries(
-  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator>
-  PRIVATE fmt::fmt assimp
+  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator> fmt::fmt
+  PRIVATE assimp
 )
 
 find_package(SDL2 REQUIRED)

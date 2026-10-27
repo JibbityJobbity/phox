@@ -33,7 +33,9 @@ int main(int argc, char **argv) {
     }
 
     std::unique_ptr<Renderer> r = Renderer::Create(RendererType::Vulkan);
-    r->initialize(false, window.get());
+    RendererConfig config;
+    config.window = window.get();
+    r->initialize(config);
 
     Scene scene;
     scene.addObject(
@@ -50,6 +52,9 @@ int main(int argc, char **argv) {
       std::cout << "Presented " << frames << " frame(s)" << std::endl;
     } else {
       r->render(scene);
+      const char *output = "build/rendered_triangle.ppm";
+      writePpm(output, r->lastFrame());
+      std::cout << "Wrote " << output << std::endl;
     }
     r->cleanup();
   } catch (const std::exception &e) {

@@ -21,43 +21,37 @@ else()
   CPMAddPackage(NAME Phox SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
 endif()
 
-# ---- Create binary ----
+# ---- Create binaries ----
 
-add_executable(${PROJECT_NAME} source/scene_test.cpp)
-target_link_libraries(${PROJECT_NAME} PRIVATE Phox::Phox)
-set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
-
-# enable compiler warnings
-if(NOT TEST_INSTALLED_VERSION)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wpedantic -Wextra)
-  elseif(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
+function(phox_add_test_executable name)
+  add_executable(${name} ${ARGN})
+  target_link_libraries(${name} PRIVATE Phox::Phox)
+  set_target_properties(${name} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+  if(NOT TEST_INSTALLED_VERSION)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(${name} PRIVATE -Wall -Wpedantic -Wextra)
+    elseif(MSVC)
+      target_compile_options(${name} PRIVATE /W4)
+    endif()
   endif()
-endif()
+  if(ENABLE_TEST_COVERAGE)
+    target_compile_options(${name} PRIVATE -O0 -g -fprofile-arcs -ftest-coverage)
+    target_link_options(${name} PRIVATE -fprofile-arcs -ftest-coverage)
+  endif()
+endfunction()
 
+phox_add_test_executable(${PROJECT_NAME} source/scene_test.cpp)
 # Pure graph logic: no GPU needed.
-add_executable(PhoxGraphTests source/render_graph_test.cpp)
-target_link_libraries(PhoxGraphTests PRIVATE Phox::Phox)
-set_target_properties(PhoxGraphTests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
-if(NOT TEST_INSTALLED_VERSION)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(PhoxGraphTests PRIVATE -Wall -Wpedantic -Wextra)
-  elseif(MSVC)
-    target_compile_options(PhoxGraphTests PRIVATE /W4)
-  endif()
-endif()
+phox_add_test_executable(PhoxGraphTests source/render_graph_test.cpp)
+# Renders headless and compares with test/golden/*.ppm (see the comment at the top of the source).
+phox_add_test_executable(PhoxGoldenTests source/golden_test.cpp)
+target_compile_definitions(PhoxGoldenTests PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 
-# ---- Register the test ----
-# Run from the build dir: the renderer writes build/rendered_triangle.ppm relative to the cwd.
+# ---- Register the tests ----
 
 enable_testing()
-add_test(NAME scene_smoke COMMAND ${PROJECT_NAME} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME scene_smoke COMMAND ${PROJECT_NAME})
 add_test(NAME render_graph COMMAND PhoxGraphTests)
-
-# ---- code coverage ----
-
-if(ENABLE_TEST_COVERAGE)
-  target_compile_options(${PROJECT_NAME} PRIVATE -O0 -g -fprofile-arcs -ftest-coverage)
-  target_link_options(${PROJECT_NAME} PRIVATE -fprofile-arcs -ftest-coverage)
-endif()
+add_test(NAME golden COMMAND PhoxGoldenTests WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+# 77: no Vulkan device (set PHOX_REQUIRE_GPU=1 to make that a failure instead).
+set_tests_properties(golden PROPERTIES SKIP_RETURN_CODE 77)

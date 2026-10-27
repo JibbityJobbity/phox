@@ -1,9 +1,13 @@
 #ifndef PHOX_RENDERER_HPP
 #define PHOX_RENDERER_HPP
 
+#include "phox/CpuImage.hpp"
+#include "phox/Resources.hpp"
 #include "phox/Scene.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <string>
 
 namespace phox {
 
@@ -13,22 +17,43 @@ enum class RendererType {
     Vulkan,
 };
 
+struct RendererConfig {
+    /// Enables the Khronos validation layer (with synchronization validation) and debug logging.
+    bool debug = false;
+    /// When set, frames are presented to this window, which must outlive the renderer (call cleanup()
+    /// before destroying it). When null, rendering is headless and each frame is read back (lastFrame()).
+    Window *window = nullptr;
+    /// Size of headless frames.
+    Extent2D headlessExtent{640, 480};
+    /// Case-insensitive substring of the GPU name to use. Empty means the PHOX_DEVICE environment
+    /// variable if set, otherwise the best available device.
+    std::string preferredDevice;
+};
+
+enum class RendererBackend { None, Vulkan, Software };
+
+struct RendererInfo {
+    RendererBackend backend = RendererBackend::None;
+    std::string deviceName;
+    bool validation = false;              ///< the validation layer is active
+    std::uint32_t validationErrors = 0;   ///< error messages reported by the validation layer so far
+    std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far
+};
+
 class Renderer {
 public:
     /// @brief Creates a renderer of a specified type/backend
-    /// @param type the renderer backend to use
-    /// @returns the new renderer
     /// @throws exception when a renderer of @c type couldn't be created
     static std::unique_ptr<Renderer> Create(const RendererType type);
 
     virtual ~Renderer() = default;
-    /// @param debug   enable validation layers and verbose logging
-    /// @param window  optional; when given the renderer presents to it. The window must outlive
-    ///                the renderer (call cleanup() before destroying it). Without one, rendering is
-    ///                headless and the frame is written to build/rendered_triangle.ppm.
-    virtual void initialize(bool debug = false, Window *window = nullptr) = 0;
+    /// Falls back to a software rasterizer (headless only) if the GPU backend cannot start.
+    virtual void initialize(const RendererConfig &config) = 0;
     virtual void cleanup() = 0;
     virtual void render(const Scene &scene) = 0;
+    /// The most recent headless frame. Empty before the first headless frame and when windowed.
+    virtual const CpuImage &lastFrame() const = 0;
+    virtual RendererInfo info() const = 0;
 };
 
 }

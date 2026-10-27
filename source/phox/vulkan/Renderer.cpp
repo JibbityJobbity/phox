@@ -1,13 +1,16 @@
 #define VOLK_IMPLEMENTATION
 #include "phox/vulkan/Renderer.hpp"
 
+#include "phox/Log.hpp"
 #include "phox/RenderGraph.hpp"
 #include "phox/Window.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +26,6 @@
 namespace {
 
 const std::filesystem::path kShaderDir = PHOX_SHADER_DIR;
-const std::filesystem::path kOutputPath = "build/rendered_triangle.ppm";
 
 struct SimpleVertex {
     float position[3];
@@ -90,20 +92,14 @@ std::array<uint8_t, 4> makeColor(const std::array<float, 4> &albedo) {
     return {clamp(albedo[0]), clamp(albedo[1]), clamp(albedo[2]), clamp(albedo[3])};
 }
 
-void writePpm(const std::filesystem::path &path, uint32_t width, uint32_t height,
-              const std::vector<std::array<uint8_t, 4>> &pixels) {
-    std::filesystem::create_directories(path.parent_path());
-    std::ofstream output(path, std::ios::binary);
-    output << "P6\n" << width << " " << height << "\n255\n";
-    for (const auto &pixel : pixels) {
-        output.write(reinterpret_cast<const char *>(pixel.data()), 3);
-    }
+std::string toLower(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+    return text;
 }
 
-
-
-// Picks the best device that can draw (and, with a surface, present and use a swapchain).
-VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface) {
+// Picks the best device that can draw (and, with a surface, present). With @p preferred set, only
+// devices whose name contains it (case-insensitive) are considered.
+VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, const std::string &preferred) {
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(instance, &count, nullptr);
     std::vector<VkPhysicalDevice> devices(count);
@@ -112,6 +108,13 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface) {
     VkPhysicalDevice best = VK_NULL_HANDLE;
     int bestScore = -1;
     for (VkPhysicalDevice device : devices) {
+        if (!preferred.empty()) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(device, &props);
+            if (toLower(props.deviceName).find(toLower(preferred)) == std::string::npos) {
+                continue;
+            }
+        }
         uint32_t nFamilies = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(device, &nFamilies, nullptr);
         std::vector<VkQueueFamilyProperties> families(nFamilies);
@@ -161,66 +164,75 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface) {
     }
 
     if (best == VK_NULL_HANDLE) {
-        throw std::runtime_error("No suitable Vulkan device found");
+        throw std::runtime_error(preferred.empty() ? std::string("No suitable Vulkan device found")
+                                                   : "No suitable Vulkan device matching '" + preferred + "'");
     }
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(best, &props);
-    std::cerr << "[device] using " << props.deviceName << std::endl;
     return best;
 }
 
 } // namespace
 
-VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
-    const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
-    void *pUserData) {
-    (void)messageType;
-    (void)pUserData;
-    // Select prefix depending on flags passed to the callback
-    std::string prefix;
+namespace {
 
-    if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-        prefix = "VERBOSE: ";
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-        prefix = "INFO: ";
-    } else if (messageSeverity &
-               VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        prefix = "WARNING: ";
-    } else if (messageSeverity &
-               VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        prefix = "ERROR: ";
-    }
-
-    // Display message to default output (console/logcat)
-    std::stringstream debugMessage;
-    debugMessage << prefix << "[" << pCallbackData->messageIdNumber << "]["
-                 << pCallbackData->pMessageIdName
-                 << "] : " << pCallbackData->pMessage;
-
-#if defined(__ANDROID__)
-    if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        LOGE("%s", debugMessage.str().c_str());
+VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                                           VkDebugUtilsMessageTypeFlagsEXT type,
+                                                           const VkDebugUtilsMessengerCallbackDataEXT *data,
+                                                           void *userData) {
+    auto *counters = static_cast<phox::vk::ValidationCounters *>(userData);
+    const char *id = data->pMessageIdName != nullptr ? data->pMessageIdName : "";
+    // GENERAL messages come from the loader (e.g. an ICD on the system that fails to load), not from
+    // validating this program, so they are neither counted nor reported above debug level.
+    const bool fromValidation =
+        (type & (VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)) != 0;
+    if (!fromValidation) {
+        phox::log::debug("[vulkan] {}: {}", id, data->pMessage);
+    } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        counters->errors++;
+        phox::log::error("[vulkan] {}: {}", id, data->pMessage);
+    } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+        counters->warnings++;
+        phox::log::warn("[vulkan] {}: {}", id, data->pMessage);
     } else {
-        LOGD("%s", debugMessage.str().c_str());
+        phox::log::debug("[vulkan] {}: {}", id, data->pMessage);
     }
-#else
-    if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        std::cerr << debugMessage.str() << "\n";
-    } else {
-        std::cout << debugMessage.str() << "\n";
-    }
-    fflush(stdout);
-#endif
-
-    // The return value of this callback controls whether the Vulkan call that
-    // caused the validation message will be aborted or not We return VK_FALSE
-    // as we DON'T want Vulkan calls that cause a validation message to abort If
-    // you instead want to have calls abort, pass in VK_TRUE and the function
-    // will return VK_ERROR_VALIDATION_FAILED_EXT
-    return VK_FALSE;
+    return VK_FALSE; // never abort the call that triggered the message
 }
+
+VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo(phox::vk::ValidationCounters *counters) {
+    VkDebugUtilsMessengerCreateInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    if (phox::log::level() <= phox::log::Level::Debug) {
+        info.messageSeverity |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT; // e.g. the layer's list of enabled checks
+    }
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = debugUtilsMessengerCallback;
+    info.pUserData = counters;
+    return info;
+}
+
+bool hasInstanceLayer(const char *name) {
+    uint32_t count = 0;
+    vkEnumerateInstanceLayerProperties(&count, nullptr);
+    std::vector<VkLayerProperties> layers(count);
+    vkEnumerateInstanceLayerProperties(&count, layers.data());
+    return std::any_of(layers.begin(), layers.end(),
+                       [&](const VkLayerProperties &l) { return std::strcmp(l.layerName, name) == 0; });
+}
+
+bool layerHasExtension(const char *layer, const char *extension) {
+    uint32_t count = 0;
+    vkEnumerateInstanceExtensionProperties(layer, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    vkEnumerateInstanceExtensionProperties(layer, &count, extensions.data());
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [&](const VkExtensionProperties &e) { return std::strcmp(e.extensionName, extension) == 0; });
+}
+
+constexpr const char *kValidationLayer = "VK_LAYER_KHRONOS_validation";
+
+} // namespace
 
 namespace phox {
 
@@ -228,46 +240,53 @@ namespace vk {
 
 Renderer::Renderer() { }
 
-void Renderer::initialize(bool debug, Window *window) {
-    m_window = window;
-    std::cerr << "[init] starting renderer initialization" << std::endl;
-    m_enableValidationLayers = debug;
+void Renderer::initialize(const RendererConfig &config) {
+    m_config = config;
+    m_window = config.window;
+    if (m_config.preferredDevice.empty()) {
+        if (const char *env = std::getenv("PHOX_DEVICE")) {
+            m_config.preferredDevice = env;
+        }
+    }
+    if (m_config.debug) {
+        log::setLevel(log::Level::Debug);
+    }
     m_useFallback = false;
 
     try {
-        std::cerr << "[init] initializing Vulkan loader" << std::endl;
         if (volkInitialize() != VK_SUCCESS) {
             throw std::runtime_error("Volk is unavailable in this environment");
         }
-
         createInstance();
-        std::cerr << "[init] instance created" << std::endl;
         volkLoadInstance(m_instance);
-
         if (m_enableValidationLayers) {
-            std::cerr << "[init] setting up debug messenger" << std::endl;
             setupDebugMessenger();
         }
-
-        std::cerr << "[init] creating surface" << std::endl;
         createSurface();
-        std::cerr << "[init] creating logical device" << std::endl;
         createLogicalDevice();
-
         if (m_device && m_device->isInitialized()) {
-            std::cerr << "[init] initializing swapchain and pipeline" << std::endl;
             createSwapchain();
             createPipeline();
         }
-
         m_initialized = true;
-        std::cerr << "[init] renderer initialized" << std::endl;
+        log::info("renderer initialized on {}{}", m_deviceName, m_enableValidationLayers ? " (validation on)" : "");
     } catch (const std::exception &e) {
-        std::cerr << "[init] Vulkan initialization failed, using software fallback renderer: "
-                  << e.what() << std::endl;
+        log::warn("Vulkan initialization failed, using the software fallback renderer: {}", e.what());
         m_useFallback = true;
         m_initialized = true;
     }
+}
+
+RendererInfo Renderer::info() const {
+    RendererInfo result;
+    if (m_initialized) {
+        result.backend = m_useFallback ? RendererBackend::Software : RendererBackend::Vulkan;
+    }
+    result.deviceName = m_useFallback ? "software rasterizer" : m_deviceName;
+    result.validation = m_enableValidationLayers;
+    result.validationErrors = m_validationCounters.errors.load();
+    result.validationWarnings = m_validationCounters.warnings.load();
+    return result;
 }
 
 void Renderer::cleanup() {
@@ -338,9 +357,8 @@ void Renderer::render(const Scene &scene) {
         }
     }
     // Windowed frames match the swapchain; headless frames are a fixed size.
-    const uint32_t width = windowed ? m_swapchain->extent().width : 640;
-    const uint32_t height = windowed ? m_swapchain->extent().height : 480;
-    if (m_enableValidationLayers) std::cout << "[render] starting triangle render" << std::endl;
+    const uint32_t width = windowed ? m_swapchain->extent().width : m_config.headlessExtent.width;
+    const uint32_t height = windowed ? m_swapchain->extent().height : m_config.headlessExtent.height;
 
     // Flatten the scene into one vertex stream. Material albedo comes from the
     // first object (a single push constant is used for the whole draw).
@@ -383,13 +401,11 @@ void Renderer::render(const Scene &scene) {
         }
     }
 
-    if (m_enableValidationLayers) std::cout << "[render] allocating vertex buffer" << std::endl;
     auto vertexBuffer = m_device->allocateBuffer(sizeof(SimpleVertex) * vertices.size(), MemoryLocation::Host);
     auto* vertexBufferVk = dynamic_cast<vk::Buffer*>(vertexBuffer.get());
     if (vertexBufferVk == nullptr) {
         throw std::runtime_error("Failed to create Vulkan vertex buffer");
     }
-    if (m_enableValidationLayers) std::cout << "[render] copying vertex data" << std::endl;
     std::memcpy(vertexBufferVk->map(), vertices.data(), sizeof(SimpleVertex) * vertices.size());
     vertexBufferVk->unmap();
 
@@ -402,13 +418,11 @@ void Renderer::render(const Scene &scene) {
         0.0f, 0.0f, 0.0f, 1.0f,
     };
 
-    if (m_enableValidationLayers) std::cout << "[render] allocating uniform buffer" << std::endl;
     auto uniformBuffer = m_device->allocateBuffer(sizeof(CameraUniformBuffer), MemoryLocation::Host);
     auto* uniformBufferVk = dynamic_cast<vk::Buffer*>(uniformBuffer.get());
     if (uniformBufferVk == nullptr) {
         throw std::runtime_error("Failed to create Vulkan uniform buffer");
     }
-    if (m_enableValidationLayers) std::cout << "[render] copying uniform data" << std::endl;
     std::memcpy(uniformBufferVk->map(), &cameraUniform, sizeof(CameraUniformBuffer));
     uniformBufferVk->unmap();
     DeviceIdleGuard idleGuard{*m_device};
@@ -459,7 +473,6 @@ void Renderer::render(const Scene &scene) {
     poolInfo.queueFamilyIndex = m_device->graphicsQueueFamilyIndex();
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
-    if (m_enableValidationLayers) std::cout << "[render] creating command pool" << std::endl;
     if (m_device->table().vkCreateCommandPool(m_device->handle(), &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create command pool");
     }
@@ -609,7 +622,6 @@ void Renderer::render(const Scene &scene) {
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = &res.renderFinished;
     }
-    if (m_enableValidationLayers) std::cout << "[render] submitting frame" << std::endl;
     if (m_device->table().vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit command buffer");
     }
@@ -626,26 +638,26 @@ void Renderer::render(const Scene &scene) {
 
     void *mapped = nullptr;
     vmaMapMemory(m_device->allocator(), res.stagingAllocation, &mapped);
-    std::filesystem::create_directories(kOutputPath.parent_path());
-    std::ofstream ppm(kOutputPath, std::ios::binary);
-    ppm << "P6\n" << width << " " << height << "\n255\n";
-    const auto *pixels = static_cast<const unsigned char *>(mapped);
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            const std::size_t idx = (static_cast<std::size_t>(y) * width + x) * 4;
-            ppm.write(reinterpret_cast<const char *>(pixels + idx), 3);
-        }
-    }
+    vmaInvalidateAllocation(m_device->allocator(), res.stagingAllocation, 0, VK_WHOLE_SIZE);
+    const auto *pixels = static_cast<const uint8_t *>(mapped);
+    m_lastFrame.width = width;
+    m_lastFrame.height = height;
+    m_lastFrame.rgba.assign(pixels, pixels + static_cast<std::size_t>(width) * height * 4);
     vmaUnmapMemory(m_device->allocator(), res.stagingAllocation);
-
-    std::cout << "Rendered " << scene.objectCount() << " object(s) and "
-              << totalTriangles << " triangle(s)." << std::endl;
-    std::cout << "Wrote render output to " << kOutputPath.string() << std::endl;
+    log::debug("rendered {} object(s), {} triangle(s)", scene.objectCount(), totalTriangles);
 }
 
 void Renderer::renderFallback(const Scene &scene) {
-    constexpr uint32_t width = 640;
-    constexpr uint32_t height = 480;
+    if (m_window != nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            log::warn("the software fallback cannot present to a window; frames are not shown");
+            warned = true;
+        }
+        return;
+    }
+    const uint32_t width = m_config.headlessExtent.width;
+    const uint32_t height = m_config.headlessExtent.height;
     // Same clear colour as the GPU path (0.1, 0.2, 0.3) so both backends produce the same image.
     std::vector<std::array<uint8_t, 4>> pixels(width * height, {26, 51, 76, 0xff});
 
@@ -696,16 +708,14 @@ void Renderer::renderFallback(const Scene &scene) {
         }
     }
 
-    writePpm(kOutputPath, width, height, pixels);
-    std::cout << "[render] wrote fallback triangle image to " << kOutputPath.string() << "" << std::endl;
+    m_lastFrame.width = width;
+    m_lastFrame.height = height;
+    m_lastFrame.rgba.resize(pixels.size() * 4);
+    std::memcpy(m_lastFrame.rgba.data(), pixels.data(), m_lastFrame.rgba.size());
 }
 
 void Renderer::createInstance() {
-    std::cerr << "[instance] creating Vulkan instance" << std::endl;
-    std::cerr.flush();
-    VkApplicationInfo appInfo = {};
-    std::cerr << "[instance] app info initialized" << std::endl;
-    std::cerr.flush();
+    VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "Phox";
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
@@ -713,18 +723,37 @@ void Renderer::createInstance() {
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.apiVersion = VK_API_VERSION_1_2;
 
-    std::vector<const char *> layers;
-    std::cerr << "[instance] setup layers" << std::endl;
-    std::cerr.flush();
-    if (m_enableValidationLayers) {
-        layers.push_back("VK_LAYER_KHRONOS_validation");
+    m_enableValidationLayers = m_config.debug;
+    if (m_enableValidationLayers && !hasInstanceLayer(kValidationLayer)) {
+        log::warn("validation requested but {} is not installed; continuing without it", kValidationLayer);
+        m_enableValidationLayers = false;
     }
 
+    std::vector<const char *> layers;
     std::vector<const char *> extensions;
-    std::cerr << "[instance] setup extensions" << std::endl;
-    std::cerr.flush();
+    const void *next = nullptr;
+
+    // Chained into instance creation so messages from vkCreateInstance itself are caught too.
+    VkDebugUtilsMessengerCreateInfoEXT messengerInfo = messengerCreateInfo(&m_validationCounters);
+    const VkBool32 enabled = VK_TRUE;
+    const VkLayerSettingEXT syncValidation{kValidationLayer, "validate_sync", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1,
+                                           &enabled};
+    VkLayerSettingsCreateInfoEXT layerSettings{};
     if (m_enableValidationLayers) {
+        layers.push_back(kValidationLayer);
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        next = &messengerInfo;
+        if (layerHasExtension(kValidationLayer, VK_EXT_LAYER_SETTINGS_EXTENSION_NAME)) {
+            extensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+            layerSettings.sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT;
+            layerSettings.pNext = next;
+            layerSettings.settingCount = 1;
+            layerSettings.pSettings = &syncValidation;
+            next = &layerSettings;
+        } else {
+            log::warn("the validation layer lacks {}; synchronization validation stays off",
+                      VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+        }
     }
 
     // Surface extensions come from the window; headless needs none.
@@ -736,42 +765,29 @@ void Renderer::createInstance() {
         }
     }
 
-    VkInstanceCreateInfo createInfo = {};
-    std::cerr << "[instance] create info prepared" << std::endl;
-    std::cerr.flush();
+    VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pNext = next;
     createInfo.pApplicationInfo = &appInfo;
     createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
     createInfo.ppEnabledLayerNames = layers.data();
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
 
-    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
-    std::cerr << "[instance] vkCreateInstance result=" << result << std::endl;
-    std::cerr.flush();
+    const VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
     if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create instance!");
+        throw std::runtime_error("vkCreateInstance failed (VkResult " + std::to_string(result) + ")");
     }
 }
 
 void Renderer::setupDebugMessenger() {
-    VkDebugUtilsMessengerCreateInfoEXT createInfo = {};
-    createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-    createInfo.pfnUserCallback = debugUtilsMessengerCallback;
-
-    vkCreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr,
-                                   &m_debugMessenger);
+    const VkDebugUtilsMessengerCreateInfoEXT createInfo = messengerCreateInfo(&m_validationCounters);
+    if (vkCreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS) {
+        log::warn("failed to create the debug messenger");
+    }
 }
 
 void Renderer::createPipeline() {
-    std::cerr << "[pipeline] loading shaders from " << kShaderDir.string() << std::endl;
     m_vertShader = Shader::fromFile(*m_device, (kShaderDir / "basic.vert.spv").string(), ShaderType::VERTEX);
     m_fragShader = Shader::fromFile(*m_device, (kShaderDir / "basic.frag.spv").string(), ShaderType::FRAGMENT);
 
@@ -783,16 +799,13 @@ void Renderer::createPipeline() {
     }
     pipeline.release();
     m_pipeline.reset(graphics);
-    std::cerr << "[pipeline] graphics pipeline created" << std::endl;
 }
 
 void Renderer::createSurface() {
     m_surface = VK_NULL_HANDLE;
     if (m_window == nullptr) {
-        std::cerr << "[surface] headless (no window)" << std::endl;
         return;
     }
-    std::cerr << "[surface] creating window surface" << std::endl;
     std::uint64_t raw = 0;
     if (!m_window->createVulkanSurface(m_instance, &raw)) {
         throw std::runtime_error("Failed to create window surface");
@@ -823,8 +836,10 @@ void Renderer::recreateSwapchain() {
 }
 
 void Renderer::createLogicalDevice() {
-    std::cerr << "[device] selecting physical device" << std::endl;
-    const VkPhysicalDevice physicalDevice = pickPhysicalDevice(m_instance, m_surface);
+    const VkPhysicalDevice physicalDevice = pickPhysicalDevice(m_instance, m_surface, m_config.preferredDevice);
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    m_deviceName = props.deviceName;
 
     m_device = std::make_unique<Device>();
     m_device->Initialize(m_instance, physicalDevice, m_surface);
