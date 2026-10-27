@@ -41,6 +41,7 @@ public:
     void render(const Scene &scene) override;
     const CpuImage &lastFrame() const override { return m_lastFrame; }
     RendererInfo info() const override;
+    const std::string &frameGraphDot() const override { return m_frameGraphDot; }
 
 private:
     void createInstance();
@@ -82,6 +83,7 @@ private:
     Format m_depthFormat = Format::D32Float;
 
     CpuImage m_lastFrame;
+    std::string m_frameGraphDot;
     std::string m_deviceName;
     ValidationCounters m_validationCounters;
     bool m_validation = false;

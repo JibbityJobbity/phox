@@ -17,8 +17,9 @@
 #include "phox/vulkan/ShaderLibrary.hpp"
 #include "phox/vulkan/Swapchain.hpp"
 #include "phox/vulkan/TransientPool.hpp"
-#include "phox/vulkan/passes/CopyPasses.hpp"
 #include "phox/vulkan/passes/ForwardPass.hpp"
+#include "phox/vulkan/passes/ReadbackPass.hpp"
+#include "phox/vulkan/passes/TonemapPass.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -37,8 +38,10 @@ namespace {
 
 const std::filesystem::path kShaderDir = PHOX_SHADER_DIR;
 
-// The forward pass renders here; headless frames are read back from it, so it is 8-bit RGBA.
-constexpr phox::Format kSceneColorFormat = phox::Format::RGBA8Unorm;
+// The forward pass renders lit colour here; the tonemap pass maps it to the display format.
+constexpr phox::Format kHdrFormat = phox::Format::RGBA16Float;
+// Headless frames are tonemapped into this and read back.
+constexpr phox::Format kHeadlessFormat = phox::Format::RGBA8Unorm;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                            VkDebugUtilsMessageTypeFlagsEXT type,
@@ -347,6 +350,7 @@ void Renderer::recreateSwapchain() {
     m_swapchain = std::make_unique<Swapchain>(*m_device, m_surface, static_cast<std::uint32_t>(width),
                                               static_cast<std::uint32_t>(height), m_swapchain.get());
     m_windowSize = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+    m_pipelines->get(tonemapPipelineDesc(fromVkFormat(m_swapchain->format())));
 
     VkSemaphoreCreateInfo semaphoreInfo{};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -414,31 +418,34 @@ void Renderer::render(const Scene &scene) {
     m_meshes->prepare(view, frame, cmd, m_frameNumber);
 
     // ---- Frame graph -------------------------------------------------------------------------
-    //   forward -> scene color -> blit     -> backbuffer   [windowed]
-    //   forward -> scene color -> readback -> host buffer  [headless]
+    //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
+    //   forward -> hdr -> tonemap -> display -> readback -> host buffer [headless]
     RenderGraph graph(extent);
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
-    const ImageHandle color = graph.createImage("scene color", ImageDesc{RelativeExtent{1.0f}, kSceneColorFormat});
+    const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
-    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, color, depth, *m_meshes, *m_pipelines);
+    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines);
 
     ImageHandle backbuffer;
     if (windowed) {
-        const Format swapFormat = fromVkFormat(m_swapchain->format());
-        backbuffer = graph.importImage(
-            "backbuffer",
-            ImageDesc{extent, swapFormat == Format::Undefined ? Format::BGRA8Unorm : swapFormat},
-            ImageUsage::Undefined, ImageUsage::Present);
-        executor.bindImage(backbuffer, m_swapchain->images().at(imageIndex));
-        addBlitPass(graph, forward.color, backbuffer);
+        // Rendered to directly: the tonemap pass is the swapchain image's only writer.
+        backbuffer = graph.importImage("backbuffer", ImageDesc{extent, fromVkFormat(m_swapchain->format())},
+                                       ImageUsage::Undefined, ImageUsage::Present);
+        executor.bindImage(backbuffer, m_swapchain->images().at(imageIndex), m_swapchain->views().at(imageIndex));
+        addTonemapPass(graph, forward.color, backbuffer, view.toneMapping, *m_pipelines);
     } else {
+        const ImageHandle display = graph.createImage("display", ImageDesc{RelativeExtent{1.0f}, kHeadlessFormat});
+        const ImageHandle tonemapped = addTonemapPass(graph, forward.color, display, view.toneMapping, *m_pipelines);
         // The graph makes the copy visible to the host (final state HostRead); the fence orders the read.
         const BufferHandle readback = graph.importBuffer("readback", BufferDesc{m_readback->size()},
                                                          BufferUsage::Undefined, BufferUsage::HostRead);
         executor.bindBuffer(readback, m_readback->handle());
-        addReadbackPass(graph, forward.color, readback);
+        addReadbackPass(graph, tonemapped, readback);
     }
     graph.compile();
+    if (m_config.captureFrameGraph) {
+        m_frameGraphDot = graph.toDot();
+    }
     graph.execute(executor);
 
     if (table.vkEndCommandBuffer(cmd) != VK_SUCCESS) {
@@ -592,7 +599,8 @@ void Renderer::createPipelines() {
     m_pipelines = std::make_unique<PipelineCache>(*m_device, *m_shaders);
     // Build the main pipeline now, so missing or broken shaders fail initialization (and select the
     // software fallback) instead of the first frame.
-    m_pipelines->get(forwardPipelineDesc(kSceneColorFormat, m_depthFormat));
+    m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat));
+    m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
 }
 
 void Renderer::createSurface() {

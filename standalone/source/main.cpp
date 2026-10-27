@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -16,6 +17,13 @@
 using namespace phox;
 
 namespace {
+
+ToneMapOperator parseToneMap(const std::string &name) {
+  if (name == "clamp") return ToneMapOperator::Clamp;
+  if (name == "reinhard") return ToneMapOperator::Reinhard;
+  if (name == "aces") return ToneMapOperator::Aces;
+  throw std::invalid_argument("--tonemap expects clamp, reinhard or aces");
+}
 
 Extent2D parseSize(const std::string &text) {
   unsigned width = 0, height = 0;
@@ -40,6 +48,9 @@ int main(int argc, char **argv) {
     ("output", "headless: where to write the image (default build/rendered_<scene>.ppm)", cxxopts::value<std::string>())
     ("debug", "enable the Vulkan validation layer and debug logging")
     ("device", "use the GPU whose name contains this text", cxxopts::value<std::string>())
+    ("tonemap", "tone mapping: clamp, reinhard or aces", cxxopts::value<std::string>()->default_value("clamp"))
+    ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
+    ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
     ("h,help", "show this help");
   // clang-format on
 
@@ -58,6 +69,9 @@ int main(int argc, char **argv) {
       sample = makeSampleScene(args["scene"].as<std::string>());
     }
 
+    sample.scene.toneMapping.op = parseToneMap(args["tonemap"].as<std::string>());
+    sample.scene.toneMapping.exposure = args["exposure"].as<float>();
+
     // Declared before the renderer so it is destroyed after it.
     std::unique_ptr<Window> window;
     if (args.count("window")) {
@@ -71,6 +85,21 @@ int main(int argc, char **argv) {
     if (args.count("device")) {
       config.preferredDevice = args["device"].as<std::string>();
     }
+    config.captureFrameGraph = args.count("dump-graph") > 0;
+    // Writes the graph once, after the first frame that produced one.
+    bool graphWritten = false;
+    const auto dumpGraph = [&](const Renderer &r) {
+      if (graphWritten || !config.captureFrameGraph || r.frameGraphDot().empty()) {
+        return;
+      }
+      const std::filesystem::path path = args["dump-graph"].as<std::string>();
+      if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path());
+      }
+      std::ofstream(path) << r.frameGraphDot();
+      std::cout << "Wrote the frame graph to " << path.string() << std::endl;
+      graphWritten = true;
+    };
     std::unique_ptr<Renderer> renderer = Renderer::Create(RendererType::Vulkan);
     renderer->initialize(config);
 
@@ -83,6 +112,7 @@ int main(int argc, char **argv) {
         const float seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
         sample.animate(sample.scene, seconds);
         renderer->render(sample.scene);
+        dumpGraph(*renderer);
         if (maxFrames > 0 && ++frames >= maxFrames) {
           break;
         }
@@ -92,6 +122,7 @@ int main(int argc, char **argv) {
     } else {
       sample.animate(sample.scene, args["time"].as<float>());
       renderer->render(sample.scene);
+      dumpGraph(*renderer);
       const std::string output = args.count("output") ? args["output"].as<std::string>()
                                                       : "build/rendered_" + sample.name + ".ppm";
       writePpm(output, renderer->lastFrame());

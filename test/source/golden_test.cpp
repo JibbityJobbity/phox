@@ -1,7 +1,8 @@
 // Renders known scenes headless and compares them with the images in test/golden/.
 //
 // Environment:
-//   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing
+//   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing; a
+//                         comma-separated list of case names updates only those
 //   PHOX_VALIDATION=1     run with the validation layer (incl. synchronization) and fail on any message
 //   PHOX_REQUIRE_GPU=1    fail instead of skipping when no Vulkan device is available
 //   PHOX_DEVICE=<name>    render on the device whose name contains <name>, e.g. "llvmpipe"
@@ -35,6 +36,19 @@ constexpr double kMaxFractionOverTolerance = 0.005;
 // validation) before the last frame is compared.
 constexpr int kFramesPerCase = 3;
 
+// Whether PHOX_UPDATE_GOLDEN asks for case @p name to be rewritten.
+bool updateRequested(const std::string &name) {
+    const char *value = std::getenv("PHOX_UPDATE_GOLDEN");
+    if (value == nullptr || *value == '\0' || std::strcmp(value, "0") == 0) {
+        return false;
+    }
+    if (std::strcmp(value, "1") == 0) {
+        return true;
+    }
+    const std::string list = std::string(",") + value + ",";
+    return list.find("," + name + ",") != std::string::npos;
+}
+
 bool envFlag(const char *name) {
     const char *value = std::getenv(name);
     return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
@@ -44,18 +58,19 @@ struct GoldenCase {
     std::string name;
     std::string scene;
     float time; ///< animation time the scene is posed at
+    phox::ToneMapping toneMapping{};
 };
 
 const std::vector<GoldenCase> kCases = {
     {"triangle", "triangle", 0.0f},
     {"triangle_turned", "triangle", 2.0f}, // past 90 degrees: the back face, lit from behind
     {"cubes", "cubes", 0.7f},
+    {"cubes_aces", "cubes", 0.7f, {phox::ToneMapOperator::Aces, 1.6f}},
 };
 
 } // namespace
 
 int main() {
-    const bool update = envFlag("PHOX_UPDATE_GOLDEN");
     const bool validation = envFlag("PHOX_VALIDATION");
     const std::filesystem::path goldenDir = PHOX_GOLDEN_DIR;
 
@@ -80,13 +95,14 @@ int main() {
     for (const GoldenCase &c : kCases) {
         phox::SampleScene sample = phox::makeSampleScene(c.scene);
         sample.animate(sample.scene, c.time);
+        sample.scene.toneMapping = c.toneMapping;
         for (int i = 0; i < kFramesPerCase; ++i) {
             renderer->render(sample.scene);
         }
         const phox::CpuImage &actual = renderer->lastFrame();
         const std::filesystem::path golden = goldenDir / (c.name + ".ppm");
 
-        if (update) {
+        if (updateRequested(c.name)) {
             phox::writePpm(golden, actual);
             std::cout << "updated " << golden.string() << std::endl;
             continue;

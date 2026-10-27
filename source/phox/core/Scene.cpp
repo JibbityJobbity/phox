@@ -142,6 +142,21 @@ Mesh Mesh::plane(float size) {
                 {0, 1, 2, 0, 2, 3});
 }
 
+vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {
+    vec3 c = color * mapping.exposure;
+    switch (mapping.op) {
+    case ToneMapOperator::Clamp:
+        break;
+    case ToneMapOperator::Reinhard:
+        c = c / (vec3(1.0f) + c);
+        break;
+    case ToneMapOperator::Aces:
+        c = (c * (2.51f * c + 0.03f)) / (c * (2.43f * c + 0.59f) + 0.14f);
+        break;
+    }
+    return glm::clamp(c, vec3(0.0f), vec3(1.0f));
+}
+
 mat4 Transform::matrix() const {
     return glm::translate(mat4(1.0f), position) * glm::mat4_cast(rotation) * glm::scale(mat4(1.0f), scale);
 }

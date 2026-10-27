@@ -106,6 +106,21 @@ struct DirectionalLight {
     float ambient = 0.25f; ///< fraction of the albedo that is lit regardless of direction
 };
 
+enum class ToneMapOperator : std::uint8_t {
+    Clamp,    ///< exposure, then clamp to [0, 1]; colours already in range pass through unchanged
+    Reinhard, ///< c / (1 + c)
+    Aces,     ///< Narkowicz's fit of the ACES filmic curve
+};
+
+/// How the renderer maps scene colours (which may exceed 1) to the display range.
+struct ToneMapping {
+    ToneMapOperator op = ToneMapOperator::Clamp;
+    float exposure = 1.0f; ///< colours are multiplied by this first
+};
+
+/// Applies @p mapping to a linear colour. The tonemap shader does the same on the GPU.
+vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping);
+
 /// What to draw and how to look at it. Plain data: renderers read it and never keep references past a
 /// render() call.
 class Scene {
@@ -123,6 +138,7 @@ public:
     const DirectionalLight &light() const { return m_light; }
 
     vec4 clearColor{0.1f, 0.2f, 0.3f, 1.0f};
+    ToneMapping toneMapping;
 
 private:
     std::vector<std::unique_ptr<Object>> m_objects;

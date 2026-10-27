@@ -3,6 +3,8 @@
 
 #include "phox/Math.hpp"
 
+#include <cstdint>
+
 /// C++ mirrors of the data blocks declared in shaders/common.glsl. Keep the two in sync.
 namespace phox::vk {
 
@@ -25,6 +27,13 @@ struct DrawPushConstants {
     mat4 model{1.0f};
 };
 static_assert(sizeof(DrawPushConstants) == 80, "must match DrawPushConstants in shaders/common.glsl");
+
+/// Push constants of the tonemap pass (shaders/tonemap.frag), fragment stage.
+struct TonemapPushConstants {
+    float exposure = 1.0f;
+    std::uint32_t op = 0; ///< ToneMapOperator
+};
+static_assert(sizeof(TonemapPushConstants) == 8, "must match shaders/tonemap.frag");
 
 } // namespace phox::vk
 

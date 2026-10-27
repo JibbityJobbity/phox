@@ -26,6 +26,8 @@ public:
     VkFormat format() const { return m_format; }
     VkExtent2D extent() const { return m_extent; }
     const std::vector<VkImage>& images() const { return m_images; }
+    /// A colour view of each image, for rendering to it directly.
+    const std::vector<VkImageView>& views() const { return m_views; }
 
     /// Acquires the next image, signalling @p signal when it is ready.
     /// @return false if the swapchain is out of date and must be recreated (nothing acquired).
@@ -41,6 +43,7 @@ private:
     VkFormat m_format = VK_FORMAT_UNDEFINED;
     VkExtent2D m_extent{};
     std::vector<VkImage> m_images;
+    std::vector<VkImageView> m_views;
 };
 
 } // namespace vk

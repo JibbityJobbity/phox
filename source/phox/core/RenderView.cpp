@@ -35,6 +35,7 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
     view.lightColor = light.color;
     view.ambient = light.ambient;
     view.clearColor = scene.clearColor;
+    view.toneMapping = scene.toneMapping;
 
     const vec3 forward = camera.forward();
     for (const auto &object : scene.objects()) {

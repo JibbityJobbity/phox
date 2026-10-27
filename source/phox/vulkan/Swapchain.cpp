@@ -17,9 +17,6 @@ Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint3
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps) != VK_SUCCESS) {
         throw std::runtime_error("Failed to query surface capabilities");
     }
-    if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
-        throw std::runtime_error("Surface does not support TRANSFER_DST swapchain images");
-    }
 
     uint32_t formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &formatCount, nullptr);
@@ -29,22 +26,24 @@ Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint3
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &formatCount, formats.data());
 
-    // Prefer a UNORM format: frames are blitted from an RGBA8_UNORM image, and an sRGB target
-    // would re-encode the colours.
-    VkSurfaceFormatKHR chosen = formats[0];
-    for (const auto &f : formats) {
-        if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
-            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-            chosen = f;
-            break;
+    // The tonemap pass writes display values itself, so prefer UNORM (an sRGB format would encode them
+    // a second time); accept the sRGB 8-bit formats otherwise. Phox has names only for these.
+    const VkFormat preferred[] = {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB,
+                                  VK_FORMAT_R8G8B8A8_SRGB};
+    const VkSurfaceFormatKHR *chosenPtr = nullptr;
+    for (VkFormat want : preferred) {
+        for (const auto &f : formats) {
+            if (f.format == want && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                chosenPtr = &f;
+                break;
+            }
         }
+        if (chosenPtr != nullptr) break;
     }
-
-    VkFormatProperties formatProps{};
-    vkGetPhysicalDeviceFormatProperties(physicalDevice, chosen.format, &formatProps);
-    if ((formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) == 0) {
-        throw std::runtime_error("Swapchain format cannot be a blit destination");
+    if (chosenPtr == nullptr) {
+        throw std::runtime_error("the surface offers no 8-bit RGBA/BGRA format");
     }
+    const VkSurfaceFormatKHR chosen = *chosenPtr;
 
     // FIFO is the only present mode every implementation must support.
     const VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -80,7 +79,7 @@ Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint3
     createInfo.imageColorSpace = chosen.colorSpace;
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (queueFamilies[0] != queueFamilies[1]) {
         createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         createInfo.queueFamilyIndexCount = 2;
@@ -106,9 +105,30 @@ Swapchain::Swapchain(Device &device, VkSurfaceKHR surface, uint32_t width, uint3
 
     m_format = chosen.format;
     m_extent = extent;
+
+    for (VkImage image : m_images) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = m_format;
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageView view = VK_NULL_HANDLE;
+        if (table.vkCreateImageView(m_device.handle(), &viewInfo, nullptr, &view) != VK_SUCCESS) {
+            for (VkImageView created : m_views) table.vkDestroyImageView(m_device.handle(), created, nullptr);
+            table.vkDestroySwapchainKHR(m_device.handle(), m_swapchain, nullptr);
+            throw std::runtime_error("failed to create a swapchain image view");
+        }
+        m_views.push_back(view);
+    }
 }
 
-Swapchain::~Swapchain() { m_device.table().vkDestroySwapchainKHR(m_device.handle(), m_swapchain, nullptr); }
+Swapchain::~Swapchain() {
+    for (VkImageView view : m_views) {
+        m_device.table().vkDestroyImageView(m_device.handle(), view, nullptr);
+    }
+    m_device.table().vkDestroySwapchainKHR(m_device.handle(), m_swapchain, nullptr);
+}
 
 bool Swapchain::acquireNextImage(VkSemaphore signal, uint32_t &imageIndex) {
     const VkResult result = m_device.table().vkAcquireNextImageKHR(

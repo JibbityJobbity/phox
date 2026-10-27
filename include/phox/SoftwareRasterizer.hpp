@@ -6,7 +6,7 @@
 
 namespace phox {
 
-/// Renders a view on the CPU with the same projection, depth test and lighting as the GPU forward pass.
+/// Renders a view on the CPU with the same projection, depth test, lighting and tone mapping as the GPU.
 /// It exists so a frame can still be produced when no Vulkan device is available; it does no clipping
 /// (triangles crossing the near plane are skipped) and follows the GPU only approximately on edges.
 CpuImage rasterize(const RenderView &view);

@@ -23,8 +23,9 @@ CpuImage rasterize(const RenderView &view) {
     image.width = width;
     image.height = height;
     image.rgba.resize(static_cast<std::size_t>(width) * height * 4);
-    const std::array<std::uint8_t, 4> clear{toUnorm8(view.clearColor.r), toUnorm8(view.clearColor.g),
-                                            toUnorm8(view.clearColor.b), toUnorm8(view.clearColor.a)};
+    // The GPU tonemaps the whole HDR image, background included, and writes opaque alpha.
+    const vec3 background = applyToneMapping(vec3(view.clearColor), view.toneMapping);
+    const std::array<std::uint8_t, 4> clear{toUnorm8(background.r), toUnorm8(background.g), toUnorm8(background.b), 255};
     for (std::size_t i = 0; i < image.rgba.size(); i += 4) {
         std::copy(clear.begin(), clear.end(), image.rgba.begin() + static_cast<std::ptrdiff_t>(i));
     }
@@ -65,9 +66,10 @@ CpuImage rasterize(const RenderView &view) {
                 normal = -normal; // back face: light it like the GPU's two-sided shading
             }
             const float diffuse = std::max(glm::dot(normal, view.lightDirection), 0.0f);
-            const vec3 lit = vec3(draw.material->albedo) * view.lightColor * (view.ambient + (1.0f - view.ambient) * diffuse);
-            const std::array<std::uint8_t, 4> color{toUnorm8(lit.r), toUnorm8(lit.g), toUnorm8(lit.b),
-                                                    toUnorm8(draw.material->albedo.a)};
+            const vec3 lit = applyToneMapping(
+                vec3(draw.material->albedo) * view.lightColor * (view.ambient + (1.0f - view.ambient) * diffuse),
+                view.toneMapping);
+            const std::array<std::uint8_t, 4> color{toUnorm8(lit.r), toUnorm8(lit.g), toUnorm8(lit.b), 255};
 
             const float minX = std::min({screen[0].x, screen[1].x, screen[2].x});
             const float maxX = std::max({screen[0].x, screen[1].x, screen[2].x});

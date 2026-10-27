@@ -30,6 +30,7 @@ struct RenderView {
     vec3 lightColor{1.0f};
     float ambient = 0.25f;
     vec4 clearColor{0.0f, 0.0f, 0.0f, 1.0f};
+    ToneMapping toneMapping;
     std::vector<DrawItem> draws; ///< visible items, nearest first
     std::size_t culled = 0;      ///< objects skipped because they are outside the view frustum
 };

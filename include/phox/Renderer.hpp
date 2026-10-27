@@ -28,6 +28,8 @@ struct RendererConfig {
     /// Case-insensitive substring of the GPU name to use. Empty means the PHOX_DEVICE environment
     /// variable if set, otherwise the best available device.
     std::string preferredDevice;
+    /// Keep each frame's render graph as Graphviz DOT (frameGraphDot()). Costs a little per frame.
+    bool captureFrameGraph = false;
 };
 
 enum class RendererBackend { None, Vulkan, Software };
@@ -54,6 +56,9 @@ public:
     /// The most recent headless frame. Empty before the first headless frame and when windowed.
     virtual const CpuImage &lastFrame() const = 0;
     virtual RendererInfo info() const = 0;
+    /// The most recent frame's compiled render graph in Graphviz DOT. Empty unless
+    /// RendererConfig::captureFrameGraph is set (and for the software fallback, which has no graph).
+    virtual const std::string &frameGraphDot() const = 0;
 };
 
 }

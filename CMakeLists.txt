@@ -110,8 +110,9 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/VulkanCommon.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/CopyPasses.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/ForwardPass.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/ReadbackPass.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/TonemapPass.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/phox.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/pipeline/Shader.hpp
 )
@@ -146,8 +147,9 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/CopyPasses.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ForwardPass.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ReadbackPass.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/TonemapPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
 
@@ -194,7 +196,7 @@ endif()
 set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
 set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl)
-foreach(shader forward.vert forward.frag)
+foreach(shader forward.vert forward.frag fullscreen.vert tonemap.frag)
   set(spv ${PHOX_SHADER_OUTPUT_DIR}/${shader}.spv)
   add_custom_command(
     OUTPUT ${spv}
