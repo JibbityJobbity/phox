@@ -8,7 +8,7 @@
 namespace phox::vk {
 
 FrameContext::FrameContext(Device &device, std::uint32_t index)
-    : m_device(device), m_arena(device), m_descriptors(device) {
+    : m_device(device), m_arena(device), m_descriptors(device), m_timer(device) {
     const VkDevice dev = device.handle();
     const auto &table = device.table();
 
@@ -64,6 +64,7 @@ void FrameContext::begin() {
     if (table.vkWaitForFences(m_device.handle(), 1, &m_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
         throw std::runtime_error("waiting for a frame fence failed");
     }
+    m_timer.collect();
     m_deferred.flush();
     table.vkResetCommandPool(m_device.handle(), m_commandPool, 0);
     m_arena.reset();

@@ -1,17 +1,20 @@
 #include "phox/vulkan/MeshCache.hpp"
 
 #include "phox/Log.hpp"
+#include "phox/Meshlets.hpp"
 #include "phox/RenderView.hpp"
 #include "phox/vulkan/Buffer.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
+#include "phox/vulkan/ShaderInterface.hpp"
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace phox::vk {
 
-MeshCache::MeshCache(Device &device) : m_device(device) {}
+MeshCache::MeshCache(Device &device, bool meshlets) : m_device(device), m_meshlets(meshlets) {}
 
 MeshCache::~MeshCache() = default;
 
@@ -34,23 +37,42 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
         }
 
         const std::string name = "mesh " + std::to_string(mesh.id());
-        const VkDeviceSize vertexBytes = sizeof(Vertex) * mesh.vertices().size();
-        const VkDeviceSize indexBytes = sizeof(std::uint32_t) * mesh.indices().size();
-        entry.vertices = m_device.makeBuffer({vertexBytes, usageBit(BufferUsage::Vertex) | usageBit(BufferUsage::TransferDst),
-                                              MemoryLocation::DeviceLocal, name + " vertices"});
-        entry.indices = m_device.makeBuffer({indexBytes, usageBit(BufferUsage::Index) | usageBit(BufferUsage::TransferDst),
-                                             MemoryLocation::DeviceLocal, name + " indices"});
-        entry.indexCount = static_cast<std::uint32_t>(mesh.indices().size());
+        const auto upload = [&](const void *data, VkDeviceSize bytes, BufferUsageMask usage, const char *what) {
+            auto buffer = m_device.makeBuffer({bytes, usage | usageBit(BufferUsage::TransferDst), MemoryLocation::DeviceLocal,
+                                               name + " " + what, m_meshlets});
+            const UploadArena::Allocation staging = frame.arena().upload(data, bytes);
+            const VkBufferCopy copy{staging.offset, 0, bytes};
+            table.vkCmdCopyBuffer(cmd, staging.buffer, buffer->handle(), 1, &copy);
+            return buffer;
+        };
+        const std::vector<std::uint32_t> indices = optimizeIndexOrder(mesh);
+        if (m_meshlets) {
+            const MeshletMesh meshlets = buildMeshlets(mesh, indices);
+            const std::uint64_t groups = (meshlets.meshlets.size() + kMeshletTaskGroupSize - 1) / kMeshletTaskGroupSize;
+            if (groups > m_device.meshShaderProperties().maxTaskWorkGroupCount[0]) {
+                throw std::runtime_error(name + " has " + std::to_string(meshlets.meshlets.size()) +
+                                         " meshlets, more than one draw can launch");
+            }
+            entry.vertices = upload(mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size(),
+                                    usageBit(BufferUsage::StorageRead), "vertices");
+            entry.meshlets = upload(meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size(),
+                                    usageBit(BufferUsage::StorageRead), "meshlets");
+            entry.meshletData = upload(meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size(),
+                                       usageBit(BufferUsage::StorageRead), "meshlet data");
+            entry.meshletCount = static_cast<std::uint32_t>(meshlets.meshlets.size());
+            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets)", mesh.id(), mesh.version(),
+                       mesh.triangleCount(), meshlets.meshlets.size());
+        } else {
+            entry.vertices = upload(mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size(),
+                                    usageBit(BufferUsage::Vertex), "vertices");
+            entry.indices = upload(indices.data(), sizeof(std::uint32_t) * indices.size(), usageBit(BufferUsage::Index),
+                                   "indices");
+            entry.indexCount = static_cast<std::uint32_t>(indices.size());
+            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(),
+                       mesh.triangleCount());
+        }
         entry.version = mesh.version();
-
-        const UploadArena::Allocation vertexData = frame.arena().upload(mesh.vertices().data(), vertexBytes);
-        const UploadArena::Allocation indexData = frame.arena().upload(mesh.indices().data(), indexBytes);
-        const VkBufferCopy vertexCopy{vertexData.offset, 0, vertexBytes};
-        const VkBufferCopy indexCopy{indexData.offset, 0, indexBytes};
-        table.vkCmdCopyBuffer(cmd, vertexData.buffer, entry.vertices->handle(), 1, &vertexCopy);
-        table.vkCmdCopyBuffer(cmd, indexData.buffer, entry.indices->handle(), 1, &indexCopy);
         uploaded = true;
-        log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(), mesh.triangleCount());
     }
     if (!uploaded) {
         return;
@@ -59,8 +81,13 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
-    barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT;
+    if (m_meshlets) {
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    } else {
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT;
+    }
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.memoryBarrierCount = 1;

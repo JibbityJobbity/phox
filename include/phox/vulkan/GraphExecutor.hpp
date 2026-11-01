@@ -38,8 +38,8 @@ private:
 };
 
 /// Executes a RenderGraph into one command buffer: synchronization2 barriers batched per pass, dynamic
-/// rendering for graphics passes, and transient images and buffers from a TransientPool. Created per
-/// frame; it owns nothing across frames.
+/// rendering for graphics passes, transient images and buffers from a TransientPool, and a GPU timestamp
+/// pair around each pass (the frame's PassTimer). Created per frame; it owns nothing across frames.
 class GraphExecutor final : public phox::GraphBackend {
 public:
     GraphExecutor(const RenderGraph &graph, Device &device, TransientPool &pool, FrameContext &frame,

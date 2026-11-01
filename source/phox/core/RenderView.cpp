@@ -1,5 +1,7 @@
 #include "phox/RenderView.hpp"
 
+#include "phox/Meshlets.hpp"
+
 #include <algorithm>
 #include <array>
 
@@ -29,6 +31,7 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
     view.view = camera.view();
     view.proj = camera.projection(aspect);
     view.viewProj = view.proj * view.view;
+    view.frustumPlanes = frustumPlanes(view.viewProj);
     view.cameraPosition = camera.position;
     const DirectionalLight &light = scene.light();
     view.lightDirection = glm::length(light.direction) > 0.0f ? -glm::normalize(light.direction) : vec3(0.0f, 0.0f, 1.0f);
@@ -49,7 +52,9 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
             continue;
         }
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
-        view.draws.push_back({mesh, &object->material(), model, glm::dot(center - camera.position, forward)});
+        const bool cullBackFaces = !object->material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
+        view.draws.push_back(
+            {mesh, &object->material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
     }
     // Front to back, so depth testing rejects hidden fragments early. Stable: ties keep scene order.
     std::stable_sort(view.draws.begin(), view.draws.end(),

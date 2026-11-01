@@ -17,6 +17,8 @@ VkShaderStageFlags toVkStages(ShaderStages stages) {
     if (stages & kVertexStage) flags |= VK_SHADER_STAGE_VERTEX_BIT;
     if (stages & kFragmentStage) flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
     if (stages & kComputeStage) flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (stages & kTaskStage) flags |= VK_SHADER_STAGE_TASK_BIT_EXT;
+    if (stages & kMeshStage) flags |= VK_SHADER_STAGE_MESH_BIT_EXT;
     return flags;
 }
 
@@ -112,6 +114,9 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
     frameBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     frameBinding.descriptorCount = 1;
     frameBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (device.meshShaders()) {
+        frameBinding.stageFlags |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    }
     // SetLayout::Texture: the sampler is baked into the layout, so a descriptor write only needs a view.
     VkDescriptorSetLayoutBinding textureBinding{};
     textureBinding.binding = 0;
@@ -183,8 +188,15 @@ VkPipelineLayout PipelineCache::pipelineLayout(const PipelineDesc &desc) {
 }
 
 std::unique_ptr<Pipeline> PipelineCache::create(const PipelineDesc &desc) {
-    if (desc.vertexShader.empty()) {
-        throw std::logic_error("pipeline '" + desc.name + "' has no vertex shader");
+    const bool mesh = !desc.meshShader.empty();
+    if (desc.vertexShader.empty() == !mesh) {
+        throw std::logic_error("pipeline '" + desc.name + "' needs either a vertex shader or a mesh shader");
+    }
+    if (!desc.taskShader.empty() && !mesh) {
+        throw std::logic_error("pipeline '" + desc.name + "' has a task shader but no mesh shader");
+    }
+    if (mesh && !m_device.meshShaders()) {
+        throw std::runtime_error("pipeline '" + desc.name + "' needs mesh shaders, which the device does not have");
     }
     std::vector<VkPipelineShaderStageCreateInfo> stages;
     const auto addStage = [&](const std::string &name, VkShaderStageFlagBits stage) {
@@ -195,7 +207,14 @@ std::unique_ptr<Pipeline> PipelineCache::create(const PipelineDesc &desc) {
         info.pName = "main";
         stages.push_back(info);
     };
-    addStage(desc.vertexShader, VK_SHADER_STAGE_VERTEX_BIT);
+    if (mesh) {
+        if (!desc.taskShader.empty()) {
+            addStage(desc.taskShader, VK_SHADER_STAGE_TASK_BIT_EXT);
+        }
+        addStage(desc.meshShader, VK_SHADER_STAGE_MESH_BIT_EXT);
+    } else {
+        addStage(desc.vertexShader, VK_SHADER_STAGE_VERTEX_BIT);
+    }
     if (!desc.fragmentShader.empty()) {
         addStage(desc.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT);
     }
@@ -273,8 +292,9 @@ std::unique_ptr<Pipeline> PipelineCache::create(const PipelineDesc &desc) {
     info.pNext = &rendering;
     info.stageCount = static_cast<std::uint32_t>(stages.size());
     info.pStages = stages.data();
-    info.pVertexInputState = &vertexInput;
-    info.pInputAssemblyState = &inputAssembly;
+    // Mesh shaders produce primitives themselves: no vertex input or input assembly.
+    info.pVertexInputState = mesh ? nullptr : &vertexInput;
+    info.pInputAssemblyState = mesh ? nullptr : &inputAssembly;
     info.pViewportState = &viewport;
     info.pRasterizationState = &raster;
     info.pMultisampleState = &multisample;

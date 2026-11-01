@@ -7,6 +7,7 @@
 #include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Image.hpp"
 
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -48,6 +49,19 @@ QueueFamilies pickQueueFamilies(VkPhysicalDevice physicalDevice, VkSurfaceKHR su
     return result;
 }
 
+bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char *name) {
+    std::uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, extensions.data());
+    for (const VkExtensionProperties &extension : extensions) {
+        if (std::strcmp(extension.extensionName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
     VmaAllocationCreateInfo info{};
     switch (memory) {
@@ -68,7 +82,8 @@ VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
 
 } // namespace
 
-Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames)
+Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames,
+               bool meshShaders)
     : m_instance(instance), m_physicalDevice(physicalDevice), m_objectNames(objectNames) {
     vkGetPhysicalDeviceProperties(m_physicalDevice, &m_properties);
     const QueueFamilies families = pickQueueFamilies(m_physicalDevice, surface);
@@ -95,14 +110,49 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     }
 
     // Required by Phox (checked when the device is picked): barriers and submits use synchronization2,
-    // and graphics passes use dynamic rendering instead of render pass objects.
+    // and graphics passes use dynamic rendering instead of render pass objects. Buffer device addresses
+    // (which Vulkan 1.3 guarantees) let mesh shaders read mesh buffers through push constants.
+    VkPhysicalDeviceVulkan12Features features12{};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.pNext = &features12;
     features13.synchronization2 = VK_TRUE;
     features13.dynamicRendering = VK_TRUE;
+    // Also guaranteed by 1.3; SPIR-V built for Vulkan 1.3 (the task and mesh shaders) declares workgroup
+    // sizes with LocalSizeId, which needs it.
+    features13.maintenance4 = VK_TRUE;
     VkPhysicalDeviceFeatures2 features{};
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features.pNext = &features13;
+
+    // Optional: task and mesh shaders. Without them the forward pass draws with vertex shaders.
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures{};
+    meshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+    if (meshShaders && hasDeviceExtension(m_physicalDevice, VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        supported.pNext = &meshFeatures;
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supported);
+        m_meshShaders = meshFeatures.taskShader == VK_TRUE && meshFeatures.meshShader == VK_TRUE;
+    }
+    if (m_meshShaders) {
+        // Only what Phox uses: enabling e.g. multiviewMeshShader would require multiview too.
+        meshFeatures = {};
+        meshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+        meshFeatures.taskShader = VK_TRUE;
+        meshFeatures.meshShader = VK_TRUE;
+        features12.pNext = &meshFeatures;
+        extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+        m_meshShaderProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.pNext = &m_meshShaderProperties;
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &properties);
+        m_meshShaderProperties.pNext = nullptr;
+    }
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -154,6 +204,7 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     allocatorInfo.device = m_device;
     allocatorInfo.instance = m_instance;
     allocatorInfo.vulkanApiVersion = PHOX_VULKAN_API_VERSION; // must match the instance
+    allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     allocatorInfo.pVulkanFunctions = &functions;
     if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
         m_table.vkDestroyDevice(m_device, nullptr);
@@ -190,6 +241,9 @@ std::unique_ptr<Buffer> Device::makeBuffer(const BufferCreateInfo &info) {
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = info.size;
     bufferInfo.usage = toVkBufferUsage(info.usage);
+    if (info.deviceAddress) {
+        bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // buffers are only used on the graphics queue
     if (bufferInfo.usage == 0) {
         throw std::logic_error("buffer '" + info.name + "' has no GPU usage");
@@ -203,7 +257,14 @@ std::unique_ptr<Buffer> Device::makeBuffer(const BufferCreateInfo &info) {
         throw std::runtime_error("failed to create buffer '" + info.name + "'");
     }
     setObjectName(VK_OBJECT_TYPE_BUFFER, reinterpret_cast<std::uint64_t>(buffer), info.name);
-    return std::make_unique<Buffer>(*this, buffer, allocation, info.size, allocated.pMappedData);
+    VkDeviceAddress address = 0;
+    if (info.deviceAddress) {
+        VkBufferDeviceAddressInfo addressInfo{};
+        addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        addressInfo.buffer = buffer;
+        address = m_table.vkGetBufferDeviceAddress(m_device, &addressInfo);
+    }
+    return std::make_unique<Buffer>(*this, buffer, allocation, info.size, allocated.pMappedData, address);
 }
 
 std::unique_ptr<Image> Device::makeImage(const ImageCreateInfo &info) {

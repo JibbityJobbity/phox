@@ -6,6 +6,7 @@
 
 #include <cxxopts.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -13,6 +14,8 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace phox;
 
@@ -33,6 +36,42 @@ Extent2D parseSize(const std::string &text) {
   return {width, height};
 }
 
+// Sums GPU pass times over frames, to print their averages.
+class TimingAverages {
+public:
+  void add(const std::vector<PassTiming> &timings) {
+    if (timings.empty()) {
+      return;
+    }
+    for (const PassTiming &timing : timings) {
+      auto it = std::find_if(m_totals.begin(), m_totals.end(), [&](const auto &t) { return t.first == timing.pass; });
+      if (it == m_totals.end()) {
+        m_totals.emplace_back(timing.pass, 0.0);
+        it = std::prev(m_totals.end());
+      }
+      it->second += timing.milliseconds;
+    }
+    ++m_frames;
+  }
+
+  void print() const {
+    if (m_frames == 0) {
+      return;
+    }
+    double total = 0.0;
+    std::cout << "GPU time per frame, average of " << m_frames << " frame(s):";
+    for (const auto &[pass, milliseconds] : m_totals) {
+      std::cout << " " << pass << " " << milliseconds / m_frames << " ms,";
+      total += milliseconds;
+    }
+    std::cout << " total " << total / m_frames << " ms" << std::endl;
+  }
+
+private:
+  std::vector<std::pair<std::string, double>> m_totals;
+  long m_frames = 0;
+};
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -42,7 +81,8 @@ int main(int argc, char **argv) {
     ("scene", "sample scene: triangle or cubes", cxxopts::value<std::string>()->default_value("triangle"))
     ("mesh", "show a model file (OBJ) on a turntable instead of a sample scene", cxxopts::value<std::string>())
     ("window", "present to a window until it is closed")
-    ("frames", "with --window: stop after this many frames", cxxopts::value<long>()->default_value("0"))
+    ("frames", "with --window: stop after this many frames; headless: render this many frames (one image) and "
+               "report average GPU times", cxxopts::value<long>()->default_value("0"))
     ("time", "headless: the animation time to render, in seconds", cxxopts::value<float>()->default_value("0"))
     ("size", "headless: image size", cxxopts::value<std::string>()->default_value("640x480"))
     ("output", "headless: where to write the image (default build/rendered_<scene>.ppm)", cxxopts::value<std::string>())
@@ -50,6 +90,8 @@ int main(int argc, char **argv) {
     ("device", "use the GPU whose name contains this text", cxxopts::value<std::string>())
     ("tonemap", "tone mapping: clamp, reinhard or aces", cxxopts::value<std::string>()->default_value("clamp"))
     ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
+    ("mesh-shaders", "draw with task and mesh shaders where available: on, off, or nocull (no meshlet culling)",
+     cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
     ("h,help", "show this help");
   // clang-format on
@@ -86,6 +128,12 @@ int main(int argc, char **argv) {
       config.preferredDevice = args["device"].as<std::string>();
     }
     config.captureFrameGraph = args.count("dump-graph") > 0;
+    const std::string meshShaders = args["mesh-shaders"].as<std::string>();
+    if (meshShaders != "on" && meshShaders != "off" && meshShaders != "nocull") {
+      throw std::invalid_argument("--mesh-shaders expects on, off or nocull");
+    }
+    config.meshShaders = meshShaders != "off";
+    config.meshletCulling = meshShaders != "nocull";
     // Writes the graph once, after the first frame that produced one.
     bool graphWritten = false;
     const auto dumpGraph = [&](const Renderer &r) {
@@ -102,6 +150,15 @@ int main(int argc, char **argv) {
     };
     std::unique_ptr<Renderer> renderer = Renderer::Create(RendererType::Vulkan);
     renderer->initialize(config);
+    const RendererInfo startInfo = renderer->info();
+    std::cout << "Rendering on " << startInfo.deviceName << " with "
+              << (startInfo.meshShaders ? (config.meshletCulling ? "mesh shaders" : "mesh shaders, no meshlet culling")
+                                        : startInfo.backend == RendererBackend::Software ? "the software rasterizer"
+                                                                                          : "vertex shaders")
+              << std::endl;
+    // The first frames upload meshes and create pooled images, so they are left out of the averages.
+    constexpr long kWarmupFrames = 3;
+    TimingAverages timings;
 
     if (window) {
       const long maxFrames = args["frames"].as<long>();
@@ -113,16 +170,30 @@ int main(int argc, char **argv) {
         sample.animate(sample.scene, seconds);
         renderer->render(sample.scene);
         dumpGraph(*renderer);
-        if (maxFrames > 0 && ++frames >= maxFrames) {
+        if (frames >= kWarmupFrames) {
+          timings.add(renderer->gpuTimings());
+        }
+        if (++frames >= maxFrames && maxFrames > 0) {
           break;
         }
       }
       const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
       std::cout << "Presented " << frames << " frame(s) in " << elapsed << " s" << std::endl;
+      timings.print();
     } else {
+      // Every frame shows the same pose, so the GPU does the same work each time.
       sample.animate(sample.scene, args["time"].as<float>());
-      renderer->render(sample.scene);
+      const long frames = std::max(1L, args["frames"].as<long>());
+      for (long i = 0; i < frames; ++i) {
+        renderer->render(sample.scene);
+        if (i >= kWarmupFrames || frames <= kWarmupFrames) {
+          timings.add(renderer->gpuTimings());
+        }
+      }
       dumpGraph(*renderer);
+      if (frames > 1) {
+        timings.print();
+      }
       const std::string output = args.count("output") ? args["output"].as<std::string>()
                                                       : "build/rendered_" + sample.name + ".ppm";
       writePpm(output, renderer->lastFrame());

@@ -26,6 +26,8 @@ using ShaderStages = std::uint32_t;
 inline constexpr ShaderStages kVertexStage = 1u << 0;
 inline constexpr ShaderStages kFragmentStage = 1u << 1;
 inline constexpr ShaderStages kComputeStage = 1u << 2;
+inline constexpr ShaderStages kTaskStage = 1u << 3;
+inline constexpr ShaderStages kMeshStage = 1u << 4;
 
 struct RasterState {
     CullMode cull = CullMode::None;
@@ -49,15 +51,20 @@ struct PushConstantRange {
 
 /// The descriptor set layouts the renderer defines. A pipeline lists the ones it uses, in set order.
 enum class SetLayout : std::uint8_t {
-    Frame,   ///< binding 0: the per-frame uniform buffer (camera, light), vertex and fragment stages
+    Frame,   ///< binding 0: the per-frame uniform buffer (camera, light), vertex, fragment, task and mesh stages
     Texture, ///< binding 0: one texture with a linear clamp-to-edge sampler, fragment stage
 };
 
 /// Everything that identifies a graphics pipeline, in backend-free terms. Equal descriptions (ignoring
 /// the name) produce the same pipeline, so a backend can cache pipelines by description.
+///
+/// A pipeline either has a vertex shader (with vertex input and topology) or a mesh shader, optionally
+/// fed by a task shader; mesh pipelines have no vertex input, and their topology is set by the shader.
 struct PipelineDesc {
     std::string name;           ///< for debuggers; not part of the pipeline's identity
     std::string vertexShader;   ///< a shader in the shader directory, e.g. "forward.vert"
+    std::string taskShader;     ///< mesh pipelines only; empty: the mesh shader is dispatched directly
+    std::string meshShader;     ///< set instead of vertexShader for a mesh pipeline, e.g. "forward.mesh"
     std::string fragmentShader; ///< empty: no fragment stage (e.g. depth only)
     VertexLayout vertexLayout;  ///< empty: no vertex input (e.g. a full-screen triangle)
     Topology topology = Topology::TriangleList;

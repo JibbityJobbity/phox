@@ -20,6 +20,8 @@ struct SampleScene {
 
 /// "triangle": one triangle spinning about the vertical axis.
 /// "cubes":    coloured cubes on a floor, turning at different rates; one partly hides another.
+/// "tori":     tori on a floor, one cut by the edge of the view: exercises meshlet culling.
+/// "field":    a benchmark: 576 dense tori (37.7 million triangles), many cut by the frustum.
 std::vector<std::string> sampleSceneNames();
 
 /// @throws std::invalid_argument for an unknown name

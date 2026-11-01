@@ -42,13 +42,16 @@ public:
     const CpuImage &lastFrame() const override { return m_lastFrame; }
     RendererInfo info() const override;
     const std::string &frameGraphDot() const override { return m_frameGraphDot; }
+    const std::vector<PassTiming> &gpuTimings() const override { return m_gpuTimings; }
 
 private:
     void createInstance();
     void setupDebugMessenger();
     void createSurface();
     void createDevice();
-    void createPipelines();
+    /// Creates the shader library and pipeline cache and builds the main pipelines. Returns whether the
+    /// meshlet pipelines (task and mesh shaders) could be built as well.
+    bool createPipelines();
     /// Destroys every Vulkan object, waiting for the GPU first. Safe on a partially initialised renderer.
     void releaseVulkan();
 
@@ -84,6 +87,7 @@ private:
 
     CpuImage m_lastFrame;
     std::string m_frameGraphDot;
+    std::vector<PassTiming> m_gpuTimings;
     std::string m_deviceName;
     ValidationCounters m_validationCounters;
     bool m_validation = false;

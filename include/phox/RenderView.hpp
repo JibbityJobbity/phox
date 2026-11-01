@@ -5,6 +5,7 @@
 #include "phox/Resources.hpp"
 #include "phox/Scene.hpp"
 
+#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -16,6 +17,9 @@ struct DrawItem {
     const Material *material = nullptr;
     mat4 model{1.0f};
     float viewDepth = 0.0f; ///< distance of the mesh's bounds centre along the camera's forward axis
+    /// Back faces are culled: the material is single-sided and the transform does not mirror the mesh
+    /// (which would turn its front faces into back faces). Otherwise both faces are drawn.
+    bool cullBackFaces = false;
 };
 
 /// What one frame draws from one camera, worked out from a Scene without any GPU involvement. Draw
@@ -31,6 +35,7 @@ struct RenderView {
     float ambient = 0.25f;
     vec4 clearColor{0.0f, 0.0f, 0.0f, 1.0f};
     ToneMapping toneMapping;
+    std::array<vec4, 6> frustumPlanes{}; ///< world space, from viewProj (see phox::frustumPlanes)
     std::vector<DrawItem> draws; ///< visible items, nearest first
     std::size_t culled = 0;      ///< objects skipped because they are outside the view frustum
 };

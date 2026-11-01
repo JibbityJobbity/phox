@@ -58,6 +58,8 @@ public:
     static Mesh cube(float size = 1.0f);
     /// A square in the XZ plane facing +Y.
     static Mesh plane(float size = 1.0f);
+    /// A torus about the Y axis with @p rings segments around that axis and @p sides around the tube.
+    static Mesh torus(float radius = 1.0f, float tubeRadius = 0.35f, std::uint32_t rings = 48, std::uint32_t sides = 24);
 
 private:
     std::vector<Vertex> m_vertices;
@@ -70,6 +72,9 @@ private:
 struct Material {
     std::string name;
     vec4 albedo{1.0f, 0.2f, 0.4f, 1.0f};
+    /// Both faces of each triangle are drawn (and lit). Turn it off for closed meshes seen from outside:
+    /// their back faces are then culled, and the mesh shading path skips whole meshlets that face away.
+    bool doubleSided = true;
 };
 
 /// Scale, then rotate, then translate.

@@ -3,6 +3,7 @@
 #include "phox/vulkan/Buffer.hpp"
 #include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Device.hpp"
+#include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/Image.hpp"
 #include "phox/vulkan/TransientPool.hpp"
 
@@ -141,7 +142,9 @@ FrameContext &PassContext::frame() const { return m_executor.m_frame; }
 GraphExecutor::GraphExecutor(const RenderGraph &graph, Device &device, TransientPool &pool, FrameContext &frame,
                              std::uint64_t frameNumber, VkCommandBuffer commandBuffer)
     : m_graph(graph), m_device(device), m_pool(pool), m_frame(frame), m_frameNumber(frameNumber),
-      m_commandBuffer(commandBuffer), m_context(*this) {}
+      m_commandBuffer(commandBuffer), m_context(*this) {
+    m_frame.timer().reset(m_commandBuffer);
+}
 
 GraphExecutor::~GraphExecutor() {
     for (ImageSlot &slot : m_images) {
@@ -286,6 +289,7 @@ void GraphExecutor::beginPass(const CompiledPass &pass) {
         label.pLabelName = pass.name.c_str();
         vkCmdBeginDebugUtilsLabelEXT(m_commandBuffer, &label);
     }
+    m_frame.timer().begin(m_commandBuffer, pass.name);
     if (pass.type != PassType::Graphics) {
         return;
     }
@@ -339,6 +343,7 @@ void GraphExecutor::endPass(const CompiledPass &pass) {
     if (pass.type == PassType::Graphics) {
         m_device.table().vkCmdEndRendering(m_commandBuffer);
     }
+    m_frame.timer().end(m_commandBuffer);
     if (m_device.debugUtils()) {
         vkCmdEndDebugUtilsLabelEXT(m_commandBuffer);
     }

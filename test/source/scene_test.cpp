@@ -5,6 +5,7 @@
 #include "phox/Scene.hpp"
 
 #include <cstdlib>
+#include <string>
 #include <iostream>
 
 #define CHECK(cond)                                                                           \
@@ -30,7 +31,11 @@ std::size_t pixelsUnlike(const phox::CpuImage &image, std::array<std::uint8_t, 4
 } // namespace
 
 int main() {
-    CHECK(phox::sampleSceneNames().size() == 2);
+    CHECK(phox::sampleSceneNames().size() == 4);
+    for (const std::string &name : phox::sampleSceneNames()) {
+        CHECK(phox::makeSampleScene(name).scene.objectCount() > 0);
+    }
+    CHECK(phox::makeSampleScene("field").scene.objectCount() == 24 * 24);
     phox::SampleScene cubes = phox::makeSampleScene("cubes");
     CHECK(cubes.scene.objectCount() == 6);
     CHECK(cubes.scene.find("red") != nullptr);
@@ -53,7 +58,16 @@ int main() {
     renderer->initialize(config);
     renderer->render(cubes.scene);
     const phox::CpuImage frame = renderer->lastFrame();
-    std::cout << "rendered on " << renderer->info().deviceName << std::endl;
+    const phox::RendererInfo info = renderer->info();
+    std::cout << "rendered on " << info.deviceName << (info.meshShaders ? " with mesh shaders" : "") << std::endl;
+    // A headless frame is finished when render() returns, so its GPU timings are already in.
+    if (info.backend == phox::RendererBackend::Vulkan && !renderer->gpuTimings().empty()) {
+        CHECK(renderer->gpuTimings().front().pass == "forward");
+        for (const phox::PassTiming &timing : renderer->gpuTimings()) {
+            std::cout << "  " << timing.pass << ": " << timing.milliseconds << " ms" << std::endl;
+            CHECK(timing.milliseconds >= 0.0);
+        }
+    }
     renderer->cleanup();
 
     CHECK(frame.width == 160 && frame.height == 120);

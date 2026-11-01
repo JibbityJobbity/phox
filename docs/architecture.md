@@ -165,20 +165,25 @@ previous one.
 
 ## 5. Pipelines, shaders and descriptors
 
-- `phox::PipelineDesc` (`include/phox/pipeline/PipelineDesc.hpp`): shaders by name, vertex layout, topology,
-  raster, depth and blend state, attachment formats, push constant ranges and the set layouts used. Equal
-  descriptions (ignoring the name) hash equal.
+- `phox::PipelineDesc` (`include/phox/pipeline/PipelineDesc.hpp`): shaders by name (a vertex shader, or a mesh
+  shader with an optional task shader), vertex layout, topology, raster, depth and blend state, attachment
+  formats, push constant ranges and the set layouts used. Equal descriptions (ignoring the name) hash equal.
 - `vk::ShaderLibrary` loads `<name>.spv` from `PHOX_SHADER_DIR` once.
 - `vk::PipelineCache` creates dynamic-rendering pipelines on first request and caches pipeline layouts. It owns
   the fixed set layouts: `Frame` (the per-frame uniform buffer) and `Texture` (a combined image sampler with an
   immutable linear clamp sampler, so a descriptor write needs only a view). The renderer builds its pipelines
   during initialization, so broken shaders select the software fallback instead of failing the first frame.
 - `shaders/common.glsl`, mirrored by `include/phox/vulkan/ShaderInterface.hpp`:
-  - set 0 `FrameUniforms` (256 bytes): view, proj, viewProj, camera position, light direction with the ambient
-    term in w, light colour, resolution;
+  - set 0 `FrameUniforms` (352 bytes): view, proj, viewProj, camera position, light direction with the ambient
+    term in w, light colour, resolution, and the six world-space frustum planes for meshlet culling. Visible
+    to the task and mesh stages too when the device has them;
   - push constants `{vec4 albedo; mat4 model}` (80 bytes, vertex and fragment). The albedo comes first because
     llvmpipe (Mesa 25.1) reads the colour of constant-output fragment shaders from offset 0 on fully covered
-    tiles.
+    tiles;
+  - on the meshlet path, `MeshletDrawPushConstants` (128 bytes, task, mesh and fragment): the same two members,
+    then the camera in object space, the device addresses of the mesh's vertices, meshlets and meshlet data,
+    the meshlet count and the culling flags. Code defining `PHOX_MESHLET_DRAW` gets this block instead, so
+    `forward.frag` serves both paths.
 - `vk::DescriptorAllocator` is per frame: pools reset together and grow when one runs out.
 
 The abstract `phox::Device` creates buffers and images but not pipelines, which the plan had it do: creating a
@@ -188,40 +193,83 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 
 - `Mesh`: indexed `Vertex {position, normal, uv}` with bounds, a never-reused id and a version for caching.
   Built-ins: `triangle`, `cube`, `plane`; `loadMesh()` reads model files through assimp (OBJ in this build).
-- `Object`: name, `shared_ptr<const Mesh>`, `Material {name, albedo}`, `Transform` (scale, rotate, translate).
+- `Object`: name, `shared_ptr<const Mesh>`, `Material {name, albedo, doubleSided}`, `Transform` (scale, rotate,
+  translate). Materials are double-sided by default; single-sided ones have their back faces culled.
 - `Scene`: objects, `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
   clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES).
-- `extractView(scene, extent)` computes the matrices from the target's aspect ratio, culls objects whose
-  bounds lie outside a frustum plane, and sorts the rest front to back.
+- `extractView(scene, extent)` computes the matrices and frustum planes from the target's aspect ratio, culls
+  objects whose bounds lie outside a frustum plane, and sorts the rest front to back. A draw culls back faces
+  when its material is single-sided and its transform does not mirror the mesh (`DrawItem::cullBackFaces`).
 - `SampleScenes` gives the app and the tests the same scenes with deterministic `animate(scene, t)`.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 
-- `addForwardPass(graph, view, frameSet, color, depth, meshes, pipelines)`: clears, then draws each item with
-  per-draw push constants and indexed draws, lit two-sided by the directional light.
+- `addForwardPass(graph, view, frameSet, color, depth, meshes, pipelines, meshletCulling)`: clears, then draws
+  each item with per-draw push constants, lit two-sided by the directional light: indexed draws, or one
+  `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds meshlets (6.1). Two pipelines per path, culling
+  none or back faces, share a layout, so set 0 is bound once.
 - `addTonemapPass(graph, hdr, target, mapping, pipelines)`: a full-screen triangle reading the HDR image with
   `texelFetch`; it writes every pixel, so the target's load op is DontCare.
 - `addReadbackPass(graph, source, buffer)`: copies an 8-bit image into a buffer.
+
+### 6.1 Mesh shading
+
+On devices with `VK_EXT_mesh_shader` (task and mesh shaders) the forward pass draws meshlets; elsewhere, or
+with `RendererConfig::meshShaders` off, it uses the vertex pipeline. Both paths render the same images.
+
+- **Meshlets** (`phox/Meshlets.hpp`, core): `optimizeIndexOrder` reorders a mesh's indices for the vertex
+  cache with meshoptimizer; `buildMeshlets` splits them into meshlets of at most 64 vertices and 124
+  triangles (meshoptimizer, cone weight 0.25), orders each for locality and computes its bounding sphere and
+  normal cone. A `Meshlet` is laid out as the shaders read it (64 bytes). `MeshletMesh::data` holds each
+  meshlet's vertex indices followed by its triangles, packed one per `uint` as three 8-bit local indices, so
+  no 8-bit storage feature is needed.
+- **Buffers**: the meshlet path reads the vertex, meshlet and data buffers through buffer device addresses
+  (Vulkan 1.3 guarantees `bufferDeviceAddress`) in push constants: no descriptor writes per draw.
+- **`forward.task`**: 32 meshlets per workgroup, one per invocation. A meshlet is dropped if its bounding
+  sphere (moved into world space, radius scaled by the transform's largest axis) is outside a frustum plane,
+  or, for back-face-culled draws, if its normal cone faces away from the camera. The cone test runs in object
+  space against the camera transformed by the inverse model matrix: facing is affine-invariant for
+  non-mirroring transforms, so the test is exact under non-uniform scale. The survivors are compacted in
+  meshlet order through shared memory, not atomics, so the draw order, and with it the image, is the same on
+  every run.
+- **`forward.mesh`**: one workgroup of 64 invocations per surviving meshlet; each transforms at most one
+  vertex, with the same expressions as `forward.vert`, and writes at most two triangles.
+- The device enables `maintenance4` as well (also guaranteed by 1.3): SPIR-V built for Vulkan 1.3, which the
+  task and mesh shaders need, declares workgroup sizes with `LocalSizeId`.
+
+Measured on an RTX 3080 (`PhoxSample --scene field --size 1920x1080 --frames 200`: 234 of 576 tori survive
+object culling, 15.3 million triangles), forward pass GPU time: vertex shaders 1.09 to 1.15 ms, mesh shaders
+without meshlet culling 1.07 ms, with it 0.86 ms. Mesh shading on its own is about even with the vertex
+pipeline; the gain is the culling. The three images are identical. Back-facing culling depends on how
+finely a mesh is tessellated: on the benchmark's 65k-triangle torus, about 42% of meshlets face away from a
+typical viewpoint, against 14% for a 4k-triangle one.
 
 ## 7. Upload and caches
 
 - `UploadArena`: one host-visible, persistently mapped buffer per frame context, bump-allocated and reset at
   frame start. A frame that overflows gets extra blocks, merged into one larger block next time.
 - `MeshCache::prepare(view, frame, cmd)` uploads meshes that are new or whose version changed: staging through
-  the arena, `vkCmdCopyBuffer` into device-local buffers, then one TRANSFER to VERTEX_INPUT | INDEX_INPUT
-  barrier. Replaced buffers go to the frame's deletion queue; meshes not drawn for 120 frames are evicted.
+  the arena, `vkCmdCopyBuffer` into device-local buffers, then one barrier from TRANSFER to VERTEX_INPUT |
+  INDEX_INPUT, or to the task and mesh shaders' storage reads for meshlets. The vertex path uploads indices in
+  vertex cache order; the meshlet path uploads meshlets instead (6.1). Replaced buffers go to the frame's
+  deletion queue; meshes not drawn for 120 frames are evicted.
 - `vk::Device::makeBuffer` / `makeImage` are the only callers of VMA (memory: DeviceLocal, Upload, Readback).
 
 ## 8. Fallback, logging and testing
 
 - The software rasterizer (`phox/SoftwareRasterizer.hpp`) renders a `RenderView` with the GPU's projection,
-  depth test, two-sided lighting and tone mapping. The plan expected to drop parity with the GPU; it turned
+  depth test, back-face culling, two-sided lighting with perspective-correct normal interpolation, and tone
+  mapping. The plan expected to drop parity with the GPU; it turned
   out cheap to keep, and the golden test checks it (one unit per channel, apart from a pixel on an edge).
 - `phox::log` writes levelled messages to stderr through fmt; `PHOX_LOG` sets the level. Debug mode turns on
   the validation layer with synchronization validation through `VK_EXT_layer_settings`, and counts its errors
   and warnings in `Renderer::info()`. Loader messages are not counted.
 - Goldens are rendered on lavapipe at 320x240 and compared with a tolerance of 2 per channel on all but 0.5% of
-  pixels; the RTX 3080 matches lavapipe within one unit apart from a pixel on an edge.
+  pixels; the RTX 3080 matches lavapipe within one unit apart from a pixel on an edge. The golden test renders
+  every case with vertex shaders and again with mesh shaders (skipped on devices without them unless
+  `PHOX_REQUIRE_MESH_SHADERS=1`); both must match the same images.
+- `vk::PassTimer` (one per frame context) writes a timestamp pair around each graph pass; the times are read
+  once the frame's fence has signalled and reported by `Renderer::gpuTimings()`.
 
 ## 9. Deviations from the plan
 
@@ -241,18 +289,25 @@ Feature passes are free functions in `phox::vk` that add themselves to a frame's
 
 ```
 include/phox/                 CpuImage, Log, Math, Resources, RenderGraph, RenderView, Scene, Camera, SampleScenes,
-                              MeshLoader, SoftwareRasterizer, Renderer, Device, Buffer, Image, Window
+                              MeshLoader, Meshlets, SoftwareRasterizer, Renderer, Device, Buffer, Image, Window
 include/phox/pipeline/        PipelineDesc, Pipeline, Shader
 include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameContext, UploadArena,
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
-                              ShaderInterface, MeshCache, Conversions, VulkanCommon
+                              ShaderInterface, MeshCache, PassTimer, Conversions, VulkanCommon
 include/phox/vulkan/passes/   ForwardPass, TonemapPass, ReadbackPass
-shaders/                      common.glsl, forward.vert/.frag, fullscreen.vert, tonemap.frag
+shaders/                      common.glsl, forward.vert/.frag/.task/.mesh, fullscreen.vert, tonemap.frag
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
-test/golden/                  triangle, triangle_turned, cubes, cubes_aces
+test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
 ```
 
 ## 11. Next, and where each thing plugs in
+
+- **Occlusion culling of meshlets.** A compute pass builds a depth pyramid from the previous frame's depth
+  (kept by the graph as an imported image); the task shader tests each meshlet's sphere against it. The
+  usual two-phase scheme redraws what was rejected wrongly against the current frame's pyramid. This is
+  where mesh shading gains most in dense, self-occluding scenes.
+- **Meshlet LOD and instancing.** A draw per object pushes 128 bytes; many instances of one mesh would rather
+  read transforms from a buffer, and distant objects want coarser meshlets (meshoptimizer's simplifier).
 
 - **Installable package.** Install the compiled shaders with a runtime lookup (an environment override or a
   path relative to the library), and export or bundle volk and VMA.

@@ -2,6 +2,7 @@
 #define PHOX_VULKAN_FRAME_CONTEXT_HPP
 
 #include "phox/vulkan/DescriptorAllocator.hpp"
+#include "phox/vulkan/PassTimer.hpp"
 #include "phox/vulkan/UploadArena.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
@@ -32,7 +33,7 @@ private:
 };
 
 /// Everything one frame in flight needs: its command buffer, the fence that says the GPU is done with
-/// it, the semaphore for acquiring a swapchain image, and per-frame memory and descriptors.
+/// it, the semaphore for acquiring a swapchain image, per-frame memory and descriptors, and GPU timers.
 /// The renderer cycles through a small ring of these; begin() makes one ready for reuse.
 class FrameContext {
 public:
@@ -41,7 +42,8 @@ public:
     FrameContext(const FrameContext &) = delete;
     FrameContext &operator=(const FrameContext &) = delete;
 
-    /// Waits for this context's previous frame to finish on the GPU, then recycles its resources.
+    /// Waits for this context's previous frame to finish on the GPU, collects its pass timings, then
+    /// recycles its resources.
     void begin();
 
     VkCommandBuffer commandBuffer() const { return m_commandBuffer; }
@@ -51,6 +53,7 @@ public:
     UploadArena &arena() { return m_arena; }
     DescriptorAllocator &descriptors() { return m_descriptors; }
     DeletionQueue &deferred() { return m_deferred; }
+    PassTimer &timer() { return m_timer; }
 
 private:
     Device &m_device;
@@ -61,6 +64,7 @@ private:
     UploadArena m_arena;
     DescriptorAllocator m_descriptors;
     DeletionQueue m_deferred;
+    PassTimer m_timer;
 };
 
 } // namespace phox::vk

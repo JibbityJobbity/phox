@@ -1,5 +1,6 @@
 #include "phox/Scene.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -140,6 +141,36 @@ Mesh Mesh::plane(float size) {
                  {{h, 0.0f, -h}, up, {1.0f, 0.0f}},
                  {{-h, 0.0f, -h}, up, {0.0f, 0.0f}}},
                 {0, 1, 2, 0, 2, 3});
+}
+
+Mesh Mesh::torus(float radius, float tubeRadius, std::uint32_t rings, std::uint32_t sides) {
+    rings = std::max(rings, 3u);
+    sides = std::max(sides, 3u);
+    std::vector<Vertex> vertices;
+    vertices.reserve(static_cast<std::size_t>(rings + 1) * (sides + 1));
+    // The seam vertices are duplicated so texture coordinates can wrap.
+    for (std::uint32_t i = 0; i <= rings; ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(rings);
+        const float theta = u * glm::two_pi<float>();
+        const vec3 around{std::cos(theta), 0.0f, std::sin(theta)};
+        for (std::uint32_t j = 0; j <= sides; ++j) {
+            const float v = static_cast<float>(j) / static_cast<float>(sides);
+            const float phi = v * glm::two_pi<float>();
+            const vec3 normal = std::cos(phi) * around + vec3(0.0f, std::sin(phi), 0.0f);
+            vertices.push_back({radius * around + tubeRadius * normal, normal, {u, v}});
+        }
+    }
+    std::vector<std::uint32_t> indices;
+    indices.reserve(static_cast<std::size_t>(rings) * sides * 6);
+    const auto at = [sides](std::uint32_t i, std::uint32_t j) { return i * (sides + 1) + j; };
+    for (std::uint32_t i = 0; i < rings; ++i) {
+        for (std::uint32_t j = 0; j < sides; ++j) {
+            // Counter-clockwise seen from outside the tube.
+            const std::uint32_t a = at(i, j), b = at(i + 1, j), c = at(i + 1, j + 1), d = at(i, j + 1);
+            for (std::uint32_t index : {a, d, c, a, c, b}) indices.push_back(index);
+        }
+    }
+    return Mesh(std::move(vertices), std::move(indices));
 }
 
 vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {

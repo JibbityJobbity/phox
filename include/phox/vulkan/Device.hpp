@@ -18,8 +18,10 @@ class Device final : public phox::Device {
 public:
     /// @param surface        VK_NULL_HANDLE when headless; otherwise a queue that can present to it is set up
     /// @param objectNames    VK_EXT_debug_utils is enabled on the instance, so objects can be named
+    /// @param meshShaders    enable task and mesh shaders (VK_EXT_mesh_shader) if the device has them
     /// @throws std::runtime_error if the device cannot be created
-    Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames);
+    Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames,
+           bool meshShaders);
     ~Device() override;
     Device(const Device &) = delete;
     Device &operator=(const Device &) = delete;
@@ -38,6 +40,9 @@ public:
     void setObjectName(VkObjectType type, std::uint64_t handle, const std::string &name) const;
     /// VK_EXT_debug_utils is enabled: objects can be named and command buffers labelled.
     bool debugUtils() const { return m_objectNames; }
+    /// VK_EXT_mesh_shader is enabled with task and mesh shaders. Its limits are in meshShaderProperties().
+    bool meshShaders() const { return m_meshShaders; }
+    const VkPhysicalDeviceMeshShaderPropertiesEXT &meshShaderProperties() const { return m_meshShaderProperties; }
 
     VkDevice handle() const { return m_device; }
     VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
@@ -53,6 +58,7 @@ private:
     VkInstance m_instance = VK_NULL_HANDLE;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties m_properties{};
+    VkPhysicalDeviceMeshShaderPropertiesEXT m_meshShaderProperties{};
     VkDevice m_device = VK_NULL_HANDLE;
     VolkDeviceTable m_table{};
     VmaAllocator m_allocator = VK_NULL_HANDLE;
@@ -61,6 +67,7 @@ private:
     std::uint32_t m_graphicsFamily = UINT32_MAX;
     std::uint32_t m_presentFamily = UINT32_MAX;
     bool m_objectNames = false;
+    bool m_meshShaders = false;
 };
 
 } // namespace phox::vk

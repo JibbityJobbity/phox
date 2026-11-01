@@ -1,15 +1,19 @@
-// Scene, camera and view extraction, the software rasterizer and mesh loading. No GPU needed.
+// Scene, camera and view extraction, meshlets, the software rasterizer and mesh loading. No GPU needed.
 #include "phox/MeshLoader.hpp"
+#include "phox/Meshlets.hpp"
 #include "phox/RenderView.hpp"
 #include "phox/Scene.hpp"
 #include "phox/SoftwareRasterizer.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 #define CHECK(cond)                                                                           \
     do {                                                                                      \
@@ -137,6 +141,143 @@ void rasterizerDepthTestsAndLights() {
     CHECK(corner[0] == 26 && corner[1] == 51 && corner[2] == 77);
 }
 
+// The geometric normal (from the winding) of triangle @p t of @p indices.
+vec3 faceNormal(const Mesh &mesh, const std::vector<std::uint32_t> &indices, std::size_t t) {
+    const vec3 a = mesh.vertices()[indices[3 * t]].position;
+    const vec3 b = mesh.vertices()[indices[3 * t + 1]].position;
+    const vec3 c = mesh.vertices()[indices[3 * t + 2]].position;
+    return glm::cross(b - a, c - a);
+}
+
+void torusIsClosedAndWoundOutwards() {
+    const Mesh torus = Mesh::torus(1.0f, 0.25f, 24, 12);
+    CHECK(torus.triangleCount() == 24 * 12 * 2);
+    CHECK(near(torus.bounds().min, vec3(-1.25f, -0.25f, -1.25f), 1e-3f));
+    CHECK(near(torus.bounds().max, vec3(1.25f, 0.25f, 1.25f), 1e-3f));
+    for (std::size_t t = 0; t < torus.triangleCount(); ++t) {
+        // Counter-clockwise from outside: the winding agrees with the vertex normals.
+        CHECK(glm::dot(faceNormal(torus, torus.indices(), t), torus.vertices()[torus.indices()[3 * t]].normal) > 0.0f);
+    }
+}
+
+// A triangle as its three indices rotated so the smallest comes first: equal for the same triangle with
+// the same winding, wherever it starts.
+std::array<std::uint32_t, 3> canonical(std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+    if (b < a && b < c) return {b, c, a};
+    if (c < a && c < b) return {c, a, b};
+    return {a, b, c};
+}
+
+void meshletsCoverEveryTriangleOnce() {
+    const Mesh torus = Mesh::torus(1.0f, 0.3f, 64, 32);
+    const std::vector<std::uint32_t> indices = optimizeIndexOrder(torus);
+    CHECK(indices.size() == torus.indices().size());
+    const MeshletMesh meshlets = buildMeshlets(torus, indices);
+    CHECK(meshlets.meshlets.size() >= torus.triangleCount() / kMeshletMaxTriangles);
+    CHECK(meshlets.triangleCount() == torus.triangleCount());
+
+    std::vector<std::array<std::uint32_t, 3>> expected, actual;
+    for (std::size_t i = 0; i < torus.indices().size(); i += 3) {
+        expected.push_back(canonical(torus.indices()[i], torus.indices()[i + 1], torus.indices()[i + 2]));
+    }
+    for (const Meshlet &m : meshlets.meshlets) {
+        CHECK(m.vertexCount > 0 && m.vertexCount <= kMeshletMaxVertices);
+        CHECK(m.triangleCount > 0 && m.triangleCount <= kMeshletMaxTriangles);
+        CHECK(m.vertexOffset + m.vertexCount <= meshlets.data.size());
+        CHECK(m.triangleOffset + m.triangleCount <= meshlets.data.size());
+        std::array<std::uint32_t, 3> vertex{};
+        for (std::uint32_t t = 0; t < m.triangleCount; ++t) {
+            const std::uint32_t packed = meshlets.data[m.triangleOffset + t];
+            CHECK(packed >> 24 == 0);
+            for (std::uint32_t k = 0; k < 3; ++k) {
+                const std::uint32_t local = (packed >> (8 * k)) & 0xFF;
+                CHECK(local < m.vertexCount);
+                vertex[k] = meshlets.data[m.vertexOffset + local];
+                // The bounding sphere holds every vertex.
+                CHECK(glm::length(torus.vertices()[vertex[k]].position - vec3(m.sphere)) <= m.sphere.w + 1e-4f);
+            }
+            actual.push_back(canonical(vertex[0], vertex[1], vertex[2]));
+        }
+    }
+    // The same triangles with the same winding, each exactly once.
+    std::sort(expected.begin(), expected.end());
+    std::sort(actual.begin(), actual.end());
+    CHECK(actual == expected);
+}
+
+void coneCullingIsConservative() {
+    // Dense enough that meshlets are nearly flat, as in real models: their normal cones are then narrow.
+    const Mesh torus = Mesh::torus(1.0f, 0.3f, 128, 64);
+    const MeshletMesh meshlets = buildMeshlets(torus, optimizeIndexOrder(torus));
+    const std::array<vec3, 4> cameras{{{0.0f, 0.0f, 4.0f}, {3.0f, 2.0f, 0.5f}, {0.0f, 5.0f, 0.0f}, {-1.5f, -0.2f, -2.5f}}};
+    for (const vec3 &camera : cameras) {
+        std::size_t culled = 0;
+        for (const Meshlet &m : meshlets.meshlets) {
+            if (!backFacing(m, camera)) {
+                continue;
+            }
+            ++culled;
+            // Every triangle of a culled meshlet faces away from the camera.
+            for (std::uint32_t t = 0; t < m.triangleCount; ++t) {
+                const std::uint32_t packed = meshlets.data[m.triangleOffset + t];
+                std::vector<std::uint32_t> triangle;
+                for (std::uint32_t k = 0; k < 3; ++k) {
+                    triangle.push_back(meshlets.data[m.vertexOffset + ((packed >> (8 * k)) & 0xFF)]);
+                }
+                const vec3 a = torus.vertices()[triangle[0]].position;
+                CHECK(glm::dot(faceNormal(torus, triangle, 0), camera - a) <= 1e-6f);
+            }
+        }
+        // From outside, a good share of a smooth closed mesh faces away.
+        // From outside, a good share of a smooth closed mesh faces away (at most half could).
+        CHECK(culled > meshlets.meshlets.size() / 5);
+    }
+}
+
+void frustumPlanesBoundClipSpace() {
+    // Looking down -Z with a 90 degree field of view: the side planes are at 45 degrees.
+    const mat4 viewProj = perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    const std::array<vec4, 6> planes = frustumPlanes(viewProj);
+    for (const vec4 &plane : planes) {
+        CHECK(near(glm::length(vec3(plane)), 1.0f));
+    }
+    CHECK(!sphereOutsideFrustum(planes, {0.0f, 0.0f, -5.0f}, 0.0f));
+    CHECK(!sphereOutsideFrustum(planes, {4.9f, -4.9f, -5.0f}, 0.0f));
+    // Each plane: a point outside it, by d; a sphere of radius d around it just reaches back inside.
+    const float side = std::sqrt(0.5f); // distance of (+-6, -5) from the plane x = +-z
+    const std::array<std::pair<vec3, float>, 6> outside{{{{-6.0f, 0.0f, -5.0f}, side},
+                                                         {{6.0f, 0.0f, -5.0f}, side},
+                                                         {{0.0f, -6.0f, -5.0f}, side},
+                                                         {{0.0f, 6.0f, -5.0f}, side},
+                                                         {{0.0f, 0.0f, -0.05f}, 0.05f},
+                                                         {{0.0f, 0.0f, -10.5f}, 0.5f}}};
+    for (const auto &[point, distance] : outside) {
+        CHECK(sphereOutsideFrustum(planes, point, 0.0f));
+        CHECK(sphereOutsideFrustum(planes, point, 0.9f * distance));
+        CHECK(!sphereOutsideFrustum(planes, point, 1.1f * distance));
+    }
+}
+
+void singleSidedMaterialsCullBackFaces() {
+    // The triangle faces +Z; the camera looks at its back from -Z.
+    Scene scene;
+    auto triangle = std::make_shared<Mesh>(Mesh::triangle(1.0f));
+    Object &object = scene.addObject("triangle", triangle, Material{"red", {1.0f, 0.0f, 0.0f, 1.0f}});
+    scene.camera().position = {0.0f, 0.0f, -3.0f};
+    scene.camera().lookAt({0.0f, 0.0f, 0.0f});
+    const auto centre = [&] { return rasterize(extractView(scene, {64, 64})).pixel(32, 32); };
+    CHECK(extractView(scene, {64, 64}).draws.at(0).cullBackFaces == false);
+    CHECK(centre()[0] > 0); // double-sided: the back face is drawn
+
+    object.material().doubleSided = false;
+    CHECK(extractView(scene, {64, 64}).draws.at(0).cullBackFaces);
+    CHECK(centre()[0] == 26); // background
+
+    // A mirroring transform turns the front face into the back face, so nothing is culled.
+    object.transform().scale = {-1.0f, 1.0f, 1.0f};
+    CHECK(extractView(scene, {64, 64}).draws.at(0).cullBackFaces == false);
+}
+
 void loadsObjFiles() {
     const auto path = std::filesystem::temp_directory_path() / "phox_quad_test.obj";
     {
@@ -169,6 +310,11 @@ int main() {
     extractionCullsAndSorts();
     frustumTestUsesEveryPlane();
     rasterizerDepthTestsAndLights();
+    torusIsClosedAndWoundOutwards();
+    meshletsCoverEveryTriangleOnce();
+    coneCullingIsConservative();
+    frustumPlanesBoundClipSpace();
+    singleSidedMaterialsCullBackFaces();
     loadsObjFiles();
     std::cout << "render view tests passed" << std::endl;
     return 0;

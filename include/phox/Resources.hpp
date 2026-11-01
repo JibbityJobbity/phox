@@ -94,6 +94,8 @@ struct BufferCreateInfo {
     BufferUsageMask usage = 0;
     MemoryLocation memory = MemoryLocation::DeviceLocal;
     std::string name; ///< for debuggers and validation messages
+    /// Shaders may read the buffer through its address (Vulkan: Buffer::deviceAddress) instead of a descriptor.
+    bool deviceAddress = false;
 };
 
 } // namespace phox

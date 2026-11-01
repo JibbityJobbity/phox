@@ -18,7 +18,7 @@ bool compatible(const ImageCreateInfo &a, const ImageCreateInfo &b) {
 }
 
 bool compatible(const BufferCreateInfo &a, const BufferCreateInfo &b) {
-    return a.size == b.size && a.usage == b.usage && a.memory == b.memory;
+    return a.size == b.size && a.usage == b.usage && a.memory == b.memory && a.deviceAddress == b.deviceAddress;
 }
 
 template <class Entries, class Info>

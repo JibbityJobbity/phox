@@ -17,8 +17,9 @@ struct FrameUniforms {
     vec4 lightDirection{0.0f, 0.0f, 1.0f, 0.0f}; ///< xyz: unit vector towards the light; w: ambient term
     vec4 lightColor{1.0f};                       ///< rgb
     vec4 resolution{0.0f};                       ///< xy: render target size in pixels; zw: 1 / size
+    vec4 frustumPlanes[6]{};                     ///< world space, as phox::frustumPlanes
 };
-static_assert(sizeof(FrameUniforms) == 256, "must match FrameUniforms in shaders/common.glsl");
+static_assert(sizeof(FrameUniforms) == 352, "must match FrameUniforms in shaders/common.glsl");
 
 /// Push constants for one draw, visible to the vertex and fragment stages. albedo comes first to dodge
 /// an llvmpipe bug (see shaders/common.glsl).
@@ -27,6 +28,26 @@ struct DrawPushConstants {
     mat4 model{1.0f};
 };
 static_assert(sizeof(DrawPushConstants) == 80, "must match DrawPushConstants in shaders/common.glsl");
+
+/// MeshletDrawPushConstants::flags.
+inline constexpr std::uint32_t kMeshletFrustumCulling = 1u << 0;
+inline constexpr std::uint32_t kMeshletConeCulling = 1u << 1;
+/// Meshlets per task shader workgroup (PHOX_TASK_GROUP_SIZE in shaders/common.glsl).
+inline constexpr std::uint32_t kMeshletTaskGroupSize = 32;
+
+/// Push constants for one draw on the meshlet path: task, mesh and fragment stages. Starts like
+/// DrawPushConstants, which is all forward.frag reads. Exactly 128 bytes, the smallest maximum Vulkan allows.
+struct MeshletDrawPushConstants {
+    vec4 albedo{1.0f};
+    mat4 model{1.0f};
+    vec4 cameraPosition{0.0f};      ///< xyz: the camera in the mesh's object space, for cone culling
+    std::uint64_t vertices = 0;     ///< device address of the mesh's Vertex array
+    std::uint64_t meshlets = 0;     ///< device address of its Meshlet array
+    std::uint64_t meshletData = 0;  ///< device address of its MeshletMesh::data
+    std::uint32_t meshletCount = 0;
+    std::uint32_t flags = 0;        ///< kMeshletFrustumCulling | kMeshletConeCulling
+};
+static_assert(sizeof(MeshletDrawPushConstants) == 128, "must match MeshletDrawPushConstants in shaders/common.glsl");
 
 /// Push constants of the tonemap pass (shaders/tonemap.frag), fragment stage.
 struct TonemapPushConstants {

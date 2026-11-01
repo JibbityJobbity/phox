@@ -58,6 +58,9 @@ CPMFindPackage(
   GIT_TAG 1.0.1
 )
 
+# Meshlets and vertex cache ordering (phox/Meshlets.hpp).
+CPMAddPackage("gh:zeux/meshoptimizer@0.22")
+
 CPMAddPackage(
   NAME assimp
   GITHUB_REPOSITORY assimp/assimp
@@ -76,6 +79,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Math.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Meshlets.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/MeshLoader.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderGraph.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/RenderView.hpp
@@ -102,6 +106,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshCache.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PassTimer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PipelineCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderInterface.hpp
@@ -123,6 +128,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/MeshLoader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Meshlets.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/PipelineDesc.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderGraph.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/RenderView.cpp
@@ -141,6 +147,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshCache.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PassTimer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PipelineCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/ShaderLibrary.cpp
@@ -180,7 +187,7 @@ endif()
 # volk/VMA are fetched via CPM and are not part of our export set, hence BUILD_INTERFACE.
 target_link_libraries(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator> fmt::fmt
-  PRIVATE assimp
+  PRIVATE assimp meshoptimizer
 )
 
 find_package(SDL2 REQUIRED)
@@ -195,18 +202,23 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang)
 if(NOT GLSLANG_VALIDATOR)
-  message(FATAL_ERROR "glslangValidator not found; needed to compile shaders/*.vert|frag")
+  message(FATAL_ERROR "glslangValidator not found; needed to compile shaders/*")
 endif()
 
 set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
 set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl)
-foreach(shader forward.vert forward.frag fullscreen.vert tonemap.frag)
+foreach(shader forward.vert forward.frag forward.task forward.mesh fullscreen.vert tonemap.frag)
   set(spv ${PHOX_SHADER_OUTPUT_DIR}/${shader}.spv)
+  # Task and mesh shaders (VK_EXT_mesh_shader) need SPIR-V 1.4 or later.
+  set(target_env)
+  if(shader MATCHES "\\.(task|mesh)$")
+    set(target_env --target-env vulkan1.3)
+  endif()
   add_custom_command(
     OUTPUT ${spv}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${PHOX_SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLANG_VALIDATOR} -V ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} -o ${spv}
+    COMMAND ${GLSLANG_VALIDATOR} -V ${target_env} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} -o ${spv}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} ${PHOX_SHADER_INCLUDES}
     COMMENT "Compiling shader ${shader}"
     VERBATIM

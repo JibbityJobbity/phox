@@ -9,7 +9,11 @@ image, and falls back to a software rasterizer when there is no usable GPU.
 - **Frames in flight**: two frame contexts with their own command buffers, fences, upload memory and
   descriptor pools. The CPU never waits for the device inside a frame.
 - **Forward rendering into HDR** with depth testing, then tone mapping (clamp, Reinhard or ACES) straight
-  into the swapchain image. Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
+  into the swapchain image.
+- **Mesh shading** where the device has `VK_EXT_mesh_shader`: meshes are split into meshlets with
+  meshoptimizer, and a task shader skips meshlets outside the view frustum or facing away from the camera.
+  Elsewhere the same images come from the vertex pipeline. See
+  [architecture section 6.1](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
   dynamic rendering.
 - **Verified output**: golden images rendered on lavapipe, checked with the Khronos validation layer
   (including synchronization validation) on every CI run.
@@ -32,8 +36,10 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
-| `--scene triangle\|cubes` | the sample scene to show |
+| `--scene triangle\|cubes\|tori\|field` | the sample scene to show (`field` is a 37.7-million-triangle benchmark) |
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
+| `--frames N` (headless) | render N frames of one pose and print the average GPU time per pass |
+| `--mesh-shaders on\|off\|nocull` | draw with task and mesh shaders where available; `nocull` turns meshlet culling off |
 | `--time S`, `--size WxH`, `--output FILE` | headless: animation time, image size, output path |
 | `--tonemap clamp\|reinhard\|aces`, `--exposure X` | tone mapping |
 | `--debug` | validation layer and debug logging; exits with status 3 if validation reported anything |
@@ -52,14 +58,15 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | Test | What it checks | GPU |
 | --- | --- | --- |
 | `render_graph` | culling, versions, barriers, lifetimes, attachments, validation of declarations, DOT export | no |
-| `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, software rasterizer, OBJ loading | no |
-| `scene_smoke` | the sample scenes and one headless frame (GPU or software fallback) | optional |
-| `golden` | renders the sample scenes and compares them with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
+| `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, meshlets and their culling tests, software rasterizer, OBJ loading | no |
+| `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
+| `golden` | renders the sample scenes with vertex shaders and again with mesh shaders, and compares both with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
 
 The golden test reads a few environment variables:
 
 - `PHOX_VALIDATION=1` runs with the validation layer and fails on any message.
 - `PHOX_REQUIRE_GPU=1` fails instead of skipping when no Vulkan device is available.
+- `PHOX_REQUIRE_MESH_SHADERS=1` fails instead of skipping the mesh shader run when the device lacks them.
 - `PHOX_UPDATE_GOLDEN=1` (or a comma-separated list of case names) rewrites the goldens. Regenerate them on
   lavapipe, which is deterministic: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD PHOX_UPDATE_GOLDEN=1 ./build-test/PhoxGoldenTests`.
   Mismatching images are written to `golden_out/` in the build directory.

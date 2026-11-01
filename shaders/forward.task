@@ -1,0 +1,60 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_buffer_reference : require
+#define PHOX_MESHLET_DRAW
+#include "common.glsl"
+
+// Culls a draw's meshlets, PHOX_TASK_GROUP_SIZE per workgroup, and launches one mesh shader workgroup
+// for each that may be visible: inside the view frustum and, for single-sided meshes, not facing away.
+
+layout(local_size_x = PHOX_TASK_GROUP_SIZE) in;
+
+taskPayloadSharedEXT MeshletTask task;
+
+shared uint visible[PHOX_TASK_GROUP_SIZE];
+
+bool meshletVisible(Meshlet meshlet) {
+    if ((draw.flags & kMeshletFrustumCulling) != 0u) {
+        // The bounding sphere in world space; its radius grows by the largest scale of the transform.
+        vec3 center = (draw.model * vec4(meshlet.sphere.xyz, 1.0)).xyz;
+        float scale = sqrt(max(max(dot(draw.model[0].xyz, draw.model[0].xyz), dot(draw.model[1].xyz, draw.model[1].xyz)),
+                               dot(draw.model[2].xyz, draw.model[2].xyz)));
+        float radius = meshlet.sphere.w * scale;
+        for (int i = 0; i < 6; ++i) {
+            if (dot(frame.frustumPlanes[i].xyz, center) + frame.frustumPlanes[i].w < -radius) {
+                return false;
+            }
+        }
+    }
+    if ((draw.flags & kMeshletConeCulling) != 0u) {
+        // In object space, where the cone was computed. Facing is preserved by the (non-mirroring)
+        // transform, so this is exact even under non-uniform scale. Same test as phox::backFacing.
+        vec3 toApex = meshlet.coneApex.xyz - draw.cameraPosition.xyz;
+        float distance = length(toApex);
+        if (distance > 0.0 && dot(toApex / distance, meshlet.cone.xyz) >= meshlet.cone.w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uint index = gl_WorkGroupID.x * PHOX_TASK_GROUP_SIZE + lane;
+    visible[lane] = index < draw.meshletCount && meshletVisible(draw.meshlets.meshlets[index]) ? 1u : 0u;
+    barrier();
+
+    // Compact the survivors in meshlet order, so meshlets are drawn in the same order on every run.
+    uint slot = 0u;
+    uint count = 0u;
+    for (uint i = 0u; i < PHOX_TASK_GROUP_SIZE; ++i) {
+        slot += i < lane ? visible[i] : 0u;
+        count += visible[i];
+    }
+    if (visible[lane] != 0u) {
+        task.meshlets[slot] = index;
+    }
+    barrier();
+    EmitMeshTasksEXT(count, 1, 1);
+}

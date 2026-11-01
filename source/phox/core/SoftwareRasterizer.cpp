@@ -37,8 +37,9 @@ CpuImage rasterize(const RenderView &view) {
         const auto &vertices = draw.mesh->vertices();
         const auto &indices = draw.mesh->indices();
         for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
-            std::array<vec3, 3> screen; // framebuffer x, y and depth
-            vec3 normal{0.0f};
+            std::array<vec3, 3> screen;  // framebuffer x, y and depth
+            std::array<vec3, 3> normals; // world space
+            std::array<float, 3> inverseW;
             bool behind = false;
             for (std::size_t k = 0; k < 3; ++k) {
                 const Vertex &v = vertices[indices[t + k]];
@@ -49,7 +50,8 @@ CpuImage rasterize(const RenderView &view) {
                 }
                 const vec3 ndc = vec3(clip) / clip.w;
                 screen[k] = {(ndc.x * 0.5f + 0.5f) * float(width), (ndc.y * 0.5f + 0.5f) * float(height), ndc.z};
-                normal += normalMatrix * v.normal;
+                normals[k] = normalMatrix * v.normal;
+                inverseW[k] = 1.0f / clip.w;
             }
             if (behind) {
                 continue;
@@ -61,15 +63,11 @@ CpuImage rasterize(const RenderView &view) {
             if (std::abs(area) < 1e-8f) {
                 continue;
             }
-            normal = glm::normalize(normal);
-            if (area < 0.0f) {
-                normal = -normal; // back face: light it like the GPU's two-sided shading
+            if (area < 0.0f && draw.cullBackFaces) {
+                continue;
             }
-            const float diffuse = std::max(glm::dot(normal, view.lightDirection), 0.0f);
-            const vec3 lit = applyToneMapping(
-                vec3(draw.material->albedo) * view.lightColor * (view.ambient + (1.0f - view.ambient) * diffuse),
-                view.toneMapping);
-            const std::array<std::uint8_t, 4> color{toUnorm8(lit.r), toUnorm8(lit.g), toUnorm8(lit.b), 255};
+            // Back faces are lit from behind, like the GPU's two-sided shading.
+            const float facing = area < 0.0f ? -1.0f : 1.0f;
 
             const float minX = std::min({screen[0].x, screen[1].x, screen[2].x});
             const float maxX = std::max({screen[0].x, screen[1].x, screen[2].x});
@@ -100,6 +98,16 @@ CpuImage rasterize(const RenderView &view) {
                         continue;
                     }
                     depth[index] = z;
+                    // Normals are interpolated perspective-correctly and renormalised, as the GPU does.
+                    const vec3 perspective{w0 * inverseW[0], w1 * inverseW[1], w2 * inverseW[2]};
+                    const vec3 weights = perspective / (perspective.x + perspective.y + perspective.z);
+                    const vec3 normal =
+                        facing * glm::normalize(weights.x * normals[0] + weights.y * normals[1] + weights.z * normals[2]);
+                    const float diffuse = std::max(glm::dot(normal, view.lightDirection), 0.0f);
+                    const vec3 lit = applyToneMapping(
+                        vec3(draw.material->albedo) * view.lightColor * (view.ambient + (1.0f - view.ambient) * diffuse),
+                        view.toneMapping);
+                    const std::array<std::uint8_t, 4> color{toUnorm8(lit.r), toUnorm8(lit.g), toUnorm8(lit.b), 255};
                     std::copy(color.begin(), color.end(), image.rgba.begin() + static_cast<std::ptrdiff_t>(index * 4));
                 }
             }

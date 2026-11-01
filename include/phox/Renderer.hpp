@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace phox {
 
@@ -30,6 +31,18 @@ struct RendererConfig {
     std::string preferredDevice;
     /// Keep each frame's render graph as Graphviz DOT (frameGraphDot()). Costs a little per frame.
     bool captureFrameGraph = false;
+    /// Draw with task and mesh shaders (VK_EXT_mesh_shader) where the device has them, as meshlets that
+    /// the task shader culls. Otherwise, or when off, meshes are drawn with vertex shaders.
+    bool meshShaders = true;
+    /// With mesh shaders: cull meshlets outside the view frustum and, for single-sided materials, meshlets
+    /// facing away from the camera. Off only to measure what culling gains.
+    bool meshletCulling = true;
+};
+
+/// GPU time of one render graph pass.
+struct PassTiming {
+    std::string pass;
+    double milliseconds = 0.0;
 };
 
 enum class RendererBackend { None, Vulkan, Software };
@@ -40,6 +53,7 @@ struct RendererInfo {
     bool validation = false;              ///< the validation layer is active
     std::uint32_t validationErrors = 0;   ///< error messages reported by the validation layer so far
     std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far
+    bool meshShaders = false;             ///< meshes are drawn as meshlets with task and mesh shaders
 };
 
 class Renderer {
@@ -59,6 +73,10 @@ public:
     /// The most recent frame's compiled render graph in Graphviz DOT. Empty unless
     /// RendererConfig::captureFrameGraph is set (and for the software fallback, which has no graph).
     virtual const std::string &frameGraphDot() const = 0;
+    /// GPU time per pass of the most recent frame the GPU has finished, which when windowed is a frame or
+    /// two behind the last render() call. Empty before then, for the software fallback, and on devices
+    /// without timestamps.
+    virtual const std::vector<PassTiming> &gpuTimings() const = 0;
 };
 
 }

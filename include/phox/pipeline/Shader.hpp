@@ -6,7 +6,9 @@ namespace phox {
 enum class ShaderType {
     VERTEX,
     FRAGMENT,
-    COMPUTE
+    COMPUTE,
+    TASK,
+    MESH
 };
 
 class Shader {

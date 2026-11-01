@@ -209,6 +209,7 @@ VkDescriptorSet writeFrameUniforms(phox::vk::Device &device, phox::vk::FrameCont
     const float width = static_cast<float>(view.extent.width);
     const float height = static_cast<float>(view.extent.height);
     uniforms.resolution = {width, height, 1.0f / width, 1.0f / height};
+    std::copy(view.frustumPlanes.begin(), view.frustumPlanes.end(), uniforms.frustumPlanes);
     const phox::vk::UploadArena::Allocation data = frame.arena().uploadUniform(uniforms);
 
     const VkDescriptorSet set = frame.descriptors().allocate(pipelines.setLayout(phox::SetLayout::Frame));
@@ -260,12 +261,15 @@ void Renderer::initialize(const RendererConfig &config) {
             m_frames[i] = std::make_unique<FrameContext>(*m_device, i);
         }
         m_transients = std::make_unique<TransientPool>(*m_device);
-        m_meshes = std::make_unique<MeshCache>(*m_device);
-        createPipelines();
+        const bool meshShaders = createPipelines();
+        m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders);
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
-        log::info("renderer initialized on {}{}", m_deviceName, m_validation ? " (validation on)" : "");
+        log::info("renderer initialized on {}{}, drawing with {}", m_deviceName, m_validation ? " (validation on)" : "",
+                  meshShaders ? (m_config.meshletCulling ? "mesh shaders (meshlet culling on)"
+                                                         : "mesh shaders (meshlet culling off)")
+                              : "vertex shaders");
     } catch (const std::exception &e) {
         log::warn("Vulkan initialization failed, using the software fallback renderer: {}", e.what());
         releaseVulkan();
@@ -297,6 +301,7 @@ void Renderer::releaseVulkan() {
         m_device->table().vkDestroySemaphore(m_device->handle(), semaphore, nullptr);
     }
     m_renderFinished.clear();
+    m_gpuTimings.clear();
     m_swapchain.reset();
     m_windowSize = {};
     m_device.reset();
@@ -323,6 +328,7 @@ RendererInfo Renderer::info() const {
     result.validation = m_validation;
     result.validationErrors = m_validationCounters.errors.load();
     result.validationWarnings = m_validationCounters.warnings.load();
+    result.meshShaders = !m_useFallback && m_meshes && m_meshes->meshlets();
     return result;
 }
 
@@ -388,6 +394,9 @@ void Renderer::render(const Scene &scene) {
     // Wait until the GPU is done with the last frame that used this slot, then reuse its resources.
     FrameContext &frame = *m_frames[m_frameNumber % kFramesInFlight];
     frame.begin();
+    if (!frame.timer().timings().empty()) {
+        m_gpuTimings = frame.timer().timings();
+    }
     m_transients->collect(m_frameNumber);
     m_meshes->collect(m_frameNumber);
 
@@ -424,7 +433,8 @@ void Renderer::render(const Scene &scene) {
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
-    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines);
+    const ForwardPassOutput forward =
+        addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines, m_config.meshletCulling);
 
     ImageHandle backbuffer;
     if (windowed) {
@@ -494,6 +504,8 @@ void Renderer::render(const Scene &scene) {
     if (table.vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
         throw std::runtime_error("waiting for the headless frame failed");
     }
+    frame.timer().collect();
+    m_gpuTimings = frame.timer().timings();
     m_readback->invalidate();
     const auto *pixels = static_cast<const std::uint8_t *>(m_readback->mapped());
     m_lastFrame.width = extent.width;
@@ -587,7 +599,7 @@ void Renderer::setupDebugMessenger() {
     }
 }
 
-void Renderer::createPipelines() {
+bool Renderer::createPipelines() {
     // Depth: 32-bit float where it can be an attachment (nearly everywhere), else 24-bit with stencil.
     VkFormatProperties properties{};
     vkGetPhysicalDeviceFormatProperties(m_device->physicalDevice(), VK_FORMAT_D32_SFLOAT, &properties);
@@ -597,10 +609,25 @@ void Renderer::createPipelines() {
 
     m_shaders = std::make_unique<ShaderLibrary>(*m_device, kShaderDir);
     m_pipelines = std::make_unique<PipelineCache>(*m_device, *m_shaders);
-    // Build the main pipeline now, so missing or broken shaders fail initialization (and select the
+    // Build the main pipelines now, so missing or broken shaders fail initialization (and select the
     // software fallback) instead of the first frame.
-    m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat));
+    for (CullMode cull : {CullMode::None, CullMode::Back}) {
+        m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat, cull));
+    }
     m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
+    if (!m_device->meshShaders()) {
+        return false;
+    }
+    // The vertex path still works if the meshlet pipelines cannot be built.
+    try {
+        for (CullMode cull : {CullMode::None, CullMode::Back}) {
+            m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull));
+        }
+    } catch (const std::exception &e) {
+        log::warn("mesh shader pipelines failed, drawing with vertex shaders: {}", e.what());
+        return false;
+    }
+    return true;
 }
 
 void Renderer::createSurface() {
@@ -618,7 +645,7 @@ void Renderer::createSurface() {
 void Renderer::createDevice() {
     const VkPhysicalDevice physicalDevice = pickPhysicalDevice(m_instance, m_surface, m_config.preferredDevice);
     // Object names need VK_EXT_debug_utils, which is enabled alongside validation.
-    m_device = std::make_unique<Device>(m_instance, physicalDevice, m_surface, m_validation);
+    m_device = std::make_unique<Device>(m_instance, physicalDevice, m_surface, m_validation, m_config.meshShaders);
     m_deviceName = m_device->properties().deviceName;
 }
 

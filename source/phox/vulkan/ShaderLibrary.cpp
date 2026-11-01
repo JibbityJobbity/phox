@@ -23,8 +23,12 @@ const Shader &ShaderLibrary::get(const std::string &name) {
         type = ShaderType::FRAGMENT;
     } else if (extension == ".comp") {
         type = ShaderType::COMPUTE;
+    } else if (extension == ".task") {
+        type = ShaderType::TASK;
+    } else if (extension == ".mesh") {
+        type = ShaderType::MESH;
     } else {
-        throw std::runtime_error("shader '" + name + "' needs a .vert, .frag or .comp extension");
+        throw std::runtime_error("shader '" + name + "' needs a .vert, .frag, .comp, .task or .mesh extension");
     }
     auto shader = Shader::fromFile(m_device, (m_directory / (name + ".spv")).string(), type);
     return *m_shaders.emplace(name, std::move(shader)).first->second;
