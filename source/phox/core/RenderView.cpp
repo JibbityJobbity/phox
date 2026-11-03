@@ -54,7 +54,7 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
         const bool cullBackFaces = !object->material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
         view.draws.push_back(
-            {mesh, &object->material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
+            {object->id(), mesh, &object->material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
     }
     // Front to back, so depth testing rejects hidden fragments early. Stable: ties keep scene order.
     std::stable_sort(view.draws.begin(), view.draws.end(),

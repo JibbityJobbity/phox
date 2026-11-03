@@ -16,6 +16,11 @@ std::uint64_t nextMeshId() {
     return counter.fetch_add(1);
 }
 
+std::uint64_t nextObjectId() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1);
+}
+
 Bounds computeBounds(const std::vector<Vertex> &vertices) {
     if (vertices.empty()) {
         return {};
@@ -190,6 +195,24 @@ vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {
 
 mat4 Transform::matrix() const {
     return glm::translate(mat4(1.0f), position) * glm::mat4_cast(rotation) * glm::scale(mat4(1.0f), scale);
+}
+
+Object::Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform)
+    : m_id(nextObjectId()), m_name(std::move(name)), m_mesh(std::move(mesh)), m_material(std::move(material)),
+      m_transform(transform) {}
+
+Object::Object(const Object &other)
+    : m_id(nextObjectId()), m_name(other.m_name), m_mesh(other.m_mesh), m_material(other.m_material),
+      m_transform(other.m_transform) {}
+
+Object &Object::operator=(const Object &other) {
+    if (this != &other) {
+        m_name = other.m_name;
+        m_mesh = other.m_mesh;
+        m_material = other.m_material;
+        m_transform = other.m_transform; // keeps its own id
+    }
+    return *this;
 }
 
 Object &Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform) {

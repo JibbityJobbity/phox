@@ -258,6 +258,18 @@ void frustumPlanesBoundClipSpace() {
     }
 }
 
+void objectsHaveTheirOwnIds() {
+    Scene scene;
+    Object &a = scene.addObject("a", nullptr, Material{});
+    Object &b = scene.addObject("b", nullptr, Material{});
+    CHECK(a.id() != 0 && a.id() != b.id());
+    const Object copy = a;
+    CHECK(copy.id() != a.id() && copy.name() == "a");
+    const std::uint64_t id = b.id();
+    b = a;
+    CHECK(b.id() == id && b.name() == "a");
+}
+
 void singleSidedMaterialsCullBackFaces() {
     // The triangle faces +Z; the camera looks at its back from -Z.
     Scene scene;
@@ -315,6 +327,7 @@ int main() {
     coneCullingIsConservative();
     frustumPlanesBoundClipSpace();
     singleSidedMaterialsCullBackFaces();
+    objectsHaveTheirOwnIds();
     loadsObjFiles();
     std::cout << "render view tests passed" << std::endl;
     return 0;

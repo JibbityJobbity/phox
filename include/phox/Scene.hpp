@@ -85,11 +85,15 @@ struct Transform {
     mat4 matrix() const;
 };
 
+/// A mesh placed in a scene with a material. Each object has an id that is never reused, so renderers
+/// can keep per-object state across frames (e.g. which meshlets were visible). Copies get a new id.
 class Object {
 public:
-    Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {})
-        : m_name(std::move(name)), m_mesh(std::move(mesh)), m_material(std::move(material)), m_transform(transform) {}
+    Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
+    Object(const Object &other);
+    Object &operator=(const Object &other);
 
+    std::uint64_t id() const { return m_id; }
     const std::string &name() const { return m_name; }
     const std::shared_ptr<const Mesh> &mesh() const { return m_mesh; }
     void setMesh(std::shared_ptr<const Mesh> mesh) { m_mesh = std::move(mesh); }
@@ -99,6 +103,7 @@ public:
     const Transform &transform() const { return m_transform; }
 
 private:
+    std::uint64_t m_id;
     std::string m_name;
     std::shared_ptr<const Mesh> m_mesh;
     Material m_material;

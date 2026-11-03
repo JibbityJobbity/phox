@@ -13,6 +13,7 @@ namespace phox {
 
 /// One mesh to draw with one material and transform.
 struct DrawItem {
+    std::uint64_t objectId = 0; ///< Object::id() of the object drawn
     const Mesh *mesh = nullptr;
     const Material *material = nullptr;
     mat4 model{1.0f};
