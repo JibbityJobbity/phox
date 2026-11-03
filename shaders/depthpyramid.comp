@@ -1,0 +1,43 @@
+#version 450
+
+// Builds one mip of the depth pyramid: each texel the farthest depth of the area it covers. Mip 0 comes
+// from the depth buffer, whose size it rounds down to powers of two, so a texel may cover up to 3 x 3
+// depth pixels; every further mip halves the one before, taking the farthest of 2 x 2.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D depthImage;              // read for mip 0
+layout(set = 0, binding = 1, r32f) uniform readonly image2D source;     // the previous mip, for mips 1 and up
+layout(set = 0, binding = 2, r32f) uniform writeonly image2D destination;
+
+layout(push_constant) uniform DepthPyramidPushConstants {
+    uint level;
+} pc;
+
+void main() {
+    ivec2 size = imageSize(destination);
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(texel, size))) {
+        return;
+    }
+    float depth = 0.0;
+    if (pc.level == 0u) {
+        // Every depth pixel that overlaps this texel's area: [floor(t * ratio), ceil((t + 1) * ratio)).
+        ivec2 sourceSize = textureSize(depthImage, 0);
+        ivec2 first = texel * sourceSize / size;
+        ivec2 end = ((texel + 1) * sourceSize + size - 1) / size;
+        for (int y = first.y; y < end.y; ++y) {
+            for (int x = first.x; x < end.x; ++x) {
+                depth = max(depth, texelFetch(depthImage, ivec2(x, y), 0).r);
+            }
+        }
+    } else {
+        // Once one axis is down to a single texel, the source is too: clamp instead of reading past it.
+        ivec2 last = imageSize(source) - 1;
+        ivec2 a = min(texel * 2, last);
+        ivec2 b = min(texel * 2 + 1, last);
+        depth = max(max(imageLoad(source, a).r, imageLoad(source, ivec2(b.x, a.y)).r),
+                    max(imageLoad(source, ivec2(a.x, b.y)).r, imageLoad(source, b).r));
+    }
+    imageStore(destination, texel, vec4(depth));
+}

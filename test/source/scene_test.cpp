@@ -62,11 +62,13 @@ int main() {
     std::cout << "rendered on " << info.deviceName << (info.meshShaders ? " with mesh shaders" : "") << std::endl;
     // A headless frame is finished when render() returns, so its GPU timings are already in.
     if (info.backend == phox::RendererBackend::Vulkan && !renderer->gpuTimings().empty()) {
-        CHECK(renderer->gpuTimings().front().pass == "forward");
+        bool forward = false;
         for (const phox::PassTiming &timing : renderer->gpuTimings()) {
+            forward = forward || timing.pass.rfind("forward", 0) == 0;
             std::cout << "  " << timing.pass << ": " << timing.milliseconds << " ms" << std::endl;
             CHECK(timing.milliseconds >= 0.0);
         }
+        CHECK(forward);
     }
     renderer->cleanup();
 

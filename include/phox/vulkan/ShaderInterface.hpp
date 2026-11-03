@@ -45,9 +45,17 @@ struct MeshletDrawPushConstants {
     /// device address of its Meshlet array, followed by the meshlet data that the meshlets' offsets index
     std::uint64_t meshlets = 0;
     std::uint32_t meshletCount = 0;
-    std::uint32_t flags = 0; ///< kMeshletFrustumCulling | kMeshletConeCulling
+    std::uint32_t flags = 0;            ///< kMeshletFrustumCulling | kMeshletConeCulling
+    std::uint32_t visibilityOffset = 0; ///< occlusion culling: the draw's first word of visibility bits
+    std::uint32_t padding = 0;
 };
-static_assert(sizeof(MeshletDrawPushConstants) == 120, "must match MeshletDrawPushConstants in shaders/common.glsl");
+static_assert(sizeof(MeshletDrawPushConstants) == 128, "must match MeshletDrawPushConstants in shaders/common.glsl");
+
+/// Push constants of the depth pyramid build (shaders/depthpyramid.comp), compute stage.
+struct DepthPyramidPushConstants {
+    std::uint32_t level = 0; ///< the mip written
+};
+static_assert(sizeof(DepthPyramidPushConstants) == 4, "must match shaders/depthpyramid.comp");
 
 /// Push constants of the tonemap pass (shaders/tonemap.frag), fragment stage.
 struct TonemapPushConstants {

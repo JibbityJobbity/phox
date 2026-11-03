@@ -12,11 +12,13 @@
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
 #include "phox/vulkan/MeshCache.hpp"
+#include "phox/vulkan/MeshletVisibility.hpp"
 #include "phox/vulkan/PipelineCache.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 #include "phox/vulkan/ShaderLibrary.hpp"
 #include "phox/vulkan/Swapchain.hpp"
 #include "phox/vulkan/TransientPool.hpp"
+#include "phox/vulkan/passes/DepthPyramidPass.hpp"
 #include "phox/vulkan/passes/ForwardPass.hpp"
 #include "phox/vulkan/passes/ReadbackPass.hpp"
 #include "phox/vulkan/passes/TonemapPass.hpp"
@@ -263,13 +265,21 @@ void Renderer::initialize(const RendererConfig &config) {
         m_transients = std::make_unique<TransientPool>(*m_device);
         const bool meshShaders = createPipelines();
         m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders);
+        if (meshShaders && m_config.meshletCulling && m_config.occlusionCulling) {
+            if (m_depthFormat == Format::D32Float) {
+                m_visibility = std::make_unique<MeshletVisibility>(*m_device);
+            } else {
+                log::warn("occlusion culling needs a D32 depth buffer; culling meshlets without it");
+            }
+        }
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
         log::info("renderer initialized on {}{}, drawing with {}", m_deviceName, m_validation ? " (validation on)" : "",
-                  meshShaders ? (m_config.meshletCulling ? "mesh shaders (meshlet culling on)"
-                                                         : "mesh shaders (meshlet culling off)")
-                              : "vertex shaders");
+                  !meshShaders              ? "vertex shaders"
+                  : m_visibility            ? "mesh shaders (frustum, cone and occlusion culling)"
+                  : m_config.meshletCulling ? "mesh shaders (frustum and cone culling)"
+                                            : "mesh shaders (no meshlet culling)");
     } catch (const std::exception &e) {
         log::warn("Vulkan initialization failed, using the software fallback renderer: {}", e.what());
         releaseVulkan();
@@ -293,6 +303,7 @@ void Renderer::releaseVulkan() {
     for (auto &frame : m_frames) {
         frame.reset();
     }
+    m_visibility.reset();
     m_meshes.reset();
     m_transients.reset();
     m_pipelines.reset();
@@ -329,6 +340,7 @@ RendererInfo Renderer::info() const {
     result.validationErrors = m_validationCounters.errors.load();
     result.validationWarnings = m_validationCounters.warnings.load();
     result.meshShaders = !m_useFallback && m_meshes && m_meshes->meshlets();
+    result.occlusionCulling = !m_useFallback && m_visibility != nullptr;
     return result;
 }
 
@@ -429,12 +441,25 @@ void Renderer::render(const Scene &scene) {
     // ---- Frame graph -------------------------------------------------------------------------
     //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
     //   forward -> hdr -> tonemap -> display -> readback -> host buffer [headless]
+    // With occlusion culling, "forward" is: (clear visibility ->) forward early -> depth pyramid ->
+    // forward late, with the meshlet visibility bits imported from the previous frame.
     RenderGraph graph(extent);
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
-    const ForwardPassOutput forward =
-        addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines, m_config.meshletCulling);
+    MeshletVisibility::Frame visibility;
+    MeshletOcclusion occlusion;
+    if (m_visibility) {
+        // Written by the late forward pass of the previous frame, unless it is new.
+        visibility = m_visibility->prepare(view, *m_meshes, frame);
+        occlusion.visibility = graph.importBuffer("meshlet visibility", BufferDesc{m_visibility->buffer().size()},
+                                                  visibility.clear ? BufferUsage::Undefined : BufferUsage::StorageWrite,
+                                                  BufferUsage::StorageWrite);
+        occlusion.frame = &visibility;
+        executor.bindBuffer(occlusion.visibility, m_visibility->buffer().handle());
+    }
+    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines,
+                                                     m_config.meshletCulling, m_visibility ? &occlusion : nullptr);
 
     ImageHandle backbuffer;
     if (windowed) {
@@ -620,9 +645,12 @@ bool Renderer::createPipelines() {
     }
     // The vertex path still works if the meshlet pipelines cannot be built.
     try {
-        for (CullMode cull : {CullMode::None, CullMode::Back}) {
-            m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull));
+        for (MeshletPhase phase : {MeshletPhase::Single, MeshletPhase::Early, MeshletPhase::Late}) {
+            for (CullMode cull : {CullMode::None, CullMode::Back}) {
+                m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull, phase));
+            }
         }
+        m_pipelines->get(depthPyramidPipelineDesc());
     } catch (const std::exception &e) {
         log::warn("mesh shader pipelines failed, drawing with vertex shaders: {}", e.what());
         return false;

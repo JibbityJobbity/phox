@@ -48,7 +48,8 @@ layout(push_constant) uniform MeshletDrawPushConstants {
     VertexBuffer vertices;
     MeshletBuffer meshlets;
     uint meshletCount;
-    uint flags; // kMeshletFrustumCulling | kMeshletConeCulling
+    uint flags;            // kMeshletFrustumCulling | kMeshletConeCulling
+    uint visibilityOffset; // two-phase occlusion culling: the draw's first word of meshlet visibility bits
 } draw;
 
 // From the task shader to the mesh shader: the meshlets that survived culling, one mesh shader

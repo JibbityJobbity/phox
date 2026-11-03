@@ -1,6 +1,7 @@
-// Renders known scenes headless and compares them with the images in test/golden/, once drawing with
-// vertex shaders and once with task and mesh shaders (if the device has them). Both paths must match the
-// same images, and so must the software rasterizer.
+// Renders known scenes headless and compares them with the images in test/golden/: drawing with vertex
+// shaders, then with task and mesh shaders (if the device has them) with occlusion culling, and again
+// with frustum and cone culling only. Every path must match the same images, and so must the software
+// rasterizer.
 //
 // Environment:
 //   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing; a
@@ -75,15 +76,19 @@ const std::vector<GoldenCase> kCases = {
 const std::filesystem::path kGoldenDir = PHOX_GOLDEN_DIR;
 const phox::Extent2D kExtent{320, 240};
 
+enum class Path { Vertex, MeshOcclusion, Mesh };
+
 // Renders every case with one renderer configuration. The vertex path also checks the software
 // rasterizer and is the one that rewrites goldens. Returns the number of failures, or kSkip.
-int runCases(bool meshShaders) {
+int runCases(Path pathKind) {
+    const bool meshShaders = pathKind != Path::Vertex;
     const bool validation = envFlag("PHOX_VALIDATION");
     auto renderer = phox::Renderer::Create(phox::RendererType::Vulkan);
     phox::RendererConfig config;
     config.debug = validation;
     config.headlessExtent = kExtent;
     config.meshShaders = meshShaders;
+    config.occlusionCulling = pathKind == Path::MeshOcclusion;
     renderer->initialize(config);
 
     const phox::RendererInfo info = renderer->info();
@@ -101,7 +106,14 @@ int runCases(bool meshShaders) {
         renderer->cleanup();
         return envFlag("PHOX_REQUIRE_MESH_SHADERS") ? 1 : kSkip;
     }
-    const std::string path = meshShaders ? "mesh shaders" : "vertex shaders";
+    if (info.occlusionCulling != (pathKind == Path::MeshOcclusion)) {
+        std::cerr << "occlusion culling is " << (info.occlusionCulling ? "on" : "off") << " but should not be"
+                  << std::endl;
+        return 1;
+    }
+    const std::string path = pathKind == Path::Vertex        ? "vertex shaders"
+                             : pathKind == Path::MeshOcclusion ? "mesh shaders, occlusion culling"
+                                                               : "mesh shaders";
     std::cout << "device: " << info.deviceName << ", " << path << (validation ? " (validation on)" : "") << std::endl;
 
     int failures = 0;
@@ -131,7 +143,8 @@ int runCases(bool meshShaders) {
                   << (diff.sizeMismatch ? ", size mismatch" : "") << std::endl;
         if (!pass) {
             const std::filesystem::path out =
-                std::filesystem::path("golden_out") / (c.name + (meshShaders ? ".mesh.ppm" : ".ppm"));
+                std::filesystem::path("golden_out") /
+                (c.name + (pathKind == Path::Vertex ? ".ppm" : pathKind == Path::Mesh ? ".mesh.ppm" : ".occlusion.ppm"));
             phox::writePpm(out, actual);
             std::cout << "  actual image written to " << std::filesystem::absolute(out).string() << std::endl;
             ++failures;
@@ -168,11 +181,17 @@ int runCases(bool meshShaders) {
 } // namespace
 
 int main() {
-    const int vertex = runCases(false);
+    const int vertex = runCases(Path::Vertex);
     if (vertex == kSkip) {
         return kSkip; // no device at all
     }
-    const int mesh = runCases(true);
-    const int failures = vertex + (mesh == kSkip ? 0 : mesh);
+    int failures = vertex;
+    for (Path path : {Path::MeshOcclusion, Path::Mesh}) {
+        const int result = runCases(path);
+        if (result == kSkip) {
+            break; // no mesh shaders
+        }
+        failures += result;
+    }
     return failures == 0 ? 0 : 1;
 }

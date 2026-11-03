@@ -106,6 +106,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshCache.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshletVisibility.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PassTimer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PipelineCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
@@ -115,6 +116,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/VulkanCommon.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/DepthPyramidPass.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/ForwardPass.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/ReadbackPass.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/passes/TonemapPass.hpp
@@ -147,6 +149,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshCache.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshletVisibility.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PassTimer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PipelineCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
@@ -154,6 +157,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/DepthPyramidPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ForwardPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ReadbackPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/TonemapPass.cpp
@@ -207,8 +211,21 @@ endif()
 
 set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
-set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl)
-foreach(shader forward.vert forward.frag forward.task forward.mesh fullscreen.vert tonemap.frag)
+set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl
+                         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/forward_task.glsl
+)
+foreach(
+  shader
+  forward.vert
+  forward.frag
+  forward.task
+  forward_early.task
+  forward_late.task
+  forward.mesh
+  fullscreen.vert
+  tonemap.frag
+  depthpyramid.comp
+)
   set(spv ${PHOX_SHADER_OUTPUT_DIR}/${shader}.spv)
   # Task and mesh shaders (VK_EXT_mesh_shader) need SPIR-V 1.4 or later.
   set(target_env)

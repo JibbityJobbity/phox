@@ -37,6 +37,9 @@ struct RendererConfig {
     /// With mesh shaders: cull meshlets outside the view frustum and, for single-sided materials, meshlets
     /// facing away from the camera. Off only to measure what culling gains.
     bool meshletCulling = true;
+    /// With meshlet culling: also cull meshlets hidden behind others, drawing in two passes around a
+    /// depth pyramid. Needs a D32Float depth buffer (nearly every device).
+    bool occlusionCulling = true;
 };
 
 /// GPU time of one render graph pass.
@@ -54,6 +57,7 @@ struct RendererInfo {
     std::uint32_t validationErrors = 0;   ///< error messages reported by the validation layer so far
     std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far
     bool meshShaders = false;             ///< meshes are drawn as meshlets with task and mesh shaders
+    bool occlusionCulling = false;        ///< meshlets are also culled against a depth pyramid
 };
 
 class Renderer {
