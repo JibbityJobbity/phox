@@ -26,13 +26,17 @@ constexpr VkAccessFlags2 kWriteAccess =
     VK_ACCESS_2_HOST_WRITE_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
 
 // Shader stages are not part of the usage, so they come from the kind of pass using the resource.
-VkPipelineStageFlags2 shaderStages(std::optional<PassType> pass) {
-    if (pass == PassType::Graphics) return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+// Graphics passes include the task and mesh stages where the device has them.
+VkPipelineStageFlags2 shaderStages(std::optional<PassType> pass, bool meshShaders) {
+    if (pass == PassType::Graphics) {
+        return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+               (meshShaders ? VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT : 0);
+    }
     if (pass == PassType::Compute) return VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 }
 
-Scope imageScope(ImageUsage usage, std::optional<PassType> pass) {
+Scope imageScope(ImageUsage usage, std::optional<PassType> pass, bool meshShaders) {
     switch (usage) {
     case ImageUsage::Undefined:
         return {VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED};
@@ -46,16 +50,17 @@ Scope imageScope(ImageUsage usage, std::optional<PassType> pass) {
                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     case ImageUsage::DepthReadOnly:
         return {VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
-                    shaderStages(pass),
+                    shaderStages(pass, meshShaders),
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     case ImageUsage::Sampled:
-        return {shaderStages(pass), VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        return {shaderStages(pass, meshShaders), VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     case ImageUsage::StorageRead:
-        return {shaderStages(pass), VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_IMAGE_LAYOUT_GENERAL};
+        return {shaderStages(pass, meshShaders), VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_IMAGE_LAYOUT_GENERAL};
     case ImageUsage::StorageWrite:
-        return {shaderStages(pass), VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL};
+        return {shaderStages(pass, meshShaders),
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL};
     case ImageUsage::TransferSrc:
         return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL};
@@ -68,15 +73,16 @@ Scope imageScope(ImageUsage usage, std::optional<PassType> pass) {
     throw std::logic_error("unknown ImageUsage");
 }
 
-Scope bufferScope(BufferUsage usage, std::optional<PassType> pass) {
+Scope bufferScope(BufferUsage usage, std::optional<PassType> pass, bool meshShaders) {
     switch (usage) {
     case BufferUsage::Undefined: return {VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT};
     case BufferUsage::Vertex: return {VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT};
     case BufferUsage::Index: return {VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT};
-    case BufferUsage::Uniform: return {shaderStages(pass), VK_ACCESS_2_UNIFORM_READ_BIT};
-    case BufferUsage::StorageRead: return {shaderStages(pass), VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
+    case BufferUsage::Uniform: return {shaderStages(pass, meshShaders), VK_ACCESS_2_UNIFORM_READ_BIT};
+    case BufferUsage::StorageRead: return {shaderStages(pass, meshShaders), VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
     case BufferUsage::StorageWrite:
-        return {shaderStages(pass), VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+        return {shaderStages(pass, meshShaders),
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
     case BufferUsage::Indirect: return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
     case BufferUsage::TransferSrc: return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
     case BufferUsage::TransferDst: return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
@@ -131,6 +137,14 @@ VkImageView PassContext::view(ImageHandle handle) const {
         throw std::logic_error("image '" + m_executor.m_graph.imageInfo(handle).name + "' was bound without a view");
     }
     return view;
+}
+VkImageView PassContext::mipView(ImageHandle handle, std::uint32_t level) const {
+    Image *owner = m_executor.boundImage(handle.index).owner;
+    if (owner == nullptr) {
+        throw std::logic_error("image '" + m_executor.m_graph.imageInfo(handle).name +
+                               "' is imported; only transient images have mip views");
+    }
+    return owner->mipView(level);
 }
 Extent2D PassContext::extent(ImageHandle handle) const { return m_executor.m_graph.imageInfo(handle).extent; }
 VkBuffer PassContext::buffer(BufferHandle handle) const { return m_executor.boundBuffer(handle.index).buffer; }
@@ -200,6 +214,7 @@ void GraphExecutor::acquire(const ImageInfo &info) {
     slot.image = image.handle();
     slot.view = image.view();
     slot.pooled = &image;
+    slot.owner = &image;
 }
 
 void GraphExecutor::acquire(const BufferInfo &info) {
@@ -233,12 +248,14 @@ void GraphExecutor::release(const BufferInfo &info) {
 }
 
 void GraphExecutor::barriers(const BarrierBatch &batch) {
+    const bool meshShaders = m_device.meshShaders();
     std::vector<VkImageMemoryBarrier2> images;
     images.reserve(batch.images.size());
     for (const ImageBarrier &b : batch.images) {
         const ImageInfo &info = m_graph.imageInfo(b.image);
-        const Scope src = sourceScope(imageScope(b.from, b.fromPass), !b.fromPass);
-        const Scope dst = destinationScope(imageScope(b.to, b.toPass), !b.toPass, b.to == ImageUsage::Present);
+        const Scope src = sourceScope(imageScope(b.from, b.fromPass, meshShaders), !b.fromPass);
+        const Scope dst =
+            destinationScope(imageScope(b.to, b.toPass, meshShaders), !b.toPass, b.to == ImageUsage::Present);
         VkImageMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         barrier.srcStageMask = src.stages;
@@ -257,8 +274,8 @@ void GraphExecutor::barriers(const BarrierBatch &batch) {
     std::vector<VkBufferMemoryBarrier2> buffers;
     buffers.reserve(batch.buffers.size());
     for (const BufferBarrier &b : batch.buffers) {
-        const Scope src = sourceScope(bufferScope(b.from, b.fromPass), !b.fromPass);
-        const Scope dst = destinationScope(bufferScope(b.to, b.toPass), !b.toPass, false);
+        const Scope src = sourceScope(bufferScope(b.from, b.fromPass, meshShaders), !b.fromPass);
+        const Scope dst = destinationScope(bufferScope(b.to, b.toPass, meshShaders), !b.toPass, false);
         VkBufferMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
         barrier.srcStageMask = src.stages;
@@ -349,12 +366,12 @@ void GraphExecutor::endPass(const CompiledPass &pass) {
     }
 }
 
-VkPipelineStageFlags2 firstUseStage(const RenderGraph &graph, ImageHandle image) {
+VkPipelineStageFlags2 firstUseStage(const RenderGraph &graph, ImageHandle image, bool meshShaders) {
     const auto first = graph.firstUse(image);
     if (!first) {
         return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     }
-    return imageScope(first->usage, first->pass).stages;
+    return imageScope(first->usage, first->pass, meshShaders).stages;
 }
 
 } // namespace phox::vk

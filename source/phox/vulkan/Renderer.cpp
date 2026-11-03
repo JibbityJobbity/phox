@@ -476,7 +476,7 @@ void Renderer::render(const Scene &scene) {
         // Block only the stage that first touches the swapchain image, as reported by the graph.
         waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
         waitInfo.semaphore = frame.imageAvailable();
-        waitInfo.stageMask = firstUseStage(graph, backbuffer);
+        waitInfo.stageMask = firstUseStage(graph, backbuffer, m_device->meshShaders());
         signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
         signalInfo.semaphore = m_renderFinished[imageIndex];
         signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;

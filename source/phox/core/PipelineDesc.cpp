@@ -6,7 +6,7 @@ namespace phox {
 
 bool PipelineDesc::operator==(const PipelineDesc &other) const {
     return vertexShader == other.vertexShader && taskShader == other.taskShader && meshShader == other.meshShader &&
-           fragmentShader == other.fragmentShader &&
+           fragmentShader == other.fragmentShader && computeShader == other.computeShader &&
            vertexLayout == other.vertexLayout && topology == other.topology && raster == other.raster &&
            depth == other.depth && blend == other.blend && colorFormats == other.colorFormats &&
            depthFormat == other.depthFormat && pushConstants == other.pushConstants && setLayouts == other.setLayouts;
@@ -26,6 +26,7 @@ std::size_t PipelineDescHash::operator()(const PipelineDesc &desc) const {
     combine(seed, std::hash<std::string>{}(desc.taskShader));
     combine(seed, std::hash<std::string>{}(desc.meshShader));
     combine(seed, std::hash<std::string>{}(desc.fragmentShader));
+    combine(seed, std::hash<std::string>{}(desc.computeShader));
     for (const VertexAttribute &attribute : desc.vertexLayout.attributes()) {
         combine(seed, enumHash(attribute.semantic));
         combine(seed, enumHash(attribute.format));

@@ -50,22 +50,31 @@ struct PushConstantRange {
 };
 
 /// The descriptor set layouts the renderer defines. A pipeline lists the ones it uses, in set order.
+/// Those for task shaders exist only on devices with mesh shaders.
 enum class SetLayout : std::uint8_t {
     Frame,   ///< binding 0: the per-frame uniform buffer (camera, light), vertex, fragment, task and mesh stages
     Texture, ///< binding 0: one texture with a linear clamp-to-edge sampler, fragment stage
+    MeshletVisibility, ///< binding 0: storage buffer of meshlet visibility bits, task stage
+    DepthPyramid,      ///< binding 0: the depth pyramid with a nearest clamp-to-edge sampler, task stage
+    /// compute stage; binding 0: depth with a nearest clamp-to-edge sampler; 1: the source mip and 2: the
+    /// destination mip of the depth pyramid, as storage images
+    DepthPyramidBuild,
 };
+inline constexpr std::size_t kSetLayoutCount = 5;
 
 /// Everything that identifies a graphics pipeline, in backend-free terms. Equal descriptions (ignoring
 /// the name) produce the same pipeline, so a backend can cache pipelines by description.
 ///
-/// A pipeline either has a vertex shader (with vertex input and topology) or a mesh shader, optionally
-/// fed by a task shader; mesh pipelines have no vertex input, and their topology is set by the shader.
+/// A graphics pipeline either has a vertex shader (with vertex input and topology) or a mesh shader,
+/// optionally fed by a task shader; mesh pipelines have no vertex input, and their topology is set by the
+/// shader. A compute pipeline has only computeShader, push constants and set layouts.
 struct PipelineDesc {
     std::string name;           ///< for debuggers; not part of the pipeline's identity
     std::string vertexShader;   ///< a shader in the shader directory, e.g. "forward.vert"
     std::string taskShader;     ///< mesh pipelines only; empty: the mesh shader is dispatched directly
     std::string meshShader;     ///< set instead of vertexShader for a mesh pipeline, e.g. "forward.mesh"
     std::string fragmentShader; ///< empty: no fragment stage (e.g. depth only)
+    std::string computeShader;  ///< set for a compute pipeline, e.g. "depthpyramid.comp"
     VertexLayout vertexLayout;  ///< empty: no vertex input (e.g. a full-screen triangle)
     Topology topology = Topology::TriangleList;
     RasterState raster;

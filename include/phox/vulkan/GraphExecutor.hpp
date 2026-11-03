@@ -25,6 +25,8 @@ public:
     VkCommandBuffer cmd() const;
     VkImage image(ImageHandle handle) const;
     VkImageView view(ImageHandle handle) const;
+    /// A view of one mip of a transient image, e.g. to write it as a storage image.
+    VkImageView mipView(ImageHandle handle, std::uint32_t level) const;
     Extent2D extent(ImageHandle handle) const;
     VkBuffer buffer(BufferHandle handle) const;
     Device &device() const;
@@ -70,7 +72,8 @@ private:
     struct ImageSlot {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
-        Image *pooled = nullptr;
+        Image *pooled = nullptr; ///< held from the pool until released
+        Image *owner = nullptr;  ///< the pooled image, kept after release for passes that ran before it
     };
     struct BufferSlot {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -94,8 +97,9 @@ private:
 };
 
 /// The pipeline stage at which the compiled graph first touches @p image: the stage a submission must
-/// block when the image arrives through a semaphore (e.g. an acquired swapchain image).
-VkPipelineStageFlags2 firstUseStage(const RenderGraph &graph, ImageHandle image);
+/// block when the image arrives through a semaphore (e.g. an acquired swapchain image). @p meshShaders:
+/// the device has task and mesh shaders, whose stages graphics passes may use.
+VkPipelineStageFlags2 firstUseStage(const RenderGraph &graph, ImageHandle image, bool meshShaders);
 
 } // namespace phox::vk
 

@@ -108,31 +108,56 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
         throw std::runtime_error("failed to create the linear clamp sampler");
     }
 
-    // SetLayout::Frame
-    VkDescriptorSetLayoutBinding frameBinding{};
-    frameBinding.binding = 0;
-    frameBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    frameBinding.descriptorCount = 1;
-    frameBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    if (device.meshShaders()) {
-        frameBinding.stageFlags |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    if (table.vkCreateSampler(dev, &samplerInfo, nullptr, &m_nearestClamp) != VK_SUCCESS) {
+        table.vkDestroySampler(dev, m_linearClamp, nullptr);
+        throw std::runtime_error("failed to create the nearest clamp sampler");
     }
-    // SetLayout::Texture: the sampler is baked into the layout, so a descriptor write only needs a view.
-    VkDescriptorSetLayoutBinding textureBinding{};
-    textureBinding.binding = 0;
-    textureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    textureBinding.descriptorCount = 1;
-    textureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    textureBinding.pImmutableSamplers = &m_linearClamp;
 
-    const VkDescriptorSetLayoutBinding *bindings[] = {&frameBinding, &textureBinding};
+    const auto binding = [](std::uint32_t index, VkDescriptorType type, VkShaderStageFlags stages,
+                            const VkSampler *sampler = nullptr) {
+        VkDescriptorSetLayoutBinding result{};
+        result.binding = index;
+        result.descriptorType = type;
+        result.descriptorCount = 1;
+        result.stageFlags = stages;
+        result.pImmutableSamplers = sampler;
+        return result;
+    };
+    VkShaderStageFlags frameStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (device.meshShaders()) {
+        frameStages |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    }
+    // Samplers are baked into the layouts, so a descriptor write only needs a view. Empty: the layout
+    // needs mesh shaders and the device has none.
+    std::array<std::vector<VkDescriptorSetLayoutBinding>, kSetLayoutCount> layouts;
+    layouts[static_cast<std::size_t>(SetLayout::Frame)] = {binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameStages)};
+    layouts[static_cast<std::size_t>(SetLayout::Texture)] = {
+        binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_linearClamp)};
+    if (device.meshShaders()) {
+        layouts[static_cast<std::size_t>(SetLayout::MeshletVisibility)] = {
+            binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_TASK_BIT_EXT)};
+        layouts[static_cast<std::size_t>(SetLayout::DepthPyramid)] = {
+            binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_TASK_BIT_EXT, &m_nearestClamp)};
+    }
+    layouts[static_cast<std::size_t>(SetLayout::DepthPyramidBuild)] = {
+        binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_nearestClamp),
+        binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT),
+        binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)};
+
     for (std::size_t i = 0; i < m_setLayouts.size(); ++i) {
+        if (layouts[i].empty()) {
+            continue;
+        }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        info.bindingCount = 1;
-        info.pBindings = bindings[i];
+        info.bindingCount = static_cast<std::uint32_t>(layouts[i].size());
+        info.pBindings = layouts[i].data();
         if (table.vkCreateDescriptorSetLayout(dev, &info, nullptr, &m_setLayouts[i]) != VK_SUCCESS) {
             for (VkDescriptorSetLayout layout : m_setLayouts) table.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
+            table.vkDestroySampler(dev, m_nearestClamp, nullptr);
             table.vkDestroySampler(dev, m_linearClamp, nullptr);
             throw std::runtime_error("failed to create a descriptor set layout");
         }
@@ -145,11 +170,16 @@ PipelineCache::~PipelineCache() {
     const auto &table = m_device.table();
     for (const LayoutEntry &entry : m_layouts) table.vkDestroyPipelineLayout(dev, entry.layout, nullptr);
     for (VkDescriptorSetLayout layout : m_setLayouts) table.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
+    table.vkDestroySampler(dev, m_nearestClamp, nullptr);
     table.vkDestroySampler(dev, m_linearClamp, nullptr);
 }
 
 VkDescriptorSetLayout PipelineCache::setLayout(SetLayout layout) const {
-    return m_setLayouts.at(static_cast<std::size_t>(layout));
+    const VkDescriptorSetLayout result = m_setLayouts.at(static_cast<std::size_t>(layout));
+    if (result == VK_NULL_HANDLE) {
+        throw std::runtime_error("this set layout needs mesh shaders, which the device does not have");
+    }
+    return result;
 }
 
 const Pipeline &PipelineCache::get(const PipelineDesc &desc) {
@@ -187,7 +217,31 @@ VkPipelineLayout PipelineCache::pipelineLayout(const PipelineDesc &desc) {
     return layout;
 }
 
+std::unique_ptr<Pipeline> PipelineCache::createCompute(const PipelineDesc &desc) {
+    if (!desc.vertexShader.empty() || !desc.meshShader.empty() || !desc.fragmentShader.empty()) {
+        throw std::logic_error("compute pipeline '" + desc.name + "' has graphics shaders");
+    }
+    const VkPipelineLayout layout = pipelineLayout(desc);
+    VkComputePipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    info.stage.module = m_shaders.get(desc.computeShader).module();
+    info.stage.pName = "main";
+    info.layout = layout;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (m_device.table().vkCreateComputePipelines(m_device.handle(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) !=
+        VK_SUCCESS) {
+        throw std::runtime_error("failed to create pipeline '" + desc.name + "'");
+    }
+    m_device.setObjectName(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<std::uint64_t>(pipeline), desc.name);
+    return std::make_unique<Pipeline>(m_device, desc, pipeline, layout);
+}
+
 std::unique_ptr<Pipeline> PipelineCache::create(const PipelineDesc &desc) {
+    if (!desc.computeShader.empty()) {
+        return createCompute(desc);
+    }
     const bool mesh = !desc.meshShader.empty();
     if (desc.vertexShader.empty() == !mesh) {
         throw std::logic_error("pipeline '" + desc.name + "' needs either a vertex shader or a mesh shader");
