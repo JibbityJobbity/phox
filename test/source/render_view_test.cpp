@@ -258,6 +258,54 @@ void frustumPlanesBoundClipSpace() {
     }
 }
 
+void projectedSpheresBoundTheirSilhouette() {
+    const mat4 proj = perspective(glm::radians(70.0f), 1.6f, 0.1f, 50.0f);
+    // Texture coordinates of a view-space point, as the GPU maps them (y down).
+    const auto screen = [&](const vec3 &p) {
+        const vec4 clip = proj * vec4(p, 1.0f);
+        return vec2(clip) / clip.w * 0.5f + 0.5f;
+    };
+    const std::array<std::pair<vec3, float>, 5> spheres{{{{0.0f, 0.0f, -5.0f}, 1.0f},
+                                                         {{3.0f, -1.5f, -4.0f}, 0.5f},
+                                                         {{-6.0f, 4.0f, -3.0f}, 1.5f}, // largely off screen
+                                                         {{0.5f, 0.2f, -1.0f}, 0.8f},  // close: a wide rectangle
+                                                         {{-1.0f, 2.0f, -20.0f}, 0.1f}}};
+    for (const auto &[center, radius] : spheres) {
+        vec4 bounds;
+        CHECK(projectSphere(center, radius, proj, bounds));
+        CHECK(bounds.x < bounds.z && bounds.y < bounds.w);
+        // Every point of the sphere projects inside; points on its silhouette reach every edge.
+        vec4 reached{2.0f, 2.0f, -2.0f, -2.0f};
+        for (int i = 0; i < 64; ++i) {
+            for (int j = 0; j <= 32; ++j) {
+                const float theta = glm::two_pi<float>() * static_cast<float>(i) / 64.0f;
+                const float phi = glm::pi<float>() * static_cast<float>(j) / 32.0f;
+                const vec3 p = center + radius * vec3(std::sin(phi) * std::cos(theta), std::cos(phi),
+                                                      std::sin(phi) * std::sin(theta));
+                const vec2 uv = screen(p);
+                CHECK(uv.x >= bounds.x - 1e-4f && uv.x <= bounds.z + 1e-4f);
+                CHECK(uv.y >= bounds.y - 1e-4f && uv.y <= bounds.w + 1e-4f);
+                reached = {std::min(reached.x, uv.x), std::min(reached.y, uv.y), std::max(reached.z, uv.x),
+                           std::max(reached.w, uv.y)};
+            }
+        }
+        const float tolerance = 0.02f * std::max(bounds.z - bounds.x, bounds.w - bounds.y);
+        CHECK(glm::all(glm::lessThanEqual(glm::abs(reached - bounds), vec4(tolerance))));
+    }
+    vec4 bounds;
+    CHECK(!projectSphere({0.0f, 0.0f, -0.5f}, 0.45f, proj, bounds)); // reaches the near plane
+    CHECK(!projectSphere({0.0f, 0.0f, 2.0f}, 0.5f, proj, bounds));   // behind the camera
+}
+
+void depthPyramidIsPowersOfTwo() {
+    CHECK((depthPyramidExtent({1920, 1080}) == Extent2D{1024, 1024}));
+    CHECK((depthPyramidExtent({320, 240}) == Extent2D{256, 128}));
+    CHECK((depthPyramidExtent({512, 1}) == Extent2D{512, 1}));
+    CHECK(depthPyramidLevels({1024, 1024}) == 11);
+    CHECK(depthPyramidLevels({256, 128}) == 9);
+    CHECK(depthPyramidLevels({1, 1}) == 1);
+}
+
 void objectsHaveTheirOwnIds() {
     Scene scene;
     Object &a = scene.addObject("a", nullptr, Material{});
@@ -327,6 +375,8 @@ int main() {
     coneCullingIsConservative();
     frustumPlanesBoundClipSpace();
     singleSidedMaterialsCullBackFaces();
+    projectedSpheresBoundTheirSilhouette();
+    depthPyramidIsPowersOfTwo();
     objectsHaveTheirOwnIds();
     loadsObjFiles();
     std::cout << "render view tests passed" << std::endl;

@@ -4,6 +4,8 @@
 
 #include <meshoptimizer.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 namespace phox {
@@ -96,6 +98,47 @@ bool sphereOutsideFrustum(const std::array<vec4, 6> &planes, const vec3 &center,
         }
     }
     return false;
+}
+
+namespace {
+
+// The slopes x/d of the two lines from the eye that touch a circle of radius r centred at (x, d) in one
+// plane through the view axis (d: distance in front of the camera, greater than r).
+vec2 tangentSlopes(float x, float d, float r) {
+    const float l = std::sqrt(x * x + d * d - r * r);
+    return {(x * l - d * r) / (d * l + x * r), (x * l + d * r) / (d * l - x * r)};
+}
+
+std::uint32_t floorPowerOfTwo(std::uint32_t value) {
+    std::uint32_t result = 1;
+    while (result * 2 <= value) result *= 2;
+    return result;
+}
+
+} // namespace
+
+bool projectSphere(const vec3 &center, float radius, const mat4 &proj, vec4 &bounds) {
+    const float d = -center.z;
+    const float nearZ = proj[3][2] / proj[2][2];
+    if (d - radius < nearZ) {
+        return false;
+    }
+    // Clip x = proj[0][0] * view x and clip y = proj[1][1] * view y (negative: Vulkan's y points down),
+    // both over w = d.
+    const vec2 x = tangentSlopes(center.x, d, radius) * proj[0][0];
+    const vec2 y = tangentSlopes(center.y, d, radius) * proj[1][1];
+    bounds = vec4(std::min(x.x, x.y), std::min(y.x, y.y), std::max(x.x, x.y), std::max(y.x, y.y)) * 0.5f + 0.5f;
+    return true;
+}
+
+Extent2D depthPyramidExtent(Extent2D extent) {
+    return {floorPowerOfTwo(std::max(extent.width, 1u)), floorPowerOfTwo(std::max(extent.height, 1u))};
+}
+
+std::uint32_t depthPyramidLevels(Extent2D extent) {
+    std::uint32_t levels = 1;
+    for (std::uint32_t size = std::max(extent.width, extent.height); size > 1; size /= 2) ++levels;
+    return levels;
 }
 
 } // namespace phox

@@ -2,6 +2,7 @@
 #define PHOX_MESHLETS_HPP
 
 #include "phox/Math.hpp"
+#include "phox/Resources.hpp"
 
 #include <array>
 #include <cstdint>
@@ -61,6 +62,20 @@ std::array<vec4, 6> frustumPlanes(const mat4 &viewProj);
 
 /// Whether a sphere lies entirely outside one of @p planes (from frustumPlanes).
 bool sphereOutsideFrustum(const std::array<vec4, 6> &planes, const vec3 &center, float radius);
+
+/// The screen rectangle a sphere covers under the symmetric perspective projection @p proj (phox::perspective):
+/// (min x, min y, max x, max y) in texture coordinates of the render target, (0, 0) top left and (1, 1)
+/// bottom right, not clamped. Exact for the sphere's silhouette, so it holds every pixel the sphere's
+/// contents can cover. The occlusion test of the meshlet path (forward_task.glsl) does the same.
+/// @param center  view space (the camera looks down -Z)
+/// @return false when the sphere reaches the near plane: it then covers no bounded rectangle.
+bool projectSphere(const vec3 &center, float radius, const mat4 &proj, vec4 &bounds);
+
+/// The size of mip 0 of the depth pyramid for a depth buffer of @p extent: the largest power of two not
+/// above it in each axis, so that every further mip exactly halves it.
+Extent2D depthPyramidExtent(Extent2D extent);
+/// Mips of a pyramid with mip 0 of @p extent, down to 1x1.
+std::uint32_t depthPyramidLevels(Extent2D extent);
 
 } // namespace phox
 
