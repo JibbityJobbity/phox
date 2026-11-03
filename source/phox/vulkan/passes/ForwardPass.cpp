@@ -81,7 +81,6 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkD
                     constants.cameraPosition = glm::inverse(draw.model) * vec4(view.cameraPosition, 1.0f);
                     constants.vertices = mesh.vertices->deviceAddress();
                     constants.meshlets = mesh.meshlets->deviceAddress();
-                    constants.meshletData = mesh.meshletData->deviceAddress();
                     constants.meshletCount = mesh.meshletCount;
                     if (meshletCulling) {
                         constants.flags = kMeshletFrustumCulling | (draw.cullBackFaces ? kMeshletConeCulling : 0u);

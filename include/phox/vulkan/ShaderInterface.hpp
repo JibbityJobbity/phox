@@ -36,18 +36,18 @@ inline constexpr std::uint32_t kMeshletConeCulling = 1u << 1;
 inline constexpr std::uint32_t kMeshletTaskGroupSize = 32;
 
 /// Push constants for one draw on the meshlet path: task, mesh and fragment stages. Starts like
-/// DrawPushConstants, which is all forward.frag reads. Exactly 128 bytes, the smallest maximum Vulkan allows.
+/// DrawPushConstants, which is all forward.frag reads. At most 128 bytes, the smallest maximum Vulkan allows.
 struct MeshletDrawPushConstants {
     vec4 albedo{1.0f};
     mat4 model{1.0f};
-    vec4 cameraPosition{0.0f};      ///< xyz: the camera in the mesh's object space, for cone culling
-    std::uint64_t vertices = 0;     ///< device address of the mesh's Vertex array
-    std::uint64_t meshlets = 0;     ///< device address of its Meshlet array
-    std::uint64_t meshletData = 0;  ///< device address of its MeshletMesh::data
+    vec4 cameraPosition{0.0f};  ///< xyz: the camera in the mesh's object space, for cone culling
+    std::uint64_t vertices = 0; ///< device address of the mesh's Vertex array
+    /// device address of its Meshlet array, followed by the meshlet data that the meshlets' offsets index
+    std::uint64_t meshlets = 0;
     std::uint32_t meshletCount = 0;
-    std::uint32_t flags = 0;        ///< kMeshletFrustumCulling | kMeshletConeCulling
+    std::uint32_t flags = 0; ///< kMeshletFrustumCulling | kMeshletConeCulling
 };
-static_assert(sizeof(MeshletDrawPushConstants) == 128, "must match MeshletDrawPushConstants in shaders/common.glsl");
+static_assert(sizeof(MeshletDrawPushConstants) == 120, "must match MeshletDrawPushConstants in shaders/common.glsl");
 
 /// Push constants of the tonemap pass (shaders/tonemap.frag), fragment stage.
 struct TonemapPushConstants {

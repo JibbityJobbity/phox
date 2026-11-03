@@ -8,6 +8,7 @@
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,36 +38,53 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
         }
 
         const std::string name = "mesh " + std::to_string(mesh.id());
-        const auto upload = [&](const void *data, VkDeviceSize bytes, BufferUsageMask usage, const char *what) {
-            auto buffer = m_device.makeBuffer({bytes, usage | usageBit(BufferUsage::TransferDst), MemoryLocation::DeviceLocal,
-                                               name + " " + what, m_meshlets});
-            const UploadArena::Allocation staging = frame.arena().upload(data, bytes);
-            const VkBufferCopy copy{staging.offset, 0, bytes};
-            table.vkCmdCopyBuffer(cmd, staging.buffer, buffer->handle(), 1, &copy);
+        // One buffer per part, filled from a list of pieces copied one after another.
+        struct Piece {
+            const void *data;
+            VkDeviceSize bytes;
+        };
+        const auto upload = [&](std::initializer_list<Piece> pieces, BufferUsageMask usage, const char *what) {
+            VkDeviceSize total = 0;
+            for (const Piece &piece : pieces) total += piece.bytes;
+            auto buffer = m_device.makeBuffer({total, usage | usageBit(BufferUsage::TransferDst),
+                                               MemoryLocation::DeviceLocal, name + " " + what, m_meshlets});
+            VkDeviceSize offset = 0;
+            for (const Piece &piece : pieces) {
+                const UploadArena::Allocation staging = frame.arena().upload(piece.data, piece.bytes);
+                const VkBufferCopy copy{staging.offset, offset, piece.bytes};
+                table.vkCmdCopyBuffer(cmd, staging.buffer, buffer->handle(), 1, &copy);
+                offset += piece.bytes;
+            }
             return buffer;
         };
         const std::vector<std::uint32_t> indices = optimizeIndexOrder(mesh);
         if (m_meshlets) {
-            const MeshletMesh meshlets = buildMeshlets(mesh, indices);
+            MeshletMesh meshlets = buildMeshlets(mesh, indices);
+            // The data follows the meshlets in the buffer: make its offsets count from the buffer's start.
+            const auto dataStart =
+                static_cast<std::uint32_t>(meshlets.meshlets.size() * sizeof(Meshlet) / sizeof(std::uint32_t));
+            for (Meshlet &meshlet : meshlets.meshlets) {
+                meshlet.vertexOffset += dataStart;
+                meshlet.triangleOffset += dataStart;
+            }
             const std::uint64_t groups = (meshlets.meshlets.size() + kMeshletTaskGroupSize - 1) / kMeshletTaskGroupSize;
             if (groups > m_device.meshShaderProperties().maxTaskWorkGroupCount[0]) {
                 throw std::runtime_error(name + " has " + std::to_string(meshlets.meshlets.size()) +
                                          " meshlets, more than one draw can launch");
             }
-            entry.vertices = upload(mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size(),
+            entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
                                     usageBit(BufferUsage::StorageRead), "vertices");
-            entry.meshlets = upload(meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size(),
+            entry.meshlets = upload({{meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size()},
+                                     {meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size()}},
                                     usageBit(BufferUsage::StorageRead), "meshlets");
-            entry.meshletData = upload(meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size(),
-                                       usageBit(BufferUsage::StorageRead), "meshlet data");
             entry.meshletCount = static_cast<std::uint32_t>(meshlets.meshlets.size());
             log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets)", mesh.id(), mesh.version(),
                        mesh.triangleCount(), meshlets.meshlets.size());
         } else {
-            entry.vertices = upload(mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size(),
+            entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
                                     usageBit(BufferUsage::Vertex), "vertices");
-            entry.indices = upload(indices.data(), sizeof(std::uint32_t) * indices.size(), usageBit(BufferUsage::Index),
-                                   "indices");
+            entry.indices = upload({{indices.data(), sizeof(std::uint32_t) * indices.size()}},
+                                   usageBit(BufferUsage::Index), "indices");
             entry.indexCount = static_cast<std::uint32_t>(indices.size());
             log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(),
                        mesh.triangleCount());

@@ -28,14 +28,15 @@ struct Meshlet {
     vec4 sphere;   // xyz: centre (object space); w: radius
     vec4 cone;     // xyz: axis; w: cutoff, above 1 when there is no cone
     vec4 coneApex; // xyz
-    uvec4 range;   // vertex offset, triangle offset, vertex count, triangle count (in MeshletData)
+    uvec4 range;   // vertex offset, triangle offset (uints from the start of the meshlet buffer), counts
 };
 
 // phox::Vertex, read as floats: position (0-2), normal (3-5), texcoord (6-7).
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer { float values[]; };
+// The meshlets, followed by phox::MeshletMesh::data (per meshlet, vertex indices, then triangles of three
+// 8-bit local indices), which is read through a MeshletDataBuffer of the same address.
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletBuffer { Meshlet meshlets[]; };
-// phox::MeshletMesh::data: per meshlet, vertex indices, then triangles of three 8-bit local indices.
-layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer MeshletDataBuffer { uint values[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletDataBuffer { uint values[]; };
 
 const uint kMeshletFrustumCulling = 1u;
 const uint kMeshletConeCulling = 2u;
@@ -46,7 +47,6 @@ layout(push_constant) uniform MeshletDrawPushConstants {
     vec4 cameraPosition; // xyz: the camera in the mesh's object space
     VertexBuffer vertices;
     MeshletBuffer meshlets;
-    MeshletDataBuffer meshletData;
     uint meshletCount;
     uint flags; // kMeshletFrustumCulling | kMeshletConeCulling
 } draw;

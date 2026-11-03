@@ -31,8 +31,9 @@ public:
     struct GpuMesh {
         std::unique_ptr<Buffer> vertices;
         std::unique_ptr<Buffer> indices;     ///< vertex path only
-        std::unique_ptr<Buffer> meshlets;    ///< meshlet path only: phox::Meshlet[]
-        std::unique_ptr<Buffer> meshletData; ///< meshlet path only: MeshletMesh::data
+        /// meshlet path only: phox::Meshlet[], then MeshletMesh::data. The meshlets' offsets count uints
+        /// from the start of the buffer, so shaders read both through one address.
+        std::unique_ptr<Buffer> meshlets;
         std::uint32_t indexCount = 0;
         std::uint32_t meshletCount = 0;
         std::uint64_t version = 0;

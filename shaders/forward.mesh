@@ -18,6 +18,7 @@ layout(location = 0) out vec3 outNormal[]; // world space
 
 void main() {
     Meshlet meshlet = draw.meshlets.meshlets[task.meshlets[gl_WorkGroupID.x]];
+    MeshletDataBuffer meshletData = MeshletDataBuffer(draw.meshlets);
     uint vertexOffset = meshlet.range.x;
     uint triangleOffset = meshlet.range.y;
     uint vertexCount = meshlet.range.z;
@@ -26,7 +27,7 @@ void main() {
 
     uint lane = gl_LocalInvocationIndex;
     if (lane < vertexCount) {
-        uint base = draw.meshletData.values[vertexOffset + lane] * 8u;
+        uint base = meshletData.values[vertexOffset + lane] * 8u;
         vec3 position = vec3(draw.vertices.values[base], draw.vertices.values[base + 1u], draw.vertices.values[base + 2u]);
         vec3 normal = vec3(draw.vertices.values[base + 3u], draw.vertices.values[base + 4u], draw.vertices.values[base + 5u]);
         // Same expressions as forward.vert, so both paths produce the same vertices.
@@ -34,7 +35,7 @@ void main() {
         gl_MeshVerticesEXT[lane].gl_Position = frame.viewProj * draw.model * vec4(position, 1.0);
     }
     for (uint i = lane; i < triangleCount; i += 64u) {
-        uint packed = draw.meshletData.values[triangleOffset + i];
+        uint packed = meshletData.values[triangleOffset + i];
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
     }
 }
