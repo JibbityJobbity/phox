@@ -130,8 +130,11 @@ the final barriers.
 `vk::GraphExecutor` is created per frame. It takes transients from the `TransientPool`, issues one
 `vkCmdPipelineBarrier2` per batch, begins dynamic rendering from the declared attachments (and sets a full
 viewport and scissor, since every pipeline uses them as dynamic state), and labels passes when debug utils
-are on. Pass bodies get a `vk::PassContext`: command buffer, `image`, `view`, `extent`, `buffer`, the device
-and the frame context.
+are on. Pass bodies get a `vk::PassContext`: command buffer, `image`, `view`, `mipView` (one mip of a
+transient, created on first use and kept with the pooled image), `extent`, `buffer`, the device and the frame
+context. On devices with mesh shaders, the shader stages of graphics passes include the task and mesh
+stages, so barriers cover what task shaders read and write. A pass may order its own work with barriers of
+its own (the depth pyramid does, between mips); the graph sees the pass's usage of the whole resource.
 
 The pool hands a released resource out again immediately rather than after the frames in flight have
 finished, as first planned. That is safe because all frames go to one queue and a transient's first use is a
@@ -149,8 +152,10 @@ acquire(swapchain, frame.imageAvailable)             out of date: recreate, skip
 view = extractView(scene, extent)                    core, no Vulkan
 frameSet = FrameUniforms for the view, in the arena
 meshes.prepare(view, frame, cmd)                     copies recorded before the graph, one barrier
+visibility.prepare(view, meshes, frame)              occlusion culling: words of meshlet visibility bits per draw
 graph: forward -> hdr -> tonemap -> backbuffer       (windowed: the swapchain image is a colour attachment)
        forward -> hdr -> tonemap -> display -> readback -> imported HostRead buffer   (headless)
+       with occlusion culling, forward is (clear visibility ->) forward early -> depth pyramid -> forward late
 compile; execute
 submit2: wait imageAvailable at firstUseStage(backbuffer); signal renderFinished[image]; fence
 present                                              suboptimal or out of date: recreate
@@ -169,9 +174,11 @@ previous one.
   shader with an optional task shader), vertex layout, topology, raster, depth and blend state, attachment
   formats, push constant ranges and the set layouts used. Equal descriptions (ignoring the name) hash equal.
 - `vk::ShaderLibrary` loads `<name>.spv` from `PHOX_SHADER_DIR` once.
-- `vk::PipelineCache` creates dynamic-rendering pipelines on first request and caches pipeline layouts. It owns
-  the fixed set layouts: `Frame` (the per-frame uniform buffer) and `Texture` (a combined image sampler with an
-  immutable linear clamp sampler, so a descriptor write needs only a view). The renderer builds its pipelines
+- `vk::PipelineCache` creates dynamic-rendering pipelines, and compute pipelines (a description with only
+  `computeShader`), on first request and caches pipeline layouts. It owns the fixed set layouts: `Frame` (the
+  per-frame uniform buffer), `Texture` (a combined image sampler with an immutable linear clamp sampler, so a
+  descriptor write needs only a view), `MeshletVisibility` and `DepthPyramid` (task stage; only on devices
+  with mesh shaders) and `DepthPyramidBuild` (compute). The renderer builds its pipelines
   during initialization, so broken shaders select the software fallback instead of failing the first frame.
 - `shaders/common.glsl`, mirrored by `include/phox/vulkan/ShaderInterface.hpp`:
   - set 0 `FrameUniforms` (352 bytes): view, proj, viewProj, camera position, light direction with the ambient
@@ -181,8 +188,9 @@ previous one.
     llvmpipe (Mesa 25.1) reads the colour of constant-output fragment shaders from offset 0 on fully covered
     tiles;
   - on the meshlet path, `MeshletDrawPushConstants` (128 bytes, task, mesh and fragment): the same two members,
-    then the camera in object space, the device addresses of the mesh's vertices, meshlets and meshlet data,
-    the meshlet count and the culling flags. Code defining `PHOX_MESHLET_DRAW` gets this block instead, so
+    then the camera in object space, the device addresses of the mesh's vertices and of its meshlets
+    (followed by their data), the meshlet count, the culling flags and the draw's first word of visibility
+    bits (6.2). Code defining `PHOX_MESHLET_DRAW` gets this block instead, so
     `forward.frag` serves both paths.
 - `vk::DescriptorAllocator` is per frame: pools reset together and grow when one runs out.
 
@@ -204,10 +212,12 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 
-- `addForwardPass(graph, view, frameSet, color, depth, meshes, pipelines, meshletCulling)`: clears, then draws
-  each item with per-draw push constants, lit two-sided by the directional light: indexed draws, or one
-  `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds meshlets (6.1). Two pipelines per path, culling
-  none or back faces, share a layout, so set 0 is bound once.
+- `addForwardPass(graph, view, frameSet, color, depth, meshes, pipelines, meshletCulling, occlusion)`: clears,
+  then draws each item with per-draw push constants, lit two-sided by the directional light: indexed draws,
+  or one `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds meshlets (6.1). Two pipelines per path,
+  culling none or back faces, share a layout, so the descriptor sets are bound once. With `occlusion` it adds
+  the passes of 6.2 instead of one.
+- `addDepthPyramidPass(graph, depth, pipelines)`: builds the depth pyramid of 6.2 and returns it.
 - `addTonemapPass(graph, hdr, target, mapping, pipelines)`: a full-screen triangle reading the HDR image with
   `texelFetch`; it writes every pixel, so the target's load op is DontCare.
 - `addReadbackPass(graph, source, buffer)`: copies an 8-bit image into a buffer.
@@ -223,8 +233,9 @@ with `RendererConfig::meshShaders` off, it uses the vertex pipeline. Both paths 
   normal cone. A `Meshlet` is laid out as the shaders read it (64 bytes). `MeshletMesh::data` holds each
   meshlet's vertex indices followed by its triangles, packed one per `uint` as three 8-bit local indices, so
   no 8-bit storage feature is needed.
-- **Buffers**: the meshlet path reads the vertex, meshlet and data buffers through buffer device addresses
-  (Vulkan 1.3 guarantees `bufferDeviceAddress`) in push constants: no descriptor writes per draw.
+- **Buffers**: the meshlet path reads the vertex buffer and the meshlet buffer (meshlets, then their data)
+  through buffer device addresses (Vulkan 1.3 guarantees `bufferDeviceAddress`) in push constants: no
+  descriptor writes per draw.
 - **`forward.task`**: 32 meshlets per workgroup, one per invocation. A meshlet is dropped if its bounding
   sphere (moved into world space, radius scaled by the transform's largest axis) is outside a frustum plane,
   or, for back-face-culled draws, if its normal cone faces away from the camera. The cone test runs in object
@@ -242,7 +253,47 @@ object culling, 15.3 million triangles), forward pass GPU time: vertex shaders 1
 without meshlet culling 1.07 ms, with it 0.86 ms. Mesh shading on its own is about even with the vertex
 pipeline; the gain is the culling. The three images are identical. Back-facing culling depends on how
 finely a mesh is tessellated: on the benchmark's 65k-triangle torus, about 42% of meshlets face away from a
-typical viewpoint, against 14% for a 4k-triangle one.
+typical viewpoint, against 14% for a 4k-triangle one. Occlusion culling (6.2) brings the forward work down
+to 0.64 ms.
+
+### 6.2 Occlusion culling
+
+With mesh shaders, meshlet culling and a D32 depth buffer (`RendererConfig::occlusionCulling`, on by
+default), meshlets hidden behind others are culled too, in two phases:
+
+1. **forward early** draws the meshlets that were visible at the end of the previous frame, with frustum
+   and cone culling. From one frame to the next that is nearly the whole visible set.
+2. **depth pyramid** (compute) builds a hierarchical depth buffer from its depth: mip 0 is the largest
+   power-of-two size not above the target's, each texel the farthest depth of every depth pixel it overlaps
+   (up to 3 x 3); each further mip keeps the farthest of 2 x 2, down to 1x1. Plain fetches, no min/max
+   sampler (optional for depth formats). One pass, with barriers of its own between mips.
+3. **forward late** tests every meshlet, frustum and cone first, then occlusion: the bounding sphere's
+   screen rectangle (`phox::projectSphere`, exact for a symmetric perspective, mirrored in the shader) is
+   looked up at the mip where it spans at most one texel, so it touches at most 2 x 2; the meshlet is
+   hidden if the sphere's nearest depth is beyond the farthest of those. It records which meshlets are
+   visible and draws those the early pass did not.
+
+This is exact, not approximate: a meshlet with a visible pixel is nearer there than whatever the early pass
+drew, so it passes the late test against a pyramid that holds the farthest of those depths. Spheres reaching
+the near plane are kept. The goldens are rendered with it, and must match the other paths.
+
+- **Visibility bits** (`vk::MeshletVisibility`): one bit per meshlet, in whole 32-bit words per draw, so each
+  task shader workgroup reads and writes its own word without atomics. Draws are keyed by `Object::id()`,
+  which is stable across frames (draw items are re-sorted every frame). Ranges come from a bump allocator;
+  when it is full, the store starts over with every bit cleared (a "clear visibility" transfer pass),
+  growing to twice what the frame needs. The bits are a hint, so starting over only costs one frame of
+  culling. The buffer is imported into each frame's graph (StorageWrite to StorageWrite; Undefined when
+  cleared), read by the early pass and written by the late one.
+- **Task shaders**: `forward_task.glsl` built three ways (`forward.task`, `forward_early.task`,
+  `forward_late.task`), so each pipeline declares only the sets it uses: the late one adds set 1 (visibility)
+  and set 2 (the pyramid with a nearest sampler), the early one set 1.
+- **Push constants**: to make room for the draw's visibility offset in 128 bytes, a mesh's meshlets and their
+  data share one buffer, and the meshlets' offsets count from its start.
+
+On the RTX 3080 (`field`, 1080p, 200 frames of one pose): forward early 0.56 ms, depth pyramid 0.05 ms,
+forward late 0.03 ms, 0.64 ms in all, against 0.87 ms with frustum and cone culling only and 1.12 to 1.17 ms
+with vertex shaders. With the scene animating (`--animate`) the late pass draws more of the frame's newly
+visible meshlets and takes 0.04 ms; the total stays at 0.65 ms. The four images are identical.
 
 ## 7. Upload and caches
 
@@ -266,8 +317,10 @@ typical viewpoint, against 14% for a 4k-triangle one.
   and warnings in `Renderer::info()`. Loader messages are not counted.
 - Goldens are rendered on lavapipe at 320x240 and compared with a tolerance of 2 per channel on all but 0.5% of
   pixels; the RTX 3080 matches lavapipe within one unit apart from a pixel on an edge. The golden test renders
-  every case with vertex shaders and again with mesh shaders (skipped on devices without them unless
-  `PHOX_REQUIRE_MESH_SHADERS=1`); both must match the same images.
+  every case with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum
+  and cone culling only (the mesh runs are skipped on devices without them unless
+  `PHOX_REQUIRE_MESH_SHADERS=1`); all must match the same images. Each case renders three frames, so the
+  occlusion run uses both empty and inherited visibility bits.
 - `vk::PassTimer` (one per frame context) writes a timestamp pair around each graph pass; the times are read
   once the frame's fence has signalled and reported by `Renderer::gpuTimings()`.
 
@@ -293,19 +346,20 @@ include/phox/                 CpuImage, Log, Math, Resources, RenderGraph, Rende
 include/phox/pipeline/        PipelineDesc, Pipeline, Shader
 include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameContext, UploadArena,
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
-                              ShaderInterface, MeshCache, PassTimer, Conversions, VulkanCommon
-include/phox/vulkan/passes/   ForwardPass, TonemapPass, ReadbackPass
-shaders/                      common.glsl, forward.vert/.frag/.task/.mesh, fullscreen.vert, tonemap.frag
+                              ShaderInterface, MeshCache, MeshletVisibility, PassTimer, Conversions, VulkanCommon
+include/phox/vulkan/passes/   ForwardPass, DepthPyramidPass, TonemapPass, ReadbackPass
+shaders/                      common.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
+                              forward_early.task and forward_late.task, depthpyramid.comp, fullscreen.vert,
+                              tonemap.frag
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
 test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
 ```
 
 ## 11. Next, and where each thing plugs in
 
-- **Occlusion culling of meshlets.** A compute pass builds a depth pyramid from the previous frame's depth
-  (kept by the graph as an imported image); the task shader tests each meshlet's sphere against it. The
-  usual two-phase scheme redraws what was rejected wrongly against the current frame's pyramid. This is
-  where mesh shading gains most in dense, self-occluding scenes.
+- **Object-level occlusion culling on the GPU.** Objects are culled against the frustum on the CPU, and every
+  meshlet of a surviving object is tested on the GPU. A compute pass over objects, writing indirect mesh task
+  draws, would cull whole hidden objects against the pyramid first.
 - **Meshlet LOD and instancing.** A draw per object pushes 128 bytes; many instances of one mesh would rather
   read transforms from a buffer, and distant objects want coarser meshlets (meshoptimizer's simplifier).
 

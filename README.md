@@ -11,9 +11,10 @@ image, and falls back to a software rasterizer when there is no usable GPU.
 - **Forward rendering into HDR** with depth testing, then tone mapping (clamp, Reinhard or ACES) straight
   into the swapchain image.
 - **Mesh shading** where the device has `VK_EXT_mesh_shader`: meshes are split into meshlets with
-  meshoptimizer, and a task shader skips meshlets outside the view frustum or facing away from the camera.
-  Elsewhere the same images come from the vertex pipeline. See
-  [architecture section 6.1](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
+  meshoptimizer, and a task shader skips meshlets outside the view frustum, facing away from the camera,
+  or hidden behind what is already drawn (two-phase occlusion culling against a depth pyramid). Elsewhere
+  the same images come from the vertex pipeline. See [architecture sections 6.1 and
+  6.2](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
   dynamic rendering.
 - **Verified output**: golden images rendered on lavapipe, checked with the Khronos validation layer
   (including synchronization validation) on every CI run.
@@ -38,8 +39,8 @@ Useful options:
 | --- | --- |
 | `--scene triangle\|cubes\|tori\|field` | the sample scene to show (`field` is a 37.7-million-triangle benchmark) |
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
-| `--frames N` (headless) | render N frames of one pose and print the average GPU time per pass |
-| `--mesh-shaders on\|off\|nocull` | draw with task and mesh shaders where available; `nocull` turns meshlet culling off |
+| `--frames N` (headless) | render N frames of one pose (`--animate`: advancing 1/60 s each) and print the average GPU time per pass |
+| `--mesh-shaders on\|off\|noocclusion\|nocull` | draw with task and mesh shaders where available; `noocclusion` keeps frustum and cone culling only, `nocull` turns meshlet culling off |
 | `--time S`, `--size WxH`, `--output FILE` | headless: animation time, image size, output path |
 | `--tonemap clamp\|reinhard\|aces`, `--exposure X` | tone mapping |
 | `--debug` | validation layer and debug logging; exits with status 3 if validation reported anything |
@@ -58,9 +59,9 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | Test | What it checks | GPU |
 | --- | --- | --- |
 | `render_graph` | culling, versions, barriers, lifetimes, attachments, validation of declarations, DOT export | no |
-| `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, meshlets and their culling tests, software rasterizer, OBJ loading | no |
+| `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, meshlets and their culling tests, sphere projection, software rasterizer, OBJ loading | no |
 | `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
-| `golden` | renders the sample scenes with vertex shaders and again with mesh shaders, and compares both with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
+| `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
 
 The golden test reads a few environment variables:
 
