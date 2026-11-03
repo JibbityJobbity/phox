@@ -84,14 +84,15 @@ int main(int argc, char **argv) {
     ("frames", "with --window: stop after this many frames; headless: render this many frames (one image) and "
                "report average GPU times", cxxopts::value<long>()->default_value("0"))
     ("time", "headless: the animation time to render, in seconds", cxxopts::value<float>()->default_value("0"))
+    ("animate", "headless with --frames: advance the animation by 1/60 s per frame instead of repeating one pose")
     ("size", "headless: image size", cxxopts::value<std::string>()->default_value("640x480"))
     ("output", "headless: where to write the image (default build/rendered_<scene>.ppm)", cxxopts::value<std::string>())
     ("debug", "enable the Vulkan validation layer and debug logging")
     ("device", "use the GPU whose name contains this text", cxxopts::value<std::string>())
     ("tonemap", "tone mapping: clamp, reinhard or aces", cxxopts::value<std::string>()->default_value("clamp"))
     ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
-    ("mesh-shaders", "draw with task and mesh shaders where available: on, off, or nocull (no meshlet culling)",
-     cxxopts::value<std::string>()->default_value("on"))
+    ("mesh-shaders", "draw with task and mesh shaders where available: on, off, noocclusion (frustum and cone "
+                     "culling only) or nocull (no meshlet culling)", cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
     ("h,help", "show this help");
   // clang-format on
@@ -129,11 +130,12 @@ int main(int argc, char **argv) {
     }
     config.captureFrameGraph = args.count("dump-graph") > 0;
     const std::string meshShaders = args["mesh-shaders"].as<std::string>();
-    if (meshShaders != "on" && meshShaders != "off" && meshShaders != "nocull") {
-      throw std::invalid_argument("--mesh-shaders expects on, off or nocull");
+    if (meshShaders != "on" && meshShaders != "off" && meshShaders != "noocclusion" && meshShaders != "nocull") {
+      throw std::invalid_argument("--mesh-shaders expects on, off, noocclusion or nocull");
     }
     config.meshShaders = meshShaders != "off";
     config.meshletCulling = meshShaders != "nocull";
+    config.occlusionCulling = meshShaders == "on";
     // Writes the graph once, after the first frame that produced one.
     bool graphWritten = false;
     const auto dumpGraph = [&](const Renderer &r) {
@@ -152,9 +154,11 @@ int main(int argc, char **argv) {
     renderer->initialize(config);
     const RendererInfo startInfo = renderer->info();
     std::cout << "Rendering on " << startInfo.deviceName << " with "
-              << (startInfo.meshShaders ? (config.meshletCulling ? "mesh shaders" : "mesh shaders, no meshlet culling")
-                                        : startInfo.backend == RendererBackend::Software ? "the software rasterizer"
-                                                                                          : "vertex shaders")
+              << (startInfo.backend == RendererBackend::Software ? "the software rasterizer"
+                  : !startInfo.meshShaders                       ? "vertex shaders"
+                  : startInfo.occlusionCulling                   ? "mesh shaders, frustum, cone and occlusion culling"
+                  : config.meshletCulling                        ? "mesh shaders, frustum and cone culling"
+                                                                 : "mesh shaders, no meshlet culling")
               << std::endl;
     // The first frames upload meshes and create pooled images, so they are left out of the averages.
     constexpr long kWarmupFrames = 3;
@@ -181,10 +185,15 @@ int main(int argc, char **argv) {
       std::cout << "Presented " << frames << " frame(s) in " << elapsed << " s" << std::endl;
       timings.print();
     } else {
-      // Every frame shows the same pose, so the GPU does the same work each time.
-      sample.animate(sample.scene, args["time"].as<float>());
+      // Without --animate every frame shows the same pose, so the GPU does the same work each time.
+      const float time = args["time"].as<float>();
+      const bool animate = args.count("animate") > 0;
+      sample.animate(sample.scene, time);
       const long frames = std::max(1L, args["frames"].as<long>());
       for (long i = 0; i < frames; ++i) {
+        if (animate) {
+          sample.animate(sample.scene, time + static_cast<float>(i) / 60.0f);
+        }
         renderer->render(sample.scene);
         if (i >= kWarmupFrames || frames <= kWarmupFrames) {
           timings.add(renderer->gpuTimings());
