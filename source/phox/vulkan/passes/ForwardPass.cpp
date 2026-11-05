@@ -18,14 +18,15 @@ namespace {
 // [0]: double-sided, [1]: back faces culled. Both share a layout, so descriptor sets stay bound across them.
 using PipelinePair = std::array<const Pipeline *, 2>;
 
-PipelinePair pipelinePair(PipelineCache &pipelines, PipelineDesc (*describe)(Format, Format, CullMode), Format color,
-                          Format depth) {
-    return {&pipelines.get(describe(color, depth, CullMode::None)), &pipelines.get(describe(color, depth, CullMode::Back))};
+PipelinePair vertexPipelinePair(PipelineCache &pipelines, Format color, Format depth, bool blend) {
+    return {&pipelines.get(forwardPipelineDesc(color, depth, CullMode::None, blend)),
+            &pipelines.get(forwardPipelineDesc(color, depth, CullMode::Back, blend))};
 }
 
-PipelinePair meshletPipelinePair(PipelineCache &pipelines, Format color, Format depth, MeshletPhase phase) {
-    return {&pipelines.get(forwardMeshletPipelineDesc(color, depth, CullMode::None, phase)),
-            &pipelines.get(forwardMeshletPipelineDesc(color, depth, CullMode::Back, phase))};
+PipelinePair meshletPipelinePair(PipelineCache &pipelines, Format color, Format depth, MeshletPhase phase,
+                                 bool blend = false) {
+    return {&pipelines.get(forwardMeshletPipelineDesc(color, depth, CullMode::None, phase, blend)),
+            &pipelines.get(forwardMeshletPipelineDesc(color, depth, CullMode::Back, phase, blend))};
 }
 
 VkWriteDescriptorSet descriptorWrite(VkDescriptorSet set, VkDescriptorType type) {
@@ -38,16 +39,18 @@ VkWriteDescriptorSet descriptorWrite(VkDescriptorSet set, VkDescriptorType type)
     return write;
 }
 
-// Records every draw of @p view. Sets from 0 up are bound by the caller. @p visibilityOffsets: per draw,
-// for occlusion culling; null otherwise.
-void recordDraws(PassContext &ctx, const RenderView &view, const MeshCache &meshes, const PipelinePair &pipeline,
+// Records @p draws, whose materials start at entry @p firstMaterial of the frame's material table. Sets
+// from 0 up are bound by the caller. @p visibilityOffsets: per draw, for occlusion culling; null otherwise.
+void recordDraws(PassContext &ctx, const RenderView &view, const std::vector<DrawItem> &draws,
+                 std::uint32_t firstMaterial, const MeshCache &meshes, const PipelinePair &pipeline,
                  bool meshletCulling, const std::vector<std::uint32_t> *visibilityOffsets) {
     const auto &table = ctx.device().table();
     const VkCommandBuffer cmd = ctx.cmd();
     const VkPipelineLayout layout = pipeline[0]->layout();
     const Pipeline *bound = nullptr;
-    for (std::size_t i = 0; i < view.draws.size(); ++i) {
-        const DrawItem &draw = view.draws[i];
+    for (std::size_t i = 0; i < draws.size(); ++i) {
+        const DrawItem &draw = draws[i];
+        const auto material = firstMaterial + static_cast<std::uint32_t>(i);
         const Pipeline *wanted = pipeline[draw.cullBackFaces ? 1 : 0];
         if (wanted != bound) {
             table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wanted->handle());
@@ -56,8 +59,8 @@ void recordDraws(PassContext &ctx, const RenderView &view, const MeshCache &mesh
         const MeshCache::GpuMesh &mesh = meshes.get(*draw.mesh);
         if (meshes.meshlets()) {
             MeshletDrawPushConstants constants;
-            constants.albedo = draw.material->albedo;
             constants.model = draw.model;
+            constants.material = material;
             constants.cameraPosition = glm::inverse(draw.model) * vec4(view.cameraPosition, 1.0f);
             constants.vertices = mesh.vertices->deviceAddress();
             constants.meshlets = mesh.meshlets->deviceAddress();
@@ -66,10 +69,8 @@ void recordDraws(PassContext &ctx, const RenderView &view, const MeshCache &mesh
                 constants.flags = kMeshletFrustumCulling | (draw.cullBackFaces ? kMeshletConeCulling : 0u);
             }
             constants.visibilityOffset = visibilityOffsets != nullptr ? (*visibilityOffsets)[i] : 0u;
-            table.vkCmdPushConstants(cmd, layout,
-                                     VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT |
-                                         VK_SHADER_STAGE_FRAGMENT_BIT,
-                                     0, sizeof(constants), &constants);
+            table.vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0,
+                                     sizeof(constants), &constants);
             const std::uint32_t groups = (mesh.meshletCount + kMeshletTaskGroupSize - 1) / kMeshletTaskGroupSize;
             table.vkCmdDrawMeshTasksEXT(cmd, groups, 1, 1);
         } else {
@@ -78,10 +79,9 @@ void recordDraws(PassContext &ctx, const RenderView &view, const MeshCache &mesh
             table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
             table.vkCmdBindIndexBuffer(cmd, mesh.indices->handle(), 0, VK_INDEX_TYPE_UINT32);
             DrawPushConstants constants;
-            constants.albedo = draw.material->albedo;
             constants.model = draw.model;
-            table.vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                                     sizeof(constants), &constants);
+            constants.material = material;
+            table.vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(constants), &constants);
             table.vkCmdDrawIndexed(cmd, mesh.indexCount, 1, 0, 0, 0);
         }
     }
@@ -95,74 +95,84 @@ void bindSets(PassContext &ctx, const PipelinePair &pipeline, std::initializer_l
 
 } // namespace
 
-PipelineDesc forwardPipelineDesc(Format color, Format depth, CullMode cull) {
+PipelineDesc forwardPipelineDesc(Format color, Format depth, CullMode cull, bool blend) {
     PipelineDesc desc;
-    desc.name = "forward";
+    desc.name = blend ? "forward blend" : "forward";
     desc.vertexShader = "forward.vert";
     desc.fragmentShader = "forward.frag";
-    desc.vertexLayout = VertexLayout::positionNormalTexcoord();
+    desc.vertexLayout = VertexLayout::positionNormalTexcoordTangent();
     // Double-sided materials (e.g. the lone triangle) are drawn, and lit, from both sides.
     desc.raster.cull = cull;
-    desc.depth = {true, true, CompareOp::Less};
+    // Blended surfaces are tested against the opaque ones but do not hide each other.
+    desc.depth = {true, !blend, CompareOp::Less};
+    desc.blend = {blend ? BlendMode::Alpha : BlendMode::Opaque};
     desc.colorFormats = {color};
     desc.depthFormat = depth;
-    desc.pushConstants = {{kVertexStage | kFragmentStage, 0, sizeof(DrawPushConstants)}};
-    desc.setLayouts = {SetLayout::Frame};
+    desc.pushConstants = {{kVertexStage, 0, sizeof(DrawPushConstants)}};
+    desc.setLayouts = {SetLayout::Frame, SetLayout::Bindless};
     return desc;
 }
 
-PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cull, MeshletPhase phase) {
+PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cull, MeshletPhase phase, bool blend) {
     PipelineDesc desc;
     desc.meshShader = "forward.mesh";
     desc.fragmentShader = "forward.frag";
     desc.raster.cull = cull;
-    desc.depth = {true, true, CompareOp::Less};
+    desc.depth = {true, !blend, CompareOp::Less};
+    desc.blend = {blend ? BlendMode::Alpha : BlendMode::Opaque};
     desc.colorFormats = {color};
     desc.depthFormat = depth;
-    desc.pushConstants = {{kTaskStage | kMeshStage | kFragmentStage, 0, sizeof(MeshletDrawPushConstants)}};
+    desc.pushConstants = {{kTaskStage | kMeshStage, 0, sizeof(MeshletDrawPushConstants)}};
     switch (phase) {
     case MeshletPhase::Single:
-        desc.name = "forward meshlets";
+        desc.name = blend ? "forward meshlets blend" : "forward meshlets";
         desc.taskShader = "forward.task";
-        desc.setLayouts = {SetLayout::Frame};
+        desc.setLayouts = {SetLayout::Frame, SetLayout::Bindless};
         break;
     case MeshletPhase::Early:
         desc.name = "forward meshlets early";
         desc.taskShader = "forward_early.task";
-        desc.setLayouts = {SetLayout::Frame, SetLayout::MeshletVisibility};
+        desc.setLayouts = {SetLayout::Frame, SetLayout::Bindless, SetLayout::MeshletVisibility};
         break;
     case MeshletPhase::Late:
         desc.name = "forward meshlets late";
         desc.taskShader = "forward_late.task";
-        desc.setLayouts = {SetLayout::Frame, SetLayout::MeshletVisibility, SetLayout::DepthPyramid};
+        desc.setLayouts = {SetLayout::Frame, SetLayout::Bindless, SetLayout::MeshletVisibility, SetLayout::DepthPyramid};
         break;
     }
     return desc;
 }
 
-ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkDescriptorSet frameSet,
-                                 ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
-                                 bool meshletCulling, const MeshletOcclusion *occlusion) {
+namespace {
+
+// The opaque and alpha-masked draws (view.draws), in one pass or, with occlusion culling, two. @p keepDepth:
+// a later pass tests against the depth.
+ForwardPassOutput addOpaquePasses(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
+                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
+                                  bool meshletCulling, const MeshletOcclusion *occlusion, bool keepDepth) {
     const Format colorFormat = graph.imageInfo(color).desc.format;
     const Format depthFormat = graph.imageInfo(depth).desc.format;
     const vec4 &c = view.clearColor;
+    const StoreOp depthStore = keepDepth ? StoreOp::Store : StoreOp::DontCare;
+    const VkDescriptorSet frameSet = sets.frame;
+    const VkDescriptorSet textureSet = sets.textures;
 
     if (occlusion == nullptr) {
         const PipelinePair pipeline =
             meshes.meshlets() ? meshletPipelinePair(pipelines, colorFormat, depthFormat, MeshletPhase::Single)
-                              : pipelinePair(pipelines, forwardPipelineDesc, colorFormat, depthFormat);
+                              : vertexPipelinePair(pipelines, colorFormat, depthFormat, false);
         return graph.addPass<ForwardPassOutput>(
             "forward", PassType::Graphics,
             [&](PassBuilder &builder, ForwardPassOutput &out) {
                 out.color = builder.colorAttachment(color, LoadOp::Clear, StoreOp::Store, {c.r, c.g, c.b, c.a});
-                // Depth is only needed while drawing.
-                out.depth = builder.depthAttachment(depth, LoadOp::Clear, StoreOp::DontCare, 1.0f);
+                // Depth is only needed while drawing, unless blended draws follow.
+                out.depth = builder.depthAttachment(depth, LoadOp::Clear, depthStore, 1.0f);
             },
-            [&view, frameSet, &meshes, pipeline, meshletCulling](const ForwardPassOutput &,
-                                                                  phox::PassContext &context) {
+            [&view, frameSet, textureSet, &meshes, pipeline, meshletCulling](const ForwardPassOutput &,
+                                                                              phox::PassContext &context) {
                 auto &ctx = PassContext::from(context);
-                bindSets(ctx, pipeline, {frameSet});
-                recordDraws(ctx, view, meshes, pipeline, meshletCulling, nullptr);
+                bindSets(ctx, pipeline, {frameSet, textureSet});
+                recordDraws(ctx, view, view.draws, 0, meshes, pipeline, meshletCulling, nullptr);
             });
     }
 
@@ -204,10 +214,11 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkD
             data.out.depth = builder.depthAttachment(depth, LoadOp::Clear, StoreOp::Store, 1.0f);
             data.visibility = builder.read(visibility, BufferUsage::StorageRead);
         },
-        [&view, frameSet, &meshes, early, offsets, visibilitySet](const EarlyData &data, phox::PassContext &context) {
+        [&view, frameSet, textureSet, &meshes, early, offsets, visibilitySet](const EarlyData &data,
+                                                                               phox::PassContext &context) {
             auto &ctx = PassContext::from(context);
-            bindSets(ctx, early, {frameSet, visibilitySet(ctx, data.visibility)});
-            recordDraws(ctx, view, meshes, early, true, offsets);
+            bindSets(ctx, early, {frameSet, textureSet, visibilitySet(ctx, data.visibility)});
+            recordDraws(ctx, view, view.draws, 0, meshes, early, true, offsets);
         });
 
     const ImageHandle pyramid = addDepthPyramidPass(graph, first.out.depth, pipelines);
@@ -226,12 +237,12 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkD
             "forward late", PassType::Graphics,
             [&](PassBuilder &builder, LateData &data) {
                 data.out.color = builder.colorAttachment(earlyOut.color, LoadOp::Load, StoreOp::Store);
-                data.out.depth = builder.depthAttachment(earlyOut.depth, LoadOp::Load, StoreOp::DontCare);
+                data.out.depth = builder.depthAttachment(earlyOut.depth, LoadOp::Load, depthStore);
                 data.pyramid = builder.read(pyramid, ImageUsage::Sampled);
                 data.visibility = builder.write(earlyVisibility, BufferUsage::StorageWrite);
             },
-            [&view, frameSet, &meshes, late, offsets, visibilitySet, pyramidLayout](const LateData &data,
-                                                                                   phox::PassContext &context) {
+            [&view, frameSet, textureSet, &meshes, late, offsets, visibilitySet,
+             pyramidLayout](const LateData &data, phox::PassContext &context) {
                 auto &ctx = PassContext::from(context);
                 const VkDescriptorSet pyramidSet = ctx.frame().descriptors().allocate(pyramidLayout);
                 const VkDescriptorImageInfo info{VK_NULL_HANDLE, ctx.view(data.pyramid),
@@ -239,10 +250,46 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkD
                 VkWriteDescriptorSet write = descriptorWrite(pyramidSet, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
                 write.pImageInfo = &info;
                 ctx.device().table().vkUpdateDescriptorSets(ctx.device().handle(), 1, &write, 0, nullptr);
-                bindSets(ctx, late, {frameSet, visibilitySet(ctx, data.visibility), pyramidSet});
-                recordDraws(ctx, view, meshes, late, true, offsets);
+                bindSets(ctx, late, {frameSet, textureSet, visibilitySet(ctx, data.visibility), pyramidSet});
+                recordDraws(ctx, view, view.draws, 0, meshes, late, true, offsets);
             })
         .out;
+}
+
+} // namespace
+
+ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
+                                 ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
+                                 bool meshletCulling, const MeshletOcclusion *occlusion) {
+    const bool blended = !view.transparent.empty();
+    const ForwardPassOutput opaque =
+        addOpaquePasses(graph, view, sets, color, depth, meshes, pipelines, meshletCulling, occlusion, blended);
+    if (!blended) {
+        return opaque;
+    }
+
+    // Blended draws, farthest first, over the opaque image. Their materials follow view.draws' in the table.
+    const Format colorFormat = graph.imageInfo(color).desc.format;
+    const Format depthFormat = graph.imageInfo(depth).desc.format;
+    const PipelinePair pipeline =
+        meshes.meshlets() ? meshletPipelinePair(pipelines, colorFormat, depthFormat, MeshletPhase::Single, true)
+                          : vertexPipelinePair(pipelines, colorFormat, depthFormat, true);
+    const auto firstMaterial = static_cast<std::uint32_t>(view.draws.size());
+    const VkDescriptorSet frameSet = sets.frame;
+    const VkDescriptorSet textureSet = sets.textures;
+    return graph.addPass<ForwardPassOutput>(
+        "forward blend", PassType::Graphics,
+        [&](PassBuilder &builder, ForwardPassOutput &out) {
+            out.color = builder.colorAttachment(opaque.color, LoadOp::Load, StoreOp::Store);
+            builder.depthReadOnly(opaque.depth);
+            out.depth = opaque.depth;
+        },
+        [&view, frameSet, textureSet, &meshes, pipeline, meshletCulling, firstMaterial](const ForwardPassOutput &,
+                                                                                         phox::PassContext &context) {
+            auto &ctx = PassContext::from(context);
+            bindSets(ctx, pipeline, {frameSet, textureSet});
+            recordDraws(ctx, view, view.transparent, firstMaterial, meshes, pipeline, meshletCulling, nullptr);
+        });
 }
 
 } // namespace phox::vk

@@ -31,7 +31,7 @@ std::size_t pixelsUnlike(const phox::CpuImage &image, std::array<std::uint8_t, 4
 } // namespace
 
 int main() {
-    CHECK(phox::sampleSceneNames().size() == 4);
+    CHECK(phox::sampleSceneNames().size() == 5);
     for (const std::string &name : phox::sampleSceneNames()) {
         CHECK(phox::makeSampleScene(name).scene.objectCount() > 0);
     }

@@ -32,6 +32,11 @@ On macOS ctest also runs `golden_metal` (the same goldens through the Metal back
 
 - The instance enables `VK_KHR_portability_enumeration` when present, and the device enables
   `VK_KHR_portability_subset` when exposed (required by MoltenVK).
+- Device selection requires descriptor indexing (the bindless texture table: runtime arrays, partial binding,
+  update-after-bind, non-uniform indexing). lavapipe, desktop drivers and MoltenVK have it.
+- Goldens come from lavapipe on the vertex path: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD PHOX_UPDATE_GOLDEN=1
+  ./build-test/PhoxGoldenTests`. Shading changes (shaders/pbr.glsl) must be mirrored in core/Shading.cpp
+  (software rasterizer) and shaders/metal/pbr.h.
 - Assimp 5.4.3 is built with `ASSIMP_WARNINGS_AS_ERRORS OFF`; clang 21 warns in it.
 - MoltenVK prints `[MVK-BUILD-ERROR] Cereal serialization ...` on exit; it is MoltenVK-internal and harmless.
 - Metal backend (`source/phox/metal/*.mm`, ObjC++ with ARC, `PHOX_ENABLE_METAL`, on by default on Apple):

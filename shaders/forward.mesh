@@ -14,7 +14,12 @@ layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
 taskPayloadSharedEXT MeshletTask task;
 
-layout(location = 0) out vec3 outNormal[]; // world space
+// The same outputs as forward.vert.
+layout(location = 0) out vec3 outPosition[]; // world space
+layout(location = 1) out vec3 outNormal[];   // world space
+layout(location = 2) out vec2 outTexCoord[];
+layout(location = 3) out vec4 outTangent[];  // world space xyz, handedness w
+layout(location = 4) flat out uint outMaterial[];
 
 void main() {
     Meshlet meshlet = draw.meshlets.meshlets[task.meshlets[gl_WorkGroupID.x]];
@@ -27,12 +32,20 @@ void main() {
 
     uint lane = gl_LocalInvocationIndex;
     if (lane < vertexCount) {
-        uint base = meshletData.values[vertexOffset + lane] * 8u;
+        uint base = meshletData.values[vertexOffset + lane] * kVertexFloats;
         vec3 position = vec3(draw.vertices.values[base], draw.vertices.values[base + 1u], draw.vertices.values[base + 2u]);
         vec3 normal = vec3(draw.vertices.values[base + 3u], draw.vertices.values[base + 4u], draw.vertices.values[base + 5u]);
+        vec2 texCoord = vec2(draw.vertices.values[base + 6u], draw.vertices.values[base + 7u]);
+        vec4 tangent = vec4(draw.vertices.values[base + 8u], draw.vertices.values[base + 9u],
+                            draw.vertices.values[base + 10u], draw.vertices.values[base + 11u]);
         // Same expressions as forward.vert, so both paths produce the same vertices.
+        vec4 world = draw.model * vec4(position, 1.0);
+        outPosition[lane] = world.xyz;
         outNormal[lane] = mat3(transpose(inverse(draw.model))) * normal;
-        gl_MeshVerticesEXT[lane].gl_Position = frame.viewProj * draw.model * vec4(position, 1.0);
+        outTexCoord[lane] = texCoord;
+        outTangent[lane] = vec4(mat3(draw.model) * tangent.xyz, tangent.w);
+        outMaterial[lane] = draw.material;
+        gl_MeshVerticesEXT[lane].gl_Position = frame.viewProj * world;
     }
     for (uint i = lane; i < triangleCount; i += 64u) {
         uint packed = meshletData.values[triangleOffset + i];

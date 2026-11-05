@@ -17,6 +17,7 @@
 #include "phox/vulkan/ShaderInterface.hpp"
 #include "phox/vulkan/ShaderLibrary.hpp"
 #include "phox/vulkan/Swapchain.hpp"
+#include "phox/vulkan/TextureCache.hpp"
 #include "phox/vulkan/TransientPool.hpp"
 #include "phox/vulkan/passes/DepthPyramidPass.hpp"
 #include "phox/vulkan/passes/ForwardPass.hpp"
@@ -147,17 +148,21 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
             continue;
         }
 
-        // Phox records with synchronization2 and dynamic rendering (core in Vulkan 1.3).
+        // Phox records with synchronization2 and dynamic rendering (core in Vulkan 1.3), and materials
+        // index one array of every texture (descriptor indexing, which nearly every 1.2 device has).
         VkPhysicalDeviceProperties versionProps;
         vkGetPhysicalDeviceProperties(device, &versionProps);
         VkPhysicalDeviceVulkan13Features features13{};
         features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        VkPhysicalDeviceVulkan12Features features12{};
+        features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        features12.pNext = &features13;
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &features13;
+        features.pNext = &features12;
         vkGetPhysicalDeviceFeatures2(device, &features);
         if (versionProps.apiVersion < PHOX_VULKAN_API_VERSION || !features13.synchronization2 ||
-            !features13.dynamicRendering) {
+            !features13.dynamicRendering || !phox::vk::hasBindlessTextures(features12)) {
             continue;
         }
 
@@ -193,14 +198,16 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
     if (best == VK_NULL_HANDLE) {
         throw std::runtime_error((preferred.empty() ? std::string("No suitable Vulkan device found")
                                                     : "No suitable Vulkan device matching '" + preferred + "'") +
-                                 " (Phox needs Vulkan 1.3 with synchronization2 and dynamic rendering)");
+                                 " (Phox needs Vulkan 1.3 with synchronization2, dynamic rendering and descriptor indexing)");
     }
     return best;
 }
 
 // Uploads the view's FrameUniforms and returns a set 0 descriptor set pointing at them.
-VkDescriptorSet writeFrameUniforms(phox::vk::Device &device, phox::vk::FrameContext &frame,
-                                   phox::vk::PipelineCache &pipelines, const phox::RenderView &view) {
+// Set 0 of the forward pipelines: the view's FrameUniforms and its material table, one entry per item
+// (view.draws, then view.transparent), with texture slots from @p textures.
+VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &frame, phox::vk::PipelineCache &pipelines,
+                              const phox::RenderView &view, const phox::vk::TextureCache &textures) {
     phox::vk::FrameUniforms uniforms;
     uniforms.view = view.view;
     uniforms.proj = view.proj;
@@ -214,16 +221,44 @@ VkDescriptorSet writeFrameUniforms(phox::vk::Device &device, phox::vk::FrameCont
     std::copy(view.frustumPlanes.begin(), view.frustumPlanes.end(), uniforms.frustumPlanes);
     const phox::vk::UploadArena::Allocation data = frame.arena().uploadUniform(uniforms);
 
+    // At least one entry: a descriptor's range cannot be empty.
+    std::vector<phox::MaterialData> materials;
+    materials.reserve(std::max<std::size_t>(view.itemCount(), 1));
+    const auto slot = [&textures](const std::shared_ptr<const phox::Texture> &texture) {
+        return texture ? textures.slot(*texture) : phox::kNoTexture;
+    };
+    for (const auto *items : {&view.draws, &view.transparent}) {
+        for (const phox::DrawItem &draw : *items) {
+            const phox::Material &material = *draw.material;
+            phox::MaterialData entry = phox::materialData(material);
+            entry.baseColorTexture = slot(material.baseColorTexture);
+            entry.metallicRoughnessTexture = slot(material.metallicRoughnessTexture);
+            entry.normalTexture = slot(material.normalTexture);
+            entry.occlusionTexture = slot(material.occlusionTexture);
+            entry.emissiveTexture = slot(material.emissiveTexture);
+            materials.push_back(entry);
+        }
+    }
+    if (materials.empty()) {
+        materials.emplace_back();
+    }
+    const VkDeviceSize materialBytes = materials.size() * sizeof(phox::MaterialData);
+    const phox::vk::UploadArena::Allocation materialData = frame.arena().upload(
+        materials.data(), materialBytes, device.properties().limits.minStorageBufferOffsetAlignment);
+
     const VkDescriptorSet set = frame.descriptors().allocate(pipelines.setLayout(phox::SetLayout::Frame));
-    const VkDescriptorBufferInfo bufferInfo{data.buffer, data.offset, sizeof(uniforms)};
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = set;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write.pBufferInfo = &bufferInfo;
-    device.table().vkUpdateDescriptorSets(device.handle(), 1, &write, 0, nullptr);
+    const VkDescriptorBufferInfo bufferInfos[2] = {{data.buffer, data.offset, sizeof(uniforms)},
+                                                   {materialData.buffer, materialData.offset, materialBytes}};
+    VkWriteDescriptorSet writes[2]{};
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufferInfos[i];
+    }
+    device.table().vkUpdateDescriptorSets(device.handle(), 2, writes, 0, nullptr);
     return set;
 }
 
@@ -265,6 +300,7 @@ void Renderer::initialize(const RendererConfig &config) {
         m_transients = std::make_unique<TransientPool>(*m_device);
         const bool meshShaders = createPipelines();
         m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders);
+        m_textures = std::make_unique<TextureCache>(*m_device, *m_pipelines);
         if (meshShaders && m_config.meshletCulling && m_config.occlusionCulling) {
             if (m_depthFormat == Format::D32Float) {
                 m_visibility = std::make_unique<MeshletVisibility>(*m_device);
@@ -304,6 +340,7 @@ void Renderer::releaseVulkan() {
         frame.reset();
     }
     m_visibility.reset();
+    m_textures.reset();
     m_meshes.reset();
     m_transients.reset();
     m_pipelines.reset();
@@ -411,6 +448,7 @@ void Renderer::render(const Scene &scene) {
     }
     m_transients->collect(m_frameNumber);
     m_meshes->collect(m_frameNumber);
+    m_textures->collect(m_frameNumber);
 
     std::uint32_t imageIndex = 0;
     if (windowed && !m_swapchain->acquireNextImage(frame.imageAvailable(), imageIndex)) {
@@ -419,7 +457,6 @@ void Renderer::render(const Scene &scene) {
     }
 
     const RenderView view = extractView(scene, extent);
-    const VkDescriptorSet frameSet = writeFrameUniforms(*m_device, frame, *m_pipelines, view);
     if (!windowed) {
         const std::uint64_t bytes = static_cast<std::uint64_t>(extent.width) * extent.height * 4;
         if (!m_readback || m_readback->size() != bytes) {
@@ -437,6 +474,8 @@ void Renderer::render(const Scene &scene) {
         throw std::runtime_error("failed to begin the frame command buffer");
     }
     m_meshes->prepare(view, frame, cmd, m_frameNumber);
+    m_textures->prepare(view, frame, cmd, m_frameNumber);
+    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, *m_textures), m_textures->set()};
 
     // ---- Frame graph -------------------------------------------------------------------------
     //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
@@ -458,7 +497,7 @@ void Renderer::render(const Scene &scene) {
         occlusion.frame = &visibility;
         executor.bindBuffer(occlusion.visibility, m_visibility->buffer().handle());
     }
-    const ForwardPassOutput forward = addForwardPass(graph, view, frameSet, hdr, depth, *m_meshes, *m_pipelines,
+    const ForwardPassOutput forward = addForwardPass(graph, view, sets, hdr, depth, *m_meshes, *m_pipelines,
                                                      m_config.meshletCulling, m_visibility ? &occlusion : nullptr);
 
     ImageHandle backbuffer;
@@ -642,7 +681,9 @@ bool Renderer::createPipelines() {
     // Build the main pipelines now, so missing or broken shaders fail initialization (and select the
     // software fallback) instead of the first frame.
     for (CullMode cull : {CullMode::None, CullMode::Back}) {
-        m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat, cull));
+        for (bool blend : {false, true}) {
+            m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat, cull, blend));
+        }
     }
     m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
     if (!m_device->meshShaders()) {
@@ -654,6 +695,9 @@ bool Renderer::createPipelines() {
             for (CullMode cull : {CullMode::None, CullMode::Back}) {
                 m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull, phase));
             }
+        }
+        for (CullMode cull : {CullMode::None, CullMode::Back}) {
+            m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull, MeshletPhase::Single, true));
         }
         m_pipelines->get(depthPyramidPipelineDesc());
     } catch (const std::exception &e) {

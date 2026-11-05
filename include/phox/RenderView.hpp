@@ -37,8 +37,14 @@ struct RenderView {
     vec4 clearColor{0.0f, 0.0f, 0.0f, 1.0f};
     ToneMapping toneMapping;
     std::array<vec4, 6> frustumPlanes{}; ///< world space, from viewProj (see phox::frustumPlanes)
-    std::vector<DrawItem> draws; ///< visible items, nearest first
-    std::size_t culled = 0;      ///< objects skipped because they are outside the view frustum
+    std::vector<DrawItem> draws; ///< visible opaque and alpha-masked items, nearest first
+    /// visible items with AlphaMode::Blend, farthest first: drawn after `draws`, blended, without depth writes
+    std::vector<DrawItem> transparent;
+    std::size_t culled = 0; ///< objects skipped because they are outside the view frustum
+
+    /// draws.size() + transparent.size(). Renderers number the items in that order (draws first), e.g. to
+    /// index a per-frame material table.
+    std::size_t itemCount() const { return draws.size() + transparent.size(); }
 };
 
 /// Builds the view for @p scene rendered at @p extent: camera matrices, the light, and the objects inside

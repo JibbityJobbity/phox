@@ -1,5 +1,7 @@
 #include "phox/Scene.hpp"
 
+#include "phox/Color.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -46,7 +48,47 @@ void validate(const std::vector<Vertex> &vertices, const std::vector<std::uint32
     }
 }
 
+// A unit vector perpendicular to @p n.
+vec3 anyPerpendicular(const vec3 &n) {
+    const vec3 axis = std::abs(n.x) < 0.9f ? vec3(1.0f, 0.0f, 0.0f) : vec3(0.0f, 1.0f, 0.0f);
+    return glm::normalize(glm::cross(axis, n));
+}
+
 } // namespace
+
+void generateTangents(std::vector<Vertex> &vertices, const std::vector<std::uint32_t> &indices) {
+    std::vector<vec3> tangents(vertices.size(), vec3(0.0f));
+    std::vector<vec3> bitangents(vertices.size(), vec3(0.0f));
+    for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
+        const Vertex &a = vertices[indices[t]];
+        const Vertex &b = vertices[indices[t + 1]];
+        const Vertex &c = vertices[indices[t + 2]];
+        const vec3 e1 = b.position - a.position;
+        const vec3 e2 = c.position - a.position;
+        const vec2 d1 = b.uv - a.uv;
+        const vec2 d2 = c.uv - a.uv;
+        const float det = d1.x * d2.y - d2.x * d1.y;
+        if (std::abs(det) < 1e-12f) {
+            continue; // no usable texture mapping on this triangle
+        }
+        // Unnormalised, so larger triangles weigh more (area weighting).
+        const vec3 tangent = (e1 * d2.y - e2 * d1.y) / det;
+        const vec3 bitangent = (e2 * d1.x - e1 * d2.x) / det;
+        for (std::size_t k = 0; k < 3; ++k) {
+            tangents[indices[t + k]] += tangent;
+            bitangents[indices[t + k]] += bitangent;
+        }
+    }
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        const vec3 n = glm::normalize(vertices[i].normal);
+        // Gram-Schmidt: remove the part along the normal.
+        vec3 t = tangents[i] - n * glm::dot(n, tangents[i]);
+        const float length = glm::length(t);
+        t = length > 1e-12f && std::isfinite(length) ? t / length : anyPerpendicular(n);
+        const float w = glm::dot(glm::cross(n, t), bitangents[i]) < 0.0f ? -1.0f : 1.0f;
+        vertices[i].tangent = vec4(t, w);
+    }
+}
 
 Mesh::Mesh() : m_id(nextMeshId()) {}
 
@@ -96,6 +138,9 @@ Mesh &Mesh::operator=(Mesh &&other) noexcept {
 
 void Mesh::setGeometry(std::vector<Vertex> vertices, std::vector<std::uint32_t> indices) {
     validate(vertices, indices);
+    if (std::any_of(vertices.begin(), vertices.end(), [](const Vertex &v) { return v.tangent.w == 0.0f; })) {
+        generateTangents(vertices, indices);
+    }
     m_vertices = std::move(vertices);
     m_indices = std::move(indices);
     m_bounds = computeBounds(m_vertices);
@@ -179,6 +224,43 @@ Mesh Mesh::torus(float radius, float tubeRadius, std::uint32_t rings, std::uint3
     return Mesh(std::move(vertices), std::move(indices));
 }
 
+Mesh Mesh::sphere(float radius, std::uint32_t segments, std::uint32_t rings) {
+    segments = std::max(segments, 3u);
+    rings = std::max(rings, 2u);
+    std::vector<Vertex> vertices;
+    vertices.reserve(static_cast<std::size_t>(segments + 1) * (rings + 1));
+    // Seam and pole vertices are duplicated so each gets its own texture coordinate.
+    for (std::uint32_t j = 0; j <= rings; ++j) {
+        const float v = static_cast<float>(j) / static_cast<float>(rings);
+        const float phi = v * glm::pi<float>(); // from +Y down to -Y
+        for (std::uint32_t i = 0; i <= segments; ++i) {
+            const float u = static_cast<float>(i) / static_cast<float>(segments);
+            const float theta = u * glm::two_pi<float>();
+            const vec3 normal{std::sin(phi) * std::cos(theta), std::cos(phi), -std::sin(phi) * std::sin(theta)};
+            // The tangent is d(position)/d(theta), normalised. Increasing v points down, against
+            // cross(normal, tangent), hence the handedness of -1.
+            const vec3 tangent{-std::sin(theta), 0.0f, -std::cos(theta)};
+            vertices.push_back({radius * normal, normal, {u, v}, vec4(tangent, -1.0f)});
+        }
+    }
+    std::vector<std::uint32_t> indices;
+    indices.reserve(static_cast<std::size_t>(segments) * rings * 6);
+    const auto at = [segments](std::uint32_t i, std::uint32_t j) { return j * (segments + 1) + i; };
+    for (std::uint32_t j = 0; j < rings; ++j) {
+        for (std::uint32_t i = 0; i < segments; ++i) {
+            // Counter-clockwise seen from outside; the degenerate triangles at the poles are skipped.
+            const std::uint32_t a = at(i, j), b = at(i, j + 1), c = at(i + 1, j + 1), d = at(i + 1, j);
+            if (j != 0) {
+                for (std::uint32_t index : {a, b, d}) indices.push_back(index);
+            }
+            if (j != rings - 1) {
+                for (std::uint32_t index : {d, b, c}) indices.push_back(index);
+            }
+        }
+    }
+    return Mesh(std::move(vertices), std::move(indices));
+}
+
 vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {
     vec3 c = color * mapping.exposure;
     switch (mapping.op) {
@@ -191,11 +273,28 @@ vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {
         c = (c * (2.51f * c + 0.03f)) / (c * (2.43f * c + 0.59f) + 0.14f);
         break;
     }
-    return glm::clamp(c, vec3(0.0f), vec3(1.0f));
+    return linearToSrgb(glm::clamp(c, vec3(0.0f), vec3(1.0f)));
 }
 
 mat4 Transform::matrix() const {
     return glm::translate(mat4(1.0f), position) * glm::mat4_cast(rotation) * glm::scale(mat4(1.0f), scale);
+}
+
+Transform Transform::fromMatrix(const mat4 &m) {
+    Transform t;
+    t.position = vec3(m[3]);
+    mat3 basis{m};
+    t.scale = {glm::length(basis[0]), glm::length(basis[1]), glm::length(basis[2])};
+    if (glm::determinant(basis) < 0.0f) {
+        t.scale.x = -t.scale.x; // a rotation cannot mirror, so the scale does
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (t.scale[i] != 0.0f) {
+            basis[i] /= t.scale[i];
+        }
+    }
+    t.rotation = glm::normalize(glm::quat_cast(basis));
+    return t;
 }
 
 Object::Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform)

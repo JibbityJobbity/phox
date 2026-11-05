@@ -133,7 +133,9 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
     // Samplers are baked into the layouts, so a descriptor write only needs a view. Empty: the layout
     // needs mesh shaders and the device has none.
     std::array<std::vector<VkDescriptorSetLayoutBinding>, kSetLayoutCount> layouts;
-    layouts[static_cast<std::size_t>(SetLayout::Frame)] = {binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameStages)};
+    layouts[static_cast<std::size_t>(SetLayout::Frame)] = {
+        binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameStages),
+        binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)};
     layouts[static_cast<std::size_t>(SetLayout::Texture)] = {
         binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_linearClamp)};
     if (device.meshShaders()) {
@@ -146,6 +148,10 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
         binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_nearestClamp),
         binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT),
         binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)};
+    // Each texture brings its own sampler (glTF samplers differ per texture), so no immutable sampler.
+    VkDescriptorSetLayoutBinding textures = binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+    textures.descriptorCount = device.bindlessTextureCount();
+    layouts[static_cast<std::size_t>(SetLayout::Bindless)] = {textures};
 
     for (std::size_t i = 0; i < m_setLayouts.size(); ++i) {
         if (layouts[i].empty()) {
@@ -155,6 +161,17 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         info.bindingCount = static_cast<std::uint32_t>(layouts[i].size());
         info.pBindings = layouts[i].data();
+        const VkDescriptorBindingFlags bindlessFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                                                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                                                       VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+        VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+        flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsInfo.bindingCount = 1;
+        flagsInfo.pBindingFlags = &bindlessFlags;
+        if (static_cast<SetLayout>(i) == SetLayout::Bindless) {
+            info.pNext = &flagsInfo;
+            info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        }
         if (table.vkCreateDescriptorSetLayout(dev, &info, nullptr, &m_setLayouts[i]) != VK_SUCCESS) {
             for (VkDescriptorSetLayout layout : m_setLayouts) table.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
             table.vkDestroySampler(dev, m_nearestClamp, nullptr);

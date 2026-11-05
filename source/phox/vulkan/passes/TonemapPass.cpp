@@ -23,11 +23,14 @@ PipelineDesc tonemapPipelineDesc(Format target) {
 
 ImageHandle addTonemapPass(RenderGraph &graph, ImageHandle hdr, ImageHandle target, const ToneMapping &mapping,
                            PipelineCache &pipelines) {
-    const Pipeline &pipeline = pipelines.get(tonemapPipelineDesc(graph.imageInfo(target).desc.format));
+    const Format targetFormat = graph.imageInfo(target).desc.format;
+    const Pipeline &pipeline = pipelines.get(tonemapPipelineDesc(targetFormat));
     const VkDescriptorSetLayout textureLayout = pipelines.setLayout(SetLayout::Texture);
     TonemapPushConstants constants;
     constants.exposure = mapping.exposure;
     constants.op = static_cast<std::uint32_t>(mapping.op);
+    // An sRGB format encodes on write; anything else gets the transfer function from the shader.
+    constants.encodeSrgb = targetFormat == Format::RGBA8Srgb || targetFormat == Format::BGRA8Srgb ? 0u : 1u;
 
     struct Data {
         ImageHandle written;

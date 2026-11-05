@@ -2,8 +2,12 @@
 // and, for the meshlet path, include/phox/vulkan/ShaderInterface.hpp.
 //
 // Shaders of the meshlet path (forward.task, forward.mesh) define PHOX_MESHLET_DRAW before including
-// this file and get MeshletDrawPushConstants instead of DrawPushConstants. Both start with the same
-// two members, so forward.frag serves both paths.
+// this file and get MeshletDrawPushConstants; forward.vert defines PHOX_VERTEX_DRAW and gets
+// DrawPushConstants. Both carry the draw's material index, which the vertex and mesh shaders pass to
+// forward.frag, so one fragment shader (without push constants) serves both paths.
+//
+// Sets: 0 SetLayout::Frame, 1 SetLayout::Bindless (fragment shaders that define PHOX_MATERIALS), then for
+// the meshlet path 2 SetLayout::MeshletVisibility and 3 SetLayout::DepthPyramid (forward_task.glsl).
 
 // Set 0 (SetLayout::Frame): per-frame data.
 layout(set = 0, binding = 0) uniform FrameUniforms {
@@ -17,6 +21,42 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
     vec4 frustumPlanes[6]; // world space; xyz: unit normal pointing inwards, w: distance
 } frame;
 
+#ifdef PHOX_MATERIALS
+
+// Needs GL_EXT_nonuniform_qualifier, enabled by the including shader.
+
+// phox::MaterialData. Texture fields index `textures`, or are kNoTexture.
+struct MaterialData {
+    vec4 baseColor;
+    vec4 emissive; // rgb
+    float metallic;
+    float roughness;
+    float normalScale;
+    float occlusionStrength;
+    float alphaCutoff;
+    uint flags; // kMaterialAlphaMask | kMaterialAlphaBlend
+    uint baseColorTexture;
+    uint metallicRoughnessTexture;
+    uint normalTexture;
+    uint occlusionTexture;
+    uint emissiveTexture;
+    uint padding;
+};
+
+const uint kNoTexture = 0xFFFFFFFFu;
+const uint kMaterialAlphaMask = 1u;
+const uint kMaterialAlphaBlend = 2u;
+
+// Set 0, binding 1: one entry per draw of the frame.
+layout(set = 0, binding = 1, std430) readonly buffer Materials {
+    MaterialData materials[];
+};
+
+// Set 1 (SetLayout::Bindless): every texture the renderer has uploaded, each with its own sampler. sRGB
+// textures have sRGB formats, so samples come back linear.
+layout(set = 1, binding = 0) uniform sampler2D textures[];
+
+#endif
 #ifdef PHOX_MESHLET_DRAW
 
 // Needs GL_EXT_buffer_reference, enabled by the including shader.
@@ -32,7 +72,8 @@ struct Meshlet {
     uvec4 range;   // vertex offset, triangle offset (uints from the start of the meshlet buffer), counts
 };
 
-// phox::Vertex, read as floats: position (0-2), normal (3-5), texcoord (6-7).
+// phox::Vertex, read as floats: position (0-2), normal (3-5), texcoord (6-7), tangent (8-11).
+const uint kVertexFloats = 12u;
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer { float values[]; };
 // The meshlets, followed by phox::MeshletMesh::data (per meshlet, vertex indices, then triangles of three
 // 8-bit local indices), which is read through a MeshletDataBuffer of the same address.
@@ -43,7 +84,6 @@ const uint kMeshletFrustumCulling = 1u;
 const uint kMeshletConeCulling = 2u;
 
 layout(push_constant) uniform MeshletDrawPushConstants {
-    vec4 albedo;
     mat4 model;
     vec4 cameraPosition; // xyz: the camera in the mesh's object space
     VertexBuffer vertices;
@@ -51,6 +91,7 @@ layout(push_constant) uniform MeshletDrawPushConstants {
     uint meshletCount;
     uint flags;            // kMeshletFrustumCulling | kMeshletConeCulling
     uint visibilityOffset; // two-phase occlusion culling: the draw's first word of meshlet visibility bits
+    uint material;         // index into `materials`
 } draw;
 
 // From the task shader to the mesh shader: the meshlets that survived culling, one mesh shader
@@ -59,13 +100,12 @@ struct MeshletTask {
     uint meshlets[PHOX_TASK_GROUP_SIZE];
 };
 
-#else
+#elif defined(PHOX_VERTEX_DRAW)
 
-// Per draw. albedo comes first: llvmpipe (seen in Mesa 25.1) has a fast path for fragment shaders that
-// output a constant, and it reads that constant from offset 0 whatever the shader's offset is.
+// Per draw (vertex stage).
 layout(push_constant) uniform DrawPushConstants {
-    vec4 albedo;
     mat4 model;
+    uint material; // index into `materials`
 } draw;
 
 #endif

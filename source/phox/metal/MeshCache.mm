@@ -8,6 +8,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace phox::mtl {
 
@@ -16,8 +17,12 @@ MeshCache::MeshCache(Device &device) : m_device(device) {}
 MeshCache::~MeshCache() = default;
 
 void MeshCache::prepare(const RenderView &view, std::uint64_t frameNumber) {
-    for (const DrawItem &draw : view.draws) {
-        const Mesh &mesh = *draw.mesh;
+    std::vector<const DrawItem *> items;
+    items.reserve(view.itemCount());
+    for (const DrawItem &draw : view.draws) items.push_back(&draw);
+    for (const DrawItem &draw : view.transparent) items.push_back(&draw);
+    for (const DrawItem *draw : items) {
+        const Mesh &mesh = *draw->mesh;
         GpuMesh &entry = m_meshes[mesh.id()];
         entry.lastUsed = frameNumber;
         if (entry.vertices && entry.version == mesh.version()) {

@@ -27,10 +27,17 @@ enum class MeshletPhase : std::uint8_t {
 };
 
 /// The pipelines the forward pass uses for the given attachment formats: drawing with vertex shaders,
-/// or meshlets with task and mesh shaders. @p cull is Back for single-sided materials.
-PipelineDesc forwardPipelineDesc(Format color, Format depth, CullMode cull = CullMode::None);
+/// or meshlets with task and mesh shaders. @p cull is Back for single-sided materials; @p blend alpha
+/// blends without writing depth (AlphaMode::Blend). Blended meshlets use MeshletPhase::Single.
+PipelineDesc forwardPipelineDesc(Format color, Format depth, CullMode cull = CullMode::None, bool blend = false);
 PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cull = CullMode::None,
-                                        MeshletPhase phase = MeshletPhase::Single);
+                                        MeshletPhase phase = MeshletPhase::Single, bool blend = false);
+
+/// The descriptor sets every forward pipeline binds first.
+struct ForwardSets {
+    VkDescriptorSet frame = VK_NULL_HANDLE;    ///< set 0: FrameUniforms and the frame's MaterialData table
+    VkDescriptorSet textures = VK_NULL_HANDLE; ///< set 1: the texture table (TextureCache::set())
+};
 
 /// Two-phase occlusion culling of meshlets (the meshlet path only).
 struct MeshletOcclusion {
@@ -39,15 +46,16 @@ struct MeshletOcclusion {
 };
 
 /// Clears @p color to the view's background and @p depth to the far plane, then draws every item in
-/// @p view lit by its directional light. @p frameSet is bound as set 0 (FrameUniforms for the view).
-/// The meshes must have been uploaded with MeshCache::prepare; if the cache holds meshlets, they are
-/// drawn with task and mesh shaders, and @p meshletCulling lets the task shader skip those outside the
-/// frustum or (single-sided only) facing away.
+/// @p view lit by its directional light: view.draws, then view.transparent blended over them ("forward
+/// blend"). The material table in @p sets has one entry per item, view.draws' first. The meshes must
+/// have been uploaded with MeshCache::prepare, and the textures with TextureCache::prepare; if the mesh
+/// cache holds meshlets, they are drawn with task and mesh shaders, and @p meshletCulling lets the task
+/// shader skip those outside the frustum or (single-sided only) facing away.
 ///
 /// With @p occlusion, the meshlets are drawn in two passes: "forward early" draws those visible last
 /// frame, a depth pyramid is built from its depth, and "forward late" draws the rest that are not hidden
 /// behind it, recording which meshlets are visible for the next frame. Needs D32Float depth.
-ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, VkDescriptorSet frameSet,
+ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
                                  bool meshletCulling = true, const MeshletOcclusion *occlusion = nullptr);
 

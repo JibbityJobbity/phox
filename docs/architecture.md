@@ -178,23 +178,25 @@ previous one.
 - `vk::ShaderLibrary` loads `<name>.spv` from `PHOX_SHADER_DIR` once.
 - `vk::PipelineCache` creates dynamic-rendering pipelines, and compute pipelines (a description with only
   `computeShader`), on first request and caches pipeline layouts. It owns the fixed set layouts: `Frame` (the
-  per-frame uniform buffer), `Texture` (a combined image sampler with an immutable linear clamp sampler, so a
-  descriptor write needs only a view), `MeshletVisibility` and `DepthPyramid` (task stage; only on devices
-  with mesh shaders) and `DepthPyramidBuild` (compute). The renderer builds its pipelines
-  during initialization, so broken shaders select the software fallback instead of failing the first frame.
+  per-frame uniform buffer and the frame's material table), `Texture` (a combined image sampler with an
+  immutable linear clamp sampler, so a descriptor write needs only a view), `MeshletVisibility` and
+  `DepthPyramid` (task stage; only on devices with mesh shaders), `DepthPyramidBuild` (compute) and
+  `Bindless` (the texture table, 6.3). The renderer builds its pipelines during initialization, so broken
+  shaders select the software fallback instead of failing the first frame.
 - `shaders/common.glsl`, mirrored by `include/phox/ShaderInterface.hpp` (shared with the Metal backend) and, for
   the meshlet path, `include/phox/vulkan/ShaderInterface.hpp`:
-  - set 0 `FrameUniforms` (352 bytes): view, proj, viewProj, camera position, light direction with the ambient
-    term in w, light colour, resolution, and the six world-space frustum planes for meshlet culling. Visible
-    to the task and mesh stages too when the device has them;
-  - push constants `{vec4 albedo; mat4 model}` (80 bytes, vertex and fragment). The albedo comes first because
-    llvmpipe (Mesa 25.1) reads the colour of constant-output fragment shaders from offset 0 on fully covered
-    tiles;
-  - on the meshlet path, `MeshletDrawPushConstants` (128 bytes, task, mesh and fragment): the same two members,
-    then the camera in object space, the device addresses of the mesh's vertices and of its meshlets
-    (followed by their data), the meshlet count, the culling flags and the draw's first word of visibility
-    bits (6.2). Code defining `PHOX_MESHLET_DRAW` gets this block instead, so
-    `forward.frag` serves both paths.
+  - set 0, binding 0 `FrameUniforms` (352 bytes): view, proj, viewProj, camera position, light direction with
+    the ambient term in w, light colour, resolution, and the six world-space frustum planes for meshlet
+    culling. Visible to the task and mesh stages too when the device has them;
+  - set 0, binding 1: the frame's `MaterialData` array (80 bytes each, std430), one entry per drawn item;
+  - set 1 (`SetLayout::Bindless`): the texture table (6.3);
+  - push constants `DrawPushConstants {mat4 model; uint material}` (80 bytes, vertex stage);
+  - on the meshlet path, `MeshletDrawPushConstants` (112 bytes, task and mesh): the model matrix, the camera in
+    object space, the device addresses of the mesh's vertices and of its meshlets (followed by their data),
+    the meshlet count, the culling flags, the draw's first word of visibility bits (6.2) and the material
+    index. Code defining `PHOX_MESHLET_DRAW` gets this block, `PHOX_VERTEX_DRAW` the other. The vertex and
+    mesh shaders pass the material index on as a flat varying, so `forward.frag` has no push constants and
+    serves both paths.
 - `vk::DescriptorAllocator` is per frame: pools reset together and grow when one runs out.
 
 The abstract `phox::Device` creates buffers and images but not pipelines, which the plan had it do: creating a
@@ -202,10 +204,12 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 
 ## 6. Scene, view and passes
 
-- `Mesh`: indexed `Vertex {position, normal, uv}` with bounds, a never-reused id and a version for caching.
-  Built-ins: `triangle`, `cube`, `plane`; `loadMesh()` reads model files through assimp (OBJ in this build).
-- `Object`: name, `shared_ptr<const Mesh>`, `Material {name, albedo, doubleSided}`, `Transform` (scale, rotate,
-  translate). Materials are double-sided by default; single-sided ones have their back faces culled. Each
+- `Mesh`: indexed `Vertex {position, normal, uv, tangent}` (48 bytes) with bounds, a never-reused id and a
+  version for caching. Zero tangents are generated from the texture coordinates (`generateTangents`).
+  Built-ins: `triangle`, `cube`, `plane`, `torus`, `sphere`; `loadMesh()` reads OBJ through assimp, and
+  `loadGltf()` whole glTF scenes (6.3).
+- `Object`: name, `shared_ptr<const Mesh>`, `Material` (6.3), `Transform` (scale, rotate, translate).
+  Materials are double-sided by default; single-sided ones have their back faces culled. Each
   object also has a never-reused `id()` that renderers key per-object state on (meshlet visibility); copies
   get a new one, moves keep it.
 - `Scene`: objects, named by `ObjectId {index, generation}` handles that go stale on removal (a slot table over
@@ -213,20 +217,23 @@ pipeline needs the shader library and set layouts, which belong with the cache.
   `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
   clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES).
 - `extractView(scene, extent)` computes the matrices and frustum planes from the target's aspect ratio, culls
-  objects whose bounds lie outside a frustum plane, and sorts the rest front to back. A draw culls back faces
-  when its material is single-sided and its transform does not mirror the mesh (`DrawItem::cullBackFaces`).
+  objects whose bounds lie outside a frustum plane, and sorts the rest: opaque and alpha-masked items front
+  to back (`draws`), blended ones back to front (`transparent`). A draw culls back faces when its material
+  is single-sided and its transform does not mirror the mesh (`DrawItem::cullBackFaces`).
 - `SampleScenes` gives the app and the tests the same scenes with deterministic `animate(scene, t)`.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 
-- `addForwardPass(graph, view, frameSet, color, depth, meshes, pipelines, meshletCulling, occlusion)`: clears,
-  then draws each item with per-draw push constants, lit two-sided by the directional light: indexed draws,
-  or one `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds meshlets (6.1). Two pipelines per path,
-  culling none or back faces, share a layout, so the descriptor sets are bound once. With `occlusion` it adds
-  the passes of 6.2 instead of one.
+- `addForwardPass(graph, view, sets, color, depth, meshes, pipelines, meshletCulling, occlusion)`: clears,
+  then draws each item with per-draw push constants, shaded by its material (6.3) and lit two-sided by the
+  directional light: indexed draws, or one `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds
+  meshlets (6.1). Two pipelines per path, culling none or back faces, share a layout, so the descriptor sets
+  are bound once. With `occlusion` it adds the passes of 6.2 instead of one. Blended items follow in
+  "forward blend": alpha blending, depth tested read-only, no occlusion culling.
 - `addDepthPyramidPass(graph, depth, pipelines)`: builds the depth pyramid of 6.2 and returns it.
 - `addTonemapPass(graph, hdr, target, mapping, pipelines)`: a full-screen triangle reading the HDR image with
-  `texelFetch`; it writes every pixel, so the target's load op is DontCare.
+  `texelFetch`, then applying the sRGB transfer function unless the target's format does; it writes every
+  pixel, so the target's load op is DontCare.
 - `addReadbackPass(graph, source, buffer)`: copies an 8-bit image into a buffer.
 
 ### 6.1 Mesh shading
@@ -302,6 +309,55 @@ forward late 0.03 ms, 0.64 ms in all, against 0.87 ms with frustum and cone cull
 with vertex shaders. With the scene animating (`--animate`) the late pass draws more of the frame's newly
 visible meshlets and takes 0.04 ms; the total stays at 0.65 ms. The four images are identical.
 
+### 6.3 Materials and textures
+
+Phox shades in linear light with glTF 2.0's metallic-roughness model.
+
+- `Material` holds the glTF factors (base colour, metallic, roughness, emissive, normal scale, occlusion
+  strength), the alpha mode (`Opaque`, `Mask` with a cutoff, `Blend`), `doubleSided`, and up to five
+  `shared_ptr<const Texture>`s: base colour (sRGB), metallic-roughness (g, b), normal, occlusion (r) and
+  emissive (sRGB). Colours are linear; `phox/Color.hpp` converts sRGB-picked ones (`srgb(r, g, b)`).
+- `Texture` is immutable RGBA8 with a full mip chain built on the CPU when it is made (a box filter in
+  linear light for sRGB, renormalised for normal maps), its `TextureEncoding`, its `SamplerDesc` (filters
+  and wrap modes) and a never-reused id. Building mips on the CPU makes every backend and the software
+  rasterizer sample the same texels, which keeps goldens comparable.
+- The BRDF is in `shaders/pbr.glsl`, mirrored by `phox::shadePbr` (`core/Shading.cpp`) and
+  `shaders/metal/pbr.h`: GGX distribution, height-correlated Smith visibility, Schlick Fresnel, Lambert
+  diffuse. The light colour is irradiance / pi, so a white Lambertian surface facing a white light reflects
+  1, as the old flat shading did. The ambient term lights `(diffuse colour + F0) * occlusion` evenly, a
+  stand-in until image-based lighting.
+- **Output encoding.** The tonemap pass applies the sRGB transfer function (`TonemapPushConstants::encodeSrgb`)
+  unless the target's format is sRGB, and `applyToneMapping` does the same on the CPU. Before PBR, colours
+  were written as display values; the sample scenes now give theirs through `srgb()` and look as before.
+
+On Vulkan:
+
+- **Texture table.** One descriptor set (`SetLayout::Bindless`, set 1) holds an array of combined image
+  samplers, `min(4096, device limits)` long, partially bound and update-after-bind. `vk::TextureCache`
+  (shaped like `MeshCache`) uploads each texture once on first use: staging through the arena, copies of
+  every mip, a barrier to SHADER_READ_ONLY, then a write of its slot with a sampler made from its
+  `SamplerDesc`. Slots of textures unused for 120 frames are freed; no frame in flight can still read them.
+  This needs descriptor indexing (runtime arrays, partial binding, update-after-bind and non-uniform
+  indexing of sampled images), which nearly every Vulkan 1.2 device, lavapipe and MoltenVK have; device
+  selection requires it.
+- **Material table.** Each frame uploads one `MaterialData` per drawn item (`draws` then `transparent`) to
+  the arena, with texture fields holding table slots or `kNoTexture`, and binds it at set 0, binding 1.
+  Draws push their item's index.
+
+Elsewhere:
+
+- **glTF.** `loadGltf(path, scene)` (cgltf, stb_image) adds an object per mesh primitive per node, placed by
+  the node's world transform, with its material and textures; primitives and textures used several times
+  are shared. It handles `.gltf` and `.glb`, data URIs, triangle strips and fans, missing normals (flat, as
+  the spec says) and tangents (generated), sampler modes and `KHR_materials_emissive_strength`. It ignores
+  skins, morph targets, animations, cameras, lights, `KHR_texture_transform` and other texture coordinate
+  sets, and lists what it ignored in `GltfImport::warnings`; files that require an unsupported extension
+  (Draco, meshopt, KTX2) are refused. `makeGltfViewerScene` puts a file on a turntable (`PhoxSample --mesh`).
+- **Software rasterizer.** Renders into a linear HDR buffer and tone maps at the end, like the GPU, so blended
+  items composite in the same space. It shades with `shadeMaterial`, the C++ twin of `forward.frag`, but
+  samples only the first mip; the golden cases with textures allow more differing pixels for that, and for
+  GPUs choosing mips differently.
+
 ## 7. Upload and caches
 
 - `UploadArena`: one host-visible, persistently mapped buffer per frame context, bump-allocated and reset at
@@ -311,6 +367,7 @@ visible meshlets and takes 0.04 ms; the total stays at 0.65 ms. The four images 
   INDEX_INPUT, or to the task and mesh shaders' storage reads for meshlets. The vertex path uploads indices in
   vertex cache order; the meshlet path uploads meshlets instead (6.1). Replaced buffers go to the frame's
   deletion queue; meshes not drawn for 120 frames are evicted.
+- `TextureCache::prepare(view, frame, cmd)` does the same for textures (6.3), which never change.
 - `vk::Device::makeBuffer` / `makeImage` are the only callers of VMA (memory: DeviceLocal, Upload, Readback).
 
 ## 8. Fallback, logging and testing
@@ -348,22 +405,24 @@ visible meshlets and takes 0.04 ms; the total stays at 0.65 ms. The four images 
 ## 10. File layout
 
 ```
-include/phox/                 CpuImage, Log, Math, Resources, RenderGraph, RenderView, Scene, Camera, SampleScenes,
-                              MeshLoader, Meshlets, SoftwareRasterizer, Renderer, Device, Buffer, Image, Window
+include/phox/                 CpuImage, Log, Math, Color, Resources, RenderGraph, RenderView, Scene, Camera, Texture,
+                              Shading, ShaderInterface, SampleScenes, MeshLoader, GltfLoader, Meshlets,
+                              SoftwareRasterizer, Renderer, Device, Buffer, Image, Window
 include/phox/pipeline/        PipelineDesc, Pipeline, Shader
 include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameContext, UploadArena,
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
-                              ShaderInterface, MeshCache, MeshletVisibility, PassTimer, Conversions, VulkanCommon
+                              ShaderInterface, MeshCache, TextureCache, MeshletVisibility, PassTimer, Conversions,
+                              VulkanCommon
 include/phox/vulkan/passes/   ForwardPass, DepthPyramidPass, TonemapPass, ReadbackPass
 include/phox/metal/           Renderer, Device, Buffer, Image, TransientPool, GraphExecutor, PipelineCache,
-                              ShaderLibrary, ShaderInterface, MeshCache, Conversions, MetalCommon
+                              ShaderLibrary, ShaderInterface, MeshCache, TextureCache, Conversions, MetalCommon
 include/phox/metal/passes/    ForwardPass, TonemapPass, ReadbackPass
-shaders/                      common.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
+shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
                               forward_early.task and forward_late.task, depthpyramid.comp, fullscreen.vert,
                               tonemap.frag
-shaders/metal/                common.h, forward.metal, fullscreen.metal, tonemap.metal
+shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
-test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
+test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials
 ```
 
 ## 11. Next, and where each thing plugs in
@@ -371,13 +430,15 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
 - **Object-level occlusion culling on the GPU.** Objects are culled against the frustum on the CPU, and every
   meshlet of a surviving object is tested on the GPU. A compute pass over objects, writing indirect mesh task
   draws, would cull whole hidden objects against the pyramid first.
-- **Meshlet LOD and instancing.** A draw per object pushes 128 bytes; many instances of one mesh would rather
+- **Image-based lighting.** An HDR environment map, prefiltered for specular and convolved for diffuse, with
+  a BRDF lookup table, replaces the ambient term in `shadePbr`; smooth metals currently reflect nothing.
+- **Shadows.** Cascaded shadow maps for the directional light: a depth pass per cascade before "forward",
+  sampled with PCF in `forward.frag`.
+- **Meshlet LOD and instancing.** A draw per object pushes 112 bytes; many instances of one mesh would rather
   read transforms from a buffer, and distant objects want coarser meshlets (meshoptimizer's simplifier).
 
 - **Installable package.** Install the compiled shaders with a runtime lookup (an environment override or a
   path relative to the library), and export or bundle volk and VMA.
-- **Textures and materials.** A `TextureCache` shaped like `MeshCache` with a one-time transition to Sampled;
-  a material set (set 1) with a uniform buffer and texture indices; then bindless textures (set 2).
 - **Aliasing.** Transients with disjoint lifetimes share one VMA allocation (`vmaCreateAliasingImage`). Compile
   already knows the lifetimes; the executor adds aliasing barriers.
 - **Async compute.** A per-pass queue in `PassBuilder`; compile emits semaphores and ownership transfers.
@@ -385,8 +446,6 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
   internal.
 - **Shader reflection.** SPIRV-Reflect fills set layouts and push constant ranges from the SPIR-V.
 - **Debug overlay.** An ImGui pass that writes the backbuffer after tonemap.
-- **sRGB output.** The swapchain is UNORM and colours are treated as display values; an sRGB swapchain with
-  linear shading is the correct long-term choice and will change every golden.
 
 ## 12. Metal backend
 
@@ -404,8 +463,9 @@ objects under them are Metal-specific. Its pieces map one to one onto the Vulkan
 | synchronization2 barriers, layouts | none | Every resource uses Metal's automatic hazard tracking, which orders encoders that touch the same resource. Metal has no layouts |
 | `TransientPool` | `mtl::TransientPool` | Same policy, and immediate reuse is safe for the same reason: one queue, with ordering provided by hazard tracking instead of a barrier |
 | `FrameContext` ring, fences | a dispatch semaphore of 2 | A frame's completion handler gives its slot back. Command buffers keep the resources they reference alive, so there is no deletion queue |
-| `UploadArena`, descriptor sets | `setVertexBytes` / `setFragmentBytes` | `FrameUniforms` and per-draw constants go inline in the command buffer; the HDR texture is bound directly |
-| `PipelineCache`, set layouts, push constants | `mtl::PipelineCache` | Same descriptions. `SetLayout::Frame` is buffer 0, per-draw constants buffer 1, vertices buffer 30, `SetLayout::Texture` texture 0 (`metal/ShaderInterface.hpp`) |
+| `UploadArena`, descriptor sets | `setVertexBytes` / `setFragmentBytes` | `FrameUniforms`, per-draw constants and each draw's `MaterialData` go inline in the command buffer; the HDR texture is bound directly |
+| `TextureCache`, texture table | `mtl::TextureCache` | No table: each draw binds its material's five textures and samplers (texture and sampler 0 to 4), a 1 x 1 white placeholder where it has none, because Metal's API validation wants every declared texture bound. Shared textures on Apple silicon, managed ones elsewhere, filled with `replaceRegion` |
+| `PipelineCache`, set layouts, push constants | `mtl::PipelineCache` | Same descriptions. `SetLayout::Frame` is buffer 0, per-draw constants buffer 1, the draw's material buffer 2, vertices buffer 30, `SetLayout::Texture` texture 0 (`metal/ShaderInterface.hpp`) |
 | `ShaderLibrary` (SPIR-V) | `mtl::ShaderLibrary` (MSL) | `"forward.vert"` is function `forward_vert` in `forward.metal`, compiled from source at startup. `#include "common.h"` is inlined by the loader |
 | `MeshCache` (device-local, copy and barrier) | `mtl::MeshCache` | Shared buffers written directly: unified memory on Apple silicon |
 | `Swapchain` | `CAMetalLayer` | The window owns the layer (`Window::metalLayer()`, `WindowConfig::api = GraphicsApi::Metal`); the drawable's texture is imported like the swapchain image |
@@ -417,7 +477,8 @@ Decisions specific to this backend:
   the same: pipelines keep `FrontFace::CounterClockwise`. Depth is [0, 1] in both.
 - **Shaders compiled at runtime**, with fast math off so results track the goldens. Precompiling to a
   `.metallib` needs Xcode's Metal Toolchain, which a build cannot assume. MSL has no `inverse()`, so the
-  forward shader builds the normal matrix from cofactors.
+  forward shader builds the normal matrix from cofactors. The loader inlines `#include "…"` lines (common.h,
+  pbr.h).
 - **Validation.** `RendererConfig::debug` sets `MTL_DEBUG_LAYER` before the device is created and reports
   whether it took effect (Metal reads it once per process; a Metal window creates a device first, so
   PhoxSample sets it before creating the window). Metal's layer stops the process on an error instead of

@@ -22,16 +22,16 @@ taskPayloadSharedEXT MeshletTask task;
 shared uint lanes[PHOX_TASK_GROUP_SIZE];
 
 #if defined(PHOX_OCCLUSION_EARLY) || defined(PHOX_OCCLUSION_LATE)
-// Set 1 (SetLayout::MeshletVisibility): whether each meshlet was visible at the end of the previous frame.
-layout(set = 1, binding = 0) buffer MeshletVisibility {
+// Set 2 (SetLayout::MeshletVisibility): whether each meshlet was visible at the end of the previous frame.
+layout(set = 2, binding = 0) buffer MeshletVisibility {
     uint words[];
 } visibility;
 #endif
 
 #ifdef PHOX_OCCLUSION_LATE
-// Set 2 (SetLayout::DepthPyramid): mip 0 is the largest power-of-two size not above the depth buffer's;
+// Set 3 (SetLayout::DepthPyramid): mip 0 is the largest power-of-two size not above the depth buffer's;
 // each texel holds the farthest depth of the area it covers.
-layout(set = 2, binding = 0) uniform sampler2D depthPyramid;
+layout(set = 3, binding = 0) uniform sampler2D depthPyramid;
 
 // Mirrors phox::projectSphere: the slopes x/d of the two tangents from the eye to a circle at (x, d).
 vec2 tangentSlopes(float x, float d, float r) {

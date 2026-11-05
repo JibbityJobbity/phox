@@ -17,6 +17,7 @@ class Device;
 class MeshCache;
 class PipelineCache;
 class ShaderLibrary;
+class TextureCache;
 class TransientPool;
 
 class Renderer final : public phox::Renderer {
@@ -55,6 +56,7 @@ private:
     std::unique_ptr<PipelineCache> m_pipelines;
     std::unique_ptr<TransientPool> m_transients;
     std::unique_ptr<MeshCache> m_meshes;
+    std::unique_ptr<TextureCache> m_textures;
     std::unique_ptr<Buffer> m_readback; ///< headless only
     Format m_drawableFormat = Format::BGRA8Unorm;
     std::uint64_t m_frameNumber = 0;

@@ -48,6 +48,16 @@ public:
         }};
     }
 
+    /// phox::Vertex.
+    static VertexLayout positionNormalTexcoordTangent() {
+        return VertexLayout{{
+            VertexAttribute{VertexAttributeSemantic::Position, VertexAttributeFormat::Float32x3, 0, 12},
+            VertexAttribute{VertexAttributeSemantic::Normal, VertexAttributeFormat::Float32x3, 12, 12},
+            VertexAttribute{VertexAttributeSemantic::TexCoord0, VertexAttributeFormat::Float32x2, 24, 8},
+            VertexAttribute{VertexAttributeSemantic::Tangent, VertexAttributeFormat::Float32x4, 32, 16},
+        }};
+    }
+
     VertexLayout() = default;
     explicit VertexLayout(std::vector<VertexAttribute> attributes)
         : m_attributes(std::move(attributes)) {}

@@ -85,8 +85,9 @@ int main(int argc, char **argv) {
   cxxopts::Options options("PhoxSample", "Renders a Phox sample scene, headless or in a window.");
   // clang-format off
   options.add_options()
-    ("scene", "sample scene: triangle or cubes", cxxopts::value<std::string>()->default_value("triangle"))
-    ("mesh", "show a model file (OBJ) on a turntable instead of a sample scene", cxxopts::value<std::string>())
+    ("scene", "sample scene: triangle, cubes, tori, materials or field", cxxopts::value<std::string>()->default_value("triangle"))
+    ("mesh", "show a model file on a turntable instead of a sample scene: glTF 2.0 (.gltf, .glb) with its "
+             "materials, or OBJ", cxxopts::value<std::string>())
     ("window", "present to a window until it is closed")
     ("frames", "with --window: stop after this many frames; headless: render this many frames (one image) and "
                "report average GPU times", cxxopts::value<long>()->default_value("0"))
@@ -115,7 +116,14 @@ int main(int argc, char **argv) {
     SampleScene sample;
     if (args.count("mesh")) {
       const std::filesystem::path path = args["mesh"].as<std::string>();
-      sample = makeMeshViewerScene(std::make_shared<Mesh>(loadMesh(path)), path.stem().string());
+      std::string extension = path.extension().string();
+      std::transform(extension.begin(), extension.end(), extension.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (extension == ".gltf" || extension == ".glb") {
+        sample = makeGltfViewerScene(path);
+      } else {
+        sample = makeMeshViewerScene(std::make_shared<Mesh>(loadMesh(path)), path.stem().string());
+      }
     } else {
       sample = makeSampleScene(args["scene"].as<std::string>());
     }

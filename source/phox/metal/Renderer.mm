@@ -13,6 +13,7 @@
 #include "phox/metal/PipelineCache.hpp"
 #include "phox/metal/ShaderInterface.hpp"
 #include "phox/metal/ShaderLibrary.hpp"
+#include "phox/metal/TextureCache.hpp"
 #include "phox/metal/TransientPool.hpp"
 #include "phox/metal/passes/ForwardPass.hpp"
 #include "phox/metal/passes/ReadbackPass.hpp"
@@ -118,6 +119,7 @@ void Renderer::initialize(const RendererConfig &config) {
             m_state->framesInFlight = dispatch_semaphore_create(kFramesInFlight);
             m_transients = std::make_unique<TransientPool>(*m_device);
             m_meshes = std::make_unique<MeshCache>(*m_device);
+            m_textures = std::make_unique<TextureCache>(*m_device);
             createPipelines();
             if (m_window != nullptr) {
                 createLayer();
@@ -150,6 +152,7 @@ void Renderer::releaseMetal() {
         }
     }
     m_readback.reset();
+    m_textures.reset();
     m_meshes.reset();
     m_transients.reset();
     m_pipelines.reset();
@@ -191,7 +194,9 @@ void Renderer::createPipelines() {
     // Build the pipelines now, so missing or broken shaders fail initialization (and select the software
     // fallback) instead of the first frame.
     for (CullMode cull : {CullMode::None, CullMode::Back}) {
-        m_pipelines->get(forwardPipelineDesc(kHdrFormat, kDepthFormat, cull));
+        for (bool blend : {false, true}) {
+            m_pipelines->get(forwardPipelineDesc(kHdrFormat, kDepthFormat, cull, blend));
+        }
     }
     m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
 }
@@ -252,6 +257,7 @@ void Renderer::renderFrame(const Scene &scene) {
 
     m_transients->collect(m_frameNumber);
     m_meshes->collect(m_frameNumber);
+    m_textures->collect(m_frameNumber);
 
     id<CAMetalDrawable> drawable = nil;
     Extent2D extent = m_config.headlessExtent;
@@ -286,6 +292,7 @@ void Renderer::renderFrame(const Scene &scene) {
     }
     commandBuffer.label = [NSString stringWithFormat:@"frame %llu", static_cast<unsigned long long>(m_frameNumber)];
     m_meshes->prepare(view, m_frameNumber);
+    m_textures->prepare(view, m_frameNumber);
 
     // ---- Frame graph (the same shape as the Vulkan backend's) -----------------------------------------
     //   forward -> hdr -> tonemap -> drawable                          [windowed]
@@ -295,7 +302,8 @@ void Renderer::renderFrame(const Scene &scene) {
         GraphExecutor executor(graph, *m_device, *m_transients, m_frameNumber, commandBuffer);
         const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
         const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, kDepthFormat});
-        const ForwardPassOutput forward = addForwardPass(graph, view, uniforms, hdr, depth, *m_meshes, *m_pipelines);
+        const ForwardPassOutput forward =
+            addForwardPass(graph, view, uniforms, hdr, depth, *m_meshes, *m_textures, *m_pipelines);
 
         if (windowed) {
             const ImageHandle backbuffer = graph.importImage(

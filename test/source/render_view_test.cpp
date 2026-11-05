@@ -1,9 +1,12 @@
 // Scene, camera and view extraction, meshlets, the software rasterizer and mesh loading. No GPU needed.
+#include "phox/GltfLoader.hpp"
 #include "phox/MeshLoader.hpp"
 #include "phox/Meshlets.hpp"
 #include "phox/RenderView.hpp"
 #include "phox/Scene.hpp"
+#include "phox/ShaderInterface.hpp"
 #include "phox/SoftwareRasterizer.hpp"
+#include "phox/Texture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -90,9 +93,9 @@ void meshesValidateAndVersion() {
 
 void objectIdsSurviveRemoval() {
     Scene scene;
-    const ObjectId a = scene.addObject("a", nullptr, Material{"a"});
-    const ObjectId b = scene.addObject("b", nullptr, Material{"b"});
-    const ObjectId c = scene.addObject("c", nullptr, Material{"c"});
+    const ObjectId a = scene.addObject("a", nullptr, Material{.name = "a"});
+    const ObjectId b = scene.addObject("b", nullptr, Material{.name = "b"});
+    const ObjectId c = scene.addObject("c", nullptr, Material{.name = "c"});
     CHECK(a.valid() && !(a == b) && !ObjectId{}.valid() && !scene.contains(ObjectId{}));
     CHECK(scene.find("b") == b && !scene.find("z").valid());
 
@@ -107,7 +110,7 @@ void objectIdsSurviveRemoval() {
     }
 
     // The freed slot is reused with a new generation, so the stale id stays stale.
-    const ObjectId d = scene.addObject("d", nullptr, Material{"d"});
+    const ObjectId d = scene.addObject("d", nullptr, Material{.name = "d"});
     CHECK(d.index == a.index && d.generation != a.generation);
     CHECK(!scene.contains(a) && scene.at(d).name() == "d");
     bool threw = false;
@@ -130,9 +133,9 @@ Scene twoCubeScene() {
     // A red cube 2 units away and a green one 6 units away, both straight ahead, plus one behind the camera.
     Scene scene;
     auto cube = std::make_shared<Mesh>(Mesh::cube(1.0f));
-    scene.addObject("far", cube, Material{"green", {0.0f, 1.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -6.0f}});
-    scene.addObject("near", cube, Material{"red", {1.0f, 0.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -2.0f}});
-    scene.addObject("behind", cube, Material{"blue", {0.0f, 0.0f, 1.0f, 1.0f}}, Transform{{0.0f, 0.0f, 5.0f}});
+    scene.addObject("far", cube, Material{.name = "green", .albedo = {0.0f, 1.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -6.0f}});
+    scene.addObject("near", cube, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -2.0f}});
+    scene.addObject("behind", cube, Material{.name = "blue", .albedo = {0.0f, 0.0f, 1.0f, 1.0f}}, Transform{{0.0f, 0.0f, 5.0f}});
     scene.addObject("no mesh", nullptr, Material{});
     scene.camera().position = {0.0f, 0.0f, 0.0f};
     scene.light().direction = {0.0f, 0.0f, -1.0f}; // shining straight at the cubes' front faces
@@ -171,12 +174,13 @@ void rasterizerDepthTestsAndLights() {
     const Scene scene = twoCubeScene();
     const CpuImage image = rasterize(extractView(scene, {200, 100}));
     CHECK(image.width == 200 && image.height == 100);
-    // The near red cube covers the far green one in the middle; its front face is fully lit.
+    // The near red cube covers the far green one in the middle; its front face is fully lit, with a
+    // white (dielectric) highlight adding the same to green and blue.
     const auto centre = image.pixel(100, 50);
-    CHECK(centre[0] == 255 && centre[1] == 0 && centre[2] == 0);
-    // Corners show the background (0.1, 0.2, 0.3).
+    CHECK(centre[0] == 255 && centre[1] == centre[2] && centre[1] > 0 && centre[1] < 160);
+    // Corners show the background, sRGB (0.1, 0.2, 0.3): stored linear, encoded again on output.
     const auto corner = image.pixel(0, 0);
-    CHECK(corner[0] == 26 && corner[1] == 51 && corner[2] == 77);
+    CHECK(std::abs(corner[0] - 26) <= 1 && std::abs(corner[1] - 51) <= 1 && std::abs(corner[2] - 77) <= 1);
 }
 
 // The geometric normal (from the winding) of triangle @p t of @p indices.
@@ -376,7 +380,7 @@ void singleSidedMaterialsCullBackFaces() {
     // The triangle faces +Z; the camera looks at its back from -Z.
     Scene scene;
     auto triangle = std::make_shared<Mesh>(Mesh::triangle(1.0f));
-    Object &object = scene.at(scene.addObject("triangle", triangle, Material{"red", {1.0f, 0.0f, 0.0f, 1.0f}}));
+    Object &object = scene.at(scene.addObject("triangle", triangle, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}}));
     scene.camera().position = {0.0f, 0.0f, -3.0f};
     scene.camera().lookAt({0.0f, 0.0f, 0.0f});
     const auto centre = [&] { return rasterize(extractView(scene, {64, 64})).pixel(32, 32); };
@@ -385,7 +389,7 @@ void singleSidedMaterialsCullBackFaces() {
 
     object.material().doubleSided = false;
     CHECK(extractView(scene, {64, 64}).draws.at(0).cullBackFaces);
-    CHECK(centre()[0] == 26); // background
+    CHECK(std::abs(centre()[0] - 26) <= 1); // background
 
     // A mirroring transform turns the front face into the back face, so nothing is culled.
     object.transform().scale = {-1.0f, 1.0f, 1.0f};
@@ -416,7 +420,264 @@ void loadsObjFiles() {
 
 } // namespace
 
+void texturesBuildMipChains() {
+    CHECK(mipCountFor(1, 1) == 1 && mipCountFor(256, 256) == 9 && mipCountFor(320, 240) == 9 && mipCountFor(1, 64) == 7);
+    // Black and white sRGB texels average to linear 0.5, which is sRGB 188, not 128.
+    const Texture checker = Texture::checker("bw", 4, 4, vec4(0.0f, 0.0f, 0.0f, 1.0f), vec4(1.0f));
+    CHECK(checker.mipCount() == 3);
+    CHECK(checker.mip(1).width == 2 && checker.mip(2).width == 1 && checker.mip(2).rgba.size() == 4);
+    CHECK(checker.mip(2).rgba[0] == 188 && checker.mip(2).rgba[3] == 255);
+    // Linear data averages as stored.
+    const Texture data = Texture::checker("data", 2, 2, vec4(0.0f), vec4(1.0f), TextureEncoding::Linear);
+    CHECK(data.mip(1).rgba[0] == 128);
+    // Normal maps are renormalised: two tilted normals average to straight up, not to a shorter vector.
+    std::vector<std::uint8_t> tilted;
+    for (const vec3 n : {glm::normalize(vec3(1, 0, 1)), glm::normalize(vec3(-1, 0, 1))}) {
+        for (int c = 0; c < 3; ++c) tilted.push_back(static_cast<std::uint8_t>(std::lround((n[c] * 0.5f + 0.5f) * 255.0f)));
+        tilted.push_back(255);
+    }
+    const Texture normals("normals", 2, 1, tilted, TextureEncoding::Normal);
+    CHECK(normals.mip(1).rgba[2] == 255);
+    // Odd sizes halve down to 1 x 1.
+    const Texture odd("odd", 5, 3, std::vector<std::uint8_t>(5 * 3 * 4, 7), TextureEncoding::Linear);
+    CHECK(odd.mipCount() == 3 && odd.mip(1).width == 2 && odd.mip(1).height == 1 && odd.mip(2).rgba[0] == 7);
+    bool threw = false;
+    try {
+        Texture bad("bad", 2, 2, std::vector<std::uint8_t>(3), TextureEncoding::Linear);
+    } catch (const std::invalid_argument &) {
+        threw = true;
+    }
+    CHECK(threw);
+    // A copy is a different texture to caches.
+    const Texture copy = checker;
+    CHECK(copy.id() != checker.id() && copy.mipCount() == checker.mipCount());
+}
+
+void texturesSampleLikeTheGpu() {
+    // 2 x 1: a black and a white texel. Texel centres are at u = 0.25 and 0.75.
+    std::vector<std::uint8_t> rgba{0, 0, 0, 255, 255, 255, 255, 255};
+    const Texture clamp("clamp", 2, 1, rgba, TextureEncoding::Linear,
+                        SamplerDesc{.wrapU = TextureWrap::ClampToEdge, .wrapV = TextureWrap::ClampToEdge});
+    CHECK(near(clamp.sample({0.25f, 0.5f}).r, 0.0f) && near(clamp.sample({0.75f, 0.5f}).r, 1.0f));
+    CHECK(near(clamp.sample({0.5f, 0.5f}).r, 0.5f));
+    CHECK(near(clamp.sample({0.0f, 0.5f}).r, 0.0f)); // clamped, not wrapped round to the white texel
+    const Texture repeat("repeat", 2, 1, rgba, TextureEncoding::Linear);
+    CHECK(near(repeat.sample({0.0f, 0.5f}).r, 0.5f)); // halfway between the last and the first texel
+    CHECK(near(repeat.sample({1.25f, 0.5f}).r, 0.0f));
+    // sRGB texels are decoded before filtering.
+    const Texture srgbTexture("srgb", 2, 1, {188, 188, 188, 255, 188, 188, 188, 255}, TextureEncoding::Srgb);
+    CHECK(near(srgbTexture.sample({0.5f, 0.5f}).r, 0.5f, 0.01f));
+    const Texture nearest("nearest", 2, 1, rgba, TextureEncoding::Linear, SamplerDesc{.magFilter = TextureFilter::Nearest});
+    CHECK(near(nearest.sample({0.49f, 0.5f}).r, 0.0f) && near(nearest.sample({0.51f, 0.5f}).r, 1.0f));
+}
+
+void meshesGenerateTangents() {
+    // The plane's u runs along +x and v along +z, so its tangent is +x; increasing v (+z) is opposite to
+    // cross(normal, tangent) = cross(+y, +x) = -z, so the handedness is -1.
+    const Mesh plane = Mesh::plane(2.0f);
+    for (const Vertex &v : plane.vertices()) {
+        CHECK(near(vec3(v.tangent), vec3(1.0f, 0.0f, 0.0f)) && v.tangent.w == -1.0f);
+    }
+    // Generated tangents are unit length and perpendicular to the normal, everywhere on a torus.
+    const Mesh torus = Mesh::torus(1.0f, 0.3f, 16, 8);
+    for (const Vertex &v : torus.vertices()) {
+        CHECK(near(glm::length(vec3(v.tangent)), 1.0f, 1e-3f) && std::abs(glm::dot(vec3(v.tangent), v.normal)) < 1e-3f);
+        CHECK(v.tangent.w == 1.0f || v.tangent.w == -1.0f);
+    }
+    // Without usable texture coordinates a vertex still gets some unit tangent perpendicular to its normal.
+    const Mesh flat({{{0, 0, 0}, {0, 0, 1}, {0, 0}}, {{1, 0, 0}, {0, 0, 1}, {0, 0}}, {{0, 1, 0}, {0, 0, 1}, {0, 0}}},
+                    {0, 1, 2});
+    for (const Vertex &v : flat.vertices()) {
+        CHECK(near(glm::length(vec3(v.tangent)), 1.0f, 1e-3f) && std::abs(v.tangent.z) < 1e-3f);
+    }
+    // Given tangents are kept.
+    const Mesh given({{{0, 0, 0}, {0, 0, 1}, {0, 0}, {0, 1, 0, 1}}, {{1, 0, 0}, {0, 0, 1}, {1, 0}, {0, 1, 0, 1}},
+                      {{0, 1, 0}, {0, 0, 1}, {0, 1}, {0, 1, 0, 1}}},
+                     {0, 1, 2});
+    CHECK(near(vec3(given.vertices()[0].tangent), vec3(0.0f, 1.0f, 0.0f)));
+}
+
+void sphereIsClosedAndMatchesItsTangents() {
+    const Mesh sphere = Mesh::sphere(0.5f, 16, 8);
+    CHECK(near(sphere.bounds().min, vec3(-0.5f), 1e-3f) && near(sphere.bounds().max, vec3(0.5f), 1e-3f));
+    // No degenerate triangles at the poles: 2 per quad, minus one per quad in the top and bottom rows.
+    CHECK(sphere.triangleCount() == 16 * 8 * 2 - 2 * 16);
+    for (std::size_t t = 0; t < sphere.triangleCount(); ++t) {
+        CHECK(glm::dot(faceNormal(sphere, sphere.indices(), t), sphere.vertices()[sphere.indices()[3 * t]].normal) > 0.0f);
+    }
+    // The analytic tangents agree with what generateTangents works out from the texture coordinates
+    // (away from the poles, where every direction is a tangent).
+    std::vector<Vertex> generated = sphere.vertices();
+    for (Vertex &v : generated) v.tangent = vec4(0.0f);
+    generateTangents(generated, sphere.indices());
+    for (std::size_t i = 0; i < generated.size(); ++i) {
+        const Vertex &v = sphere.vertices()[i];
+        if (std::abs(v.normal.y) > 0.9f) {
+            continue;
+        }
+        CHECK(glm::dot(vec3(generated[i].tangent), vec3(v.tangent)) > 0.95f && generated[i].tangent.w == v.tangent.w);
+    }
+}
+
+void materialsPackForShaders() {
+    Material material{.name = "m", .albedo = {0.5f, 0.25f, 1.0f, 0.5f}, .metallic = 0.75f, .roughness = 0.3f,
+                      .emissive = {1.0f, 2.0f, 3.0f}, .alphaMode = AlphaMode::Mask, .alphaCutoff = 0.4f};
+    MaterialData data = materialData(material);
+    CHECK(data.baseColor == material.albedo && data.emissive == vec4(1.0f, 2.0f, 3.0f, 0.0f));
+    CHECK(data.metallic == 0.75f && data.roughness == 0.3f && data.alphaCutoff == 0.4f);
+    CHECK(data.flags == kMaterialAlphaMask && data.baseColorTexture == kNoTexture && data.emissiveTexture == kNoTexture);
+    material.alphaMode = AlphaMode::Blend;
+    CHECK(materialData(material).flags == kMaterialAlphaBlend);
+    material.alphaMode = AlphaMode::Opaque;
+    CHECK(materialData(material).flags == 0);
+}
+
+void blendedItemsAreDrawnLastAndFarthestFirst() {
+    Scene scene;
+    auto cube = std::make_shared<Mesh>(Mesh::cube(1.0f));
+    const Material glass{.name = "glass", .albedo = {0.0f, 0.0f, 1.0f, 0.5f}, .alphaMode = AlphaMode::Blend};
+    scene.addObject("near glass", cube, glass, Transform{{0.0f, 0.0f, -2.0f}});
+    scene.addObject("far glass", cube, glass, Transform{{0.0f, 0.0f, -5.0f}});
+    scene.addObject("wall", cube, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}},
+                    Transform{{0.0f, 0.0f, -8.0f}, quat(1, 0, 0, 0), vec3(4.0f, 4.0f, 0.1f)});
+    scene.camera().position = {0.0f, 0.0f, 0.0f};
+    scene.camera().lookAt({0.0f, 0.0f, -1.0f});
+    const RenderView view = extractView(scene, {64, 64});
+    CHECK(view.draws.size() == 1 && view.transparent.size() == 2 && view.itemCount() == 3);
+    CHECK(view.transparent[0].viewDepth > view.transparent[1].viewDepth);
+    // Blended over the red wall, the two half-transparent blue cubes leave some red showing.
+    const auto centre = rasterize(view).pixel(32, 32);
+    CHECK(centre[2] > centre[1] && centre[0] > 0 && centre[0] < 200);
+}
+
+void maskedTexelsAreCut() {
+    // A white quad whose texture is transparent on its left half, in front of a red wall.
+    Scene scene;
+    std::vector<std::uint8_t> rgba{255, 255, 255, 0, 255, 255, 255, 255};
+    auto mask = std::make_shared<Texture>("mask", 2, 1, rgba, TextureEncoding::Srgb,
+                                          SamplerDesc{.magFilter = TextureFilter::Nearest}, false);
+    auto quad = std::make_shared<Mesh>(Mesh::plane(2.0f));
+    const quat upright = glm::angleAxis(glm::half_pi<float>(), vec3(1, 0, 0));
+    scene.addObject("cutout", quad,
+                    Material{.name = "cutout", .albedo = vec4(1.0f), .alphaMode = AlphaMode::Mask, .baseColorTexture = mask},
+                    Transform{{0.0f, 0.0f, -2.0f}, upright});
+    scene.addObject("wall", std::make_shared<Mesh>(Mesh::cube(1.0f)), Material{.name = "red", .albedo = {1, 0, 0, 1}},
+                    Transform{{0.0f, 0.0f, -6.0f}, quat(1, 0, 0, 0), vec3(8.0f, 8.0f, 0.1f)});
+    scene.camera().position = {0.0f, 0.0f, 0.0f};
+    scene.camera().lookAt({0.0f, 0.0f, -1.0f});
+    const CpuImage image = rasterize(extractView(scene, {64, 64}));
+    CHECK(image.pixel(20, 32)[1] < 100);  // left: cut away, the red wall shows
+    CHECK(image.pixel(44, 32)[1] > 200); // right: the white quad
+}
+
+// A small glTF file with a node hierarchy, a mesh used twice, a primitive without normals or material,
+// and a textured, alpha-masked material with an emissive strength (embedded PNG: red, green / blue, and
+// white at half alpha). It also lists an extension Phox ignores.
+constexpr const char *kTestGltf = R"gltf({
+  "asset": {"version": "2.0"},
+  "extensionsUsed": ["KHR_materials_emissive_strength", "KHR_materials_clearcoat"],
+  "scene": 0,
+  "scenes": [{"nodes": [0, 2, 3]}],
+  "nodes": [
+    {"name": "parent", "translation": [0, 0, -2], "children": [1]},
+    {"name": "child", "mesh": 0, "scale": [2, 2, 2]},
+    {"name": "tri", "mesh": 1, "rotation": [0, 0.70710678, 0, 0.70710678]},
+    {"name": "again", "mesh": 0, "translation": [3, 0, 0]}
+  ],
+  "meshes": [
+    {"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 4, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]},
+    {"primitives": [{"attributes": {"POSITION": 3}}]}
+  ],
+  "materials": [{
+    "name": "painted",
+    "pbrMetallicRoughness": {"baseColorFactor": [0.5, 1, 1, 1], "baseColorTexture": {"index": 0},
+                             "metallicFactor": 0.25, "roughnessFactor": 0.75},
+    "emissiveFactor": [1, 0.5, 0],
+    "extensions": {"KHR_materials_emissive_strength": {"emissiveStrength": 2}},
+    "alphaMode": "MASK", "alphaCutoff": 0.3, "doubleSided": true
+  }],
+  "textures": [{"source": 0, "sampler": 0}],
+  "samplers": [{"magFilter": 9728, "minFilter": 9729, "wrapS": 33071, "wrapT": 33648}],
+  "images": [{"uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwyBNAg0AABJSQl4KKDbdwAAAABJRU5ErkJggg=="}],
+  "buffers": [{"byteLength": 180, "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAACAPwAAgL8AAAAAAACAPwAAgD8AAAAAAACAvwAAgD8AAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAAAAAAAEAAgAAAAIAAwAAAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/"}],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 48},
+    {"buffer": 0, "byteOffset": 48, "byteLength": 32},
+    {"buffer": 0, "byteOffset": 80, "byteLength": 12},
+    {"buffer": 0, "byteOffset": 96, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 132, "byteLength": 48}
+  ],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-1, -1, 0], "max": [1, 1, 0]},
+    {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"},
+    {"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
+    {"bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+    {"bufferView": 4, "componentType": 5126, "count": 4, "type": "VEC3"}
+  ]
+})gltf";
+
+void loadsGltfFiles() {
+    const auto path = std::filesystem::temp_directory_path() / "phox_gltf_test.gltf";
+    {
+        std::ofstream file(path);
+        file << kTestGltf;
+    }
+    Scene scene;
+    const GltfImport import = loadGltf(path, scene);
+    std::filesystem::remove(path);
+
+    CHECK(import.objects.size() == 3 && scene.objectCount() == 3);
+    CHECK(import.meshes == 2 && import.materials == 2 && import.textures == 1); // the quad mesh is shared
+    CHECK(import.warnings.size() == 1 && import.warnings[0].find("KHR_materials_clearcoat") != std::string::npos);
+    // World bounds: the child quad (scaled by 2, at z = -2), the triangle, the second quad at x = 3.
+    CHECK(near(import.bounds.min, vec3(-2.0f, -2.0f, -2.0f)) && near(import.bounds.max, vec3(4.0f, 2.0f, 0.0f)));
+
+    const Object &child = scene.at(import.objects[0]);
+    CHECK(child.name() == "child");
+    CHECK(near(child.transform().position, vec3(0.0f, 0.0f, -2.0f)) && near(child.transform().scale, vec3(2.0f)));
+    const Mesh &quad = *child.mesh();
+    CHECK(quad.vertices().size() == 4 && quad.triangleCount() == 2);
+    CHECK(near(quad.vertices()[0].normal, vec3(0.0f, 0.0f, 1.0f)) && near(quad.vertices()[2].uv.x, 1.0f));
+    CHECK(near(vec3(quad.vertices()[0].tangent), vec3(1.0f, 0.0f, 0.0f))); // generated: u runs along +x
+    CHECK(scene.at(import.objects[2]).mesh() == child.mesh());
+
+    const Material &painted = child.material();
+    CHECK(painted.name == "painted" && painted.albedo == vec4(0.5f, 1.0f, 1.0f, 1.0f));
+    CHECK(painted.metallic == 0.25f && painted.roughness == 0.75f && near(painted.emissive, vec3(2.0f, 1.0f, 0.0f)));
+    CHECK(painted.alphaMode == AlphaMode::Mask && near(painted.alphaCutoff, 0.3f) && painted.doubleSided);
+    CHECK(!painted.normalTexture && !painted.metallicRoughnessTexture);
+    const Texture &texture = *painted.baseColorTexture;
+    CHECK(texture.width() == 2 && texture.height() == 2 && texture.encoding() == TextureEncoding::Srgb);
+    CHECK(texture.mipCount() == 1); // the sampler's minification filter does not use mips
+    CHECK(texture.sampler().magFilter == TextureFilter::Nearest && texture.sampler().wrapU == TextureWrap::ClampToEdge &&
+          texture.sampler().wrapV == TextureWrap::MirroredRepeat);
+    const auto &texels = texture.mip(0).rgba;
+    CHECK(texels[0] == 255 && texels[1] == 0 && texels[4 + 1] == 255 && texels[8 + 2] == 255 && texels[12 + 3] == 128);
+
+    // No normals: flat ones, one set of vertices per triangle. No material: glTF's default.
+    const Object &tri = scene.at(import.objects[1]);
+    CHECK(tri.mesh()->vertices().size() == 3 && near(tri.mesh()->vertices()[1].normal, vec3(0.0f, 0.0f, 1.0f)));
+    CHECK(near(tri.transform().rotation * vec3(1.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, -1.0f)));
+    CHECK(tri.material().metallic == 1.0f && tri.material().roughness == 1.0f && !tri.material().doubleSided);
+
+    bool threw = false;
+    try {
+        loadGltf(std::filesystem::temp_directory_path() / "phox_no_such_file.gltf", scene);
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 int main() {
+    loadsGltfFiles();
+    texturesBuildMipChains();
+    texturesSampleLikeTheGpu();
+    meshesGenerateTangents();
+    sphereIsClosedAndMatchesItsTangents();
+    materialsPackForShaders();
+    blendedItemsAreDrawnLastAndFarthestFirst();
+    maskedTexelsAreCut();
     projectionMatchesVulkanClipSpace();
     cameraLooksAtItsTarget();
     transformScalesThenRotatesThenTranslates();

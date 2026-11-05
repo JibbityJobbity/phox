@@ -17,6 +17,7 @@ class Buffer;
 class Device;
 class FrameContext;
 class MeshCache;
+class TextureCache;
 class MeshletVisibility;
 class PipelineCache;
 class ShaderLibrary;
@@ -80,6 +81,7 @@ private:
     std::uint64_t m_frameNumber = 0;
     std::unique_ptr<TransientPool> m_transients;
     std::unique_ptr<MeshCache> m_meshes;
+    std::unique_ptr<TextureCache> m_textures;
     std::unique_ptr<MeshletVisibility> m_visibility; ///< occlusion culling only
     std::unique_ptr<Buffer> m_readback; ///< headless only
 

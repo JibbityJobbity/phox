@@ -22,8 +22,12 @@ MeshCache::~MeshCache() = default;
 void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber) {
     const auto &table = m_device.table();
     bool uploaded = false;
-    for (const DrawItem &draw : view.draws) {
-        const Mesh &mesh = *draw.mesh;
+    std::vector<const DrawItem *> items;
+    items.reserve(view.itemCount());
+    for (const DrawItem &draw : view.draws) items.push_back(&draw);
+    for (const DrawItem &draw : view.transparent) items.push_back(&draw);
+    for (const DrawItem *draw : items) {
+        const Mesh &mesh = *draw->mesh;
         GpuMesh &entry = m_meshes[mesh.id()];
         entry.lastUsed = frameNumber;
         if (entry.vertices && entry.version == mesh.version()) {

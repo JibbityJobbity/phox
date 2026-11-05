@@ -78,6 +78,21 @@ CPMAddPackage(
   VERSION "5.4.3"
 )
 
+# glTF 2.0 loading (phox/GltfLoader.hpp): cgltf parses, stb_image decodes PNG and JPEG. Both are single
+# headers, compiled into source/phox/core/GltfLoader.cpp.
+CPMAddPackage(
+  NAME cgltf
+  GITHUB_REPOSITORY jkuhlmann/cgltf
+  VERSION 1.15
+  DOWNLOAD_ONLY YES
+)
+CPMAddPackage(
+  NAME stb
+  GITHUB_REPOSITORY nothings/stb
+  GIT_TAG d14d46f6b44456eb88beac58cba833a4135d4c89
+  DOWNLOAD_ONLY YES
+)
+
 # ---- Add source files ----
 
 # Note: globbing sources is considered bad practice as CMake's generators may not detect new files
@@ -85,8 +100,10 @@ CPMAddPackage(
 set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Buffer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Camera.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Color.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/CpuImage.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Device.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/GltfLoader.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Log.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Math.hpp
@@ -99,7 +116,9 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SampleScenes.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/ShaderInterface.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Shading.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SoftwareRasterizer.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Texture.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/pipeline/Pipeline.hpp
@@ -125,6 +144,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderInterface.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/ShaderLibrary.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Swapchain.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TextureCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/TransientPool.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/UploadArena.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/VulkanCommon.hpp
@@ -140,6 +160,7 @@ set(headers
 set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Camera.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/CpuImage.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/GltfLoader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Log.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/MeshLoader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Meshlets.cpp
@@ -150,7 +171,10 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/SampleScenes.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Scene.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/ShaderInterface.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Shading.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/SoftwareRasterizer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/core/Texture.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/SDLWindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/platform/window/Window.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Buffer.cpp
@@ -167,6 +191,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/ShaderLibrary.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Swapchain.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TextureCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/DepthPyramidPass.cpp
@@ -189,6 +214,7 @@ if(PHOX_ENABLE_METAL)
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Renderer.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/ShaderInterface.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/ShaderLibrary.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/TextureCache.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/TransientPool.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/passes/ForwardPass.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/passes/ReadbackPass.hpp
@@ -204,6 +230,7 @@ if(PHOX_ENABLE_METAL)
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/PipelineCache.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Renderer.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/ShaderLibrary.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/TextureCache.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/TransientPool.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/passes/ForwardPass.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/passes/ReadbackPass.mm
@@ -337,6 +364,8 @@ target_link_libraries(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:volk::volk> $<BUILD_INTERFACE:VulkanMemoryAllocator> fmt::fmt
   PRIVATE assimp meshoptimizer
 )
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE $<BUILD_INTERFACE:${cgltf_SOURCE_DIR}>
+                                                          $<BUILD_INTERFACE:${stb_SOURCE_DIR}>)
 
 find_package(SDL2 REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
@@ -364,6 +393,7 @@ set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
 set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl
                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/forward_task.glsl
+                         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.glsl
 )
 foreach(
   shader
@@ -397,7 +427,7 @@ foreach(
   list(APPEND PHOX_SHADER_SPV ${spv})
 endforeach()
 if(PHOX_ENABLE_METAL)
-  foreach(shader common.h forward.metal fullscreen.metal tonemap.metal)
+  foreach(shader common.h pbr.h forward.metal fullscreen.metal tonemap.metal)
     set(copy ${PHOX_SHADER_OUTPUT_DIR}/metal/${shader})
     add_custom_command(
       OUTPUT ${copy}

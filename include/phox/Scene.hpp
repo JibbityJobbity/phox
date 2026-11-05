@@ -3,7 +3,9 @@
 
 #include "phox/Camera.hpp"
 #include "phox/Math.hpp"
+#include "phox/Texture.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -13,13 +15,17 @@
 
 namespace phox {
 
-/// The vertex format of every Phox mesh (VertexLayout::positionNormalTexcoord()).
+/// The vertex format of every Phox mesh (VertexLayout::positionNormalTexcoordTangent()).
 struct Vertex {
     vec3 position{0.0f};
     vec3 normal{0.0f, 0.0f, 1.0f};
     vec2 uv{0.0f};
+    /// xyz: the direction of increasing u, perpendicular to the normal; w: +1 or -1, the handedness of
+    /// the bitangent (cross(normal, tangent) * w points along increasing v). Leave it zero and Mesh works
+    /// it out from the texture coordinates.
+    vec4 tangent{0.0f};
 };
-static_assert(sizeof(Vertex) == 32, "Vertex must match VertexLayout::positionNormalTexcoord()");
+static_assert(sizeof(Vertex) == 48, "Vertex must match VertexLayout::positionNormalTexcoordTangent()");
 
 /// An axis-aligned box.
 struct Bounds {
@@ -31,6 +37,9 @@ struct Bounds {
 
 /// Indexed triangles. Each Mesh has an id that is never reused and a version that changes whenever its
 /// geometry does, so renderers can cache GPU copies. Copies get a new id.
+///
+/// If any vertex has a zero tangent (w == 0), the mesh computes tangents for all of its vertices from
+/// their positions and texture coordinates (see generateTangents).
 class Mesh {
 public:
     Mesh();
@@ -61,6 +70,8 @@ public:
     static Mesh plane(float size = 1.0f);
     /// A torus about the Y axis with @p rings segments around that axis and @p sides around the tube.
     static Mesh torus(float radius = 1.0f, float tubeRadius = 0.35f, std::uint32_t rings = 48, std::uint32_t sides = 24);
+    /// A UV sphere centred on the origin, poles on the Y axis; u runs once around, v from top to bottom.
+    static Mesh sphere(float radius = 0.5f, std::uint32_t segments = 48, std::uint32_t rings = 24);
 
 private:
     std::vector<Vertex> m_vertices;
@@ -70,12 +81,45 @@ private:
     std::uint64_t m_version = 1;
 };
 
+/// Computes per-vertex tangents for normal mapping from the triangles' texture coordinates (Lengyel's
+/// method: per-triangle tangents summed at each vertex, then made perpendicular to the normal). Vertices
+/// whose triangles have no usable texture coordinates get an arbitrary tangent perpendicular to their normal.
+void generateTangents(std::vector<Vertex> &vertices, const std::vector<std::uint32_t> &indices);
+
+/// How a material's alpha is used (glTF's alphaMode).
+enum class AlphaMode : std::uint8_t {
+    Opaque, ///< alpha is ignored
+    Mask,   ///< fragments with alpha below alphaCutoff are discarded, the rest are opaque
+    Blend,  ///< blended over what is behind, after the opaque objects and back to front; no depth writes
+};
+
+/// A metallic-roughness material, as in glTF 2.0. Each texture is optional; where present it is
+/// multiplied by its factor. Colours are linear (see phox/Color.hpp).
 struct Material {
     std::string name;
-    vec4 albedo{1.0f, 0.2f, 0.4f, 1.0f};
+    vec4 albedo{1.0f, 0.2f, 0.4f, 1.0f}; ///< base colour factor; rgb linear, a: opacity
+    float metallic = 0.0f;               ///< 0: dielectric, 1: metal
+    float roughness = 0.5f;              ///< perceptual roughness: 0 mirror-like, 1 fully rough
+    vec3 emissive{0.0f};                 ///< emitted light, linear; added after lighting
+    float normalScale = 1.0f;            ///< scales the normal map's x and y
+    float occlusionStrength = 1.0f;      ///< 0: occlusion texture ignored, 1: fully applied
+    AlphaMode alphaMode = AlphaMode::Opaque;
+    float alphaCutoff = 0.5f; ///< AlphaMode::Mask only
     /// Both faces of each triangle are drawn (and lit). Turn it off for closed meshes seen from outside:
     /// their back faces are then culled, and the mesh shading path skips whole meshlets that face away.
     bool doubleSided = true;
+
+    std::shared_ptr<const Texture> baseColorTexture{};         ///< rgb: colour (sRGB), a: opacity
+    std::shared_ptr<const Texture> metallicRoughnessTexture{}; ///< g: roughness, b: metallic
+    std::shared_ptr<const Texture> normalTexture{};            ///< tangent-space normal
+    std::shared_ptr<const Texture> occlusionTexture{};         ///< r: ambient occlusion
+    std::shared_ptr<const Texture> emissiveTexture{};          ///< rgb: emitted colour (sRGB)
+
+    /// Every texture the material uses, base colour first; null entries for those it does not.
+    std::array<const Texture *, 5> textures() const {
+        return {baseColorTexture.get(), metallicRoughnessTexture.get(), normalTexture.get(), occlusionTexture.get(),
+                emissiveTexture.get()};
+    }
 };
 
 /// Scale, then rotate, then translate.
@@ -84,6 +128,9 @@ struct Transform {
     quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     vec3 scale{1.0f};
     mat4 matrix() const;
+    /// The transform whose matrix() is @p m, for affine matrices without shear (shear is dropped). A
+    /// mirroring matrix gets a negative x scale.
+    static Transform fromMatrix(const mat4 &m);
 };
 
 /// A mesh placed in a scene with a material. Each object has an id that is never reused, so renderers
@@ -118,7 +165,9 @@ private:
 struct DirectionalLight {
     vec3 direction{-0.4f, -1.0f, -0.6f}; ///< the way the light travels (need not be normalised)
     vec3 color{1.0f};
-    float ambient = 0.25f; ///< fraction of the albedo that is lit regardless of direction
+    /// Light that reaches every surface regardless of direction, as a fraction of the light colour (a
+    /// stand-in for environment lighting).
+    float ambient = 0.25f;
 };
 
 enum class ToneMapOperator : std::uint8_t {
@@ -133,7 +182,8 @@ struct ToneMapping {
     float exposure = 1.0f; ///< colours are multiplied by this first
 };
 
-/// Applies @p mapping to a linear colour. The tonemap shader does the same on the GPU.
+/// Applies @p mapping to a linear colour and encodes the result for the display with the sRGB transfer
+/// function, giving values in [0, 1]. The tonemap shader does the same on the GPU.
 vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping);
 
 /// Names an object in a Scene. It stays valid until that object is removed; after that the scene rejects
@@ -181,7 +231,7 @@ public:
     DirectionalLight &light() { return m_light; }
     const DirectionalLight &light() const { return m_light; }
 
-    vec4 clearColor{0.1f, 0.2f, 0.3f, 1.0f};
+    vec4 clearColor{0.0100228f, 0.0331048f, 0.0732389f, 1.0f}; ///< linear; sRGB (0.1, 0.2, 0.3)
     ToneMapping toneMapping;
 
 private:

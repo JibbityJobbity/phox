@@ -9,8 +9,14 @@ image, and falls back to a software rasterizer when there is no usable GPU.
   barrier (synchronization2) and manages transient images and buffers. See [Render graph](#render-graph).
 - **Frames in flight**: two frame contexts with their own command buffers, fences, upload memory and
   descriptor pools. The CPU never waits for the device inside a frame.
-- **Forward rendering into HDR** with depth testing, then tone mapping (clamp, Reinhard or ACES) straight
-  into the swapchain image.
+- **Physically based materials**: glTF 2.0's metallic-roughness model (GGX, height-correlated Smith,
+  Schlick) with base colour, metallic-roughness, normal, occlusion and emissive textures, alpha masking and
+  blending, in linear light. Textures are mipmapped on the CPU and, on Vulkan, indexed from one bindless
+  texture table. See [architecture section 6.3](docs/architecture.md#63-materials-and-textures).
+- **glTF 2.0 loading** (`.gltf` and `.glb`, via cgltf and stb_image): node hierarchies, shared meshes and
+  textures, samplers, PNG and JPEG images.
+- **Forward rendering into HDR** with depth testing, then tone mapping (clamp, Reinhard or ACES) and sRGB
+  encoding straight into the swapchain image.
 - **Mesh shading** where the device has `VK_EXT_mesh_shader`: meshes are split into meshlets with
   meshoptimizer, and a task shader skips meshlets outside the view frustum, facing away from the camera,
   or hidden behind what is already drawn (two-phase occlusion culling against a depth pyramid). Elsewhere
@@ -30,7 +36,8 @@ cmake -S standalone -B build-standalone
 cmake --build build-standalone
 ./build-standalone/PhoxSample                               # one frame of the triangle -> build/rendered_triangle.ppm
 ./build-standalone/PhoxSample --scene cubes --window        # animated, until the window is closed
-./build-standalone/PhoxSample --mesh model.obj --window     # a model file on a turntable
+./build-standalone/PhoxSample --scene materials --window    # the material model: metals, plastics, textures
+./build-standalone/PhoxSample --mesh model.glb --window     # a glTF (or OBJ) file on a turntable
 ./build-standalone/PhoxSample --help
 ```
 
@@ -38,7 +45,8 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
-| `--scene triangle\|cubes\|tori\|field` | the sample scene to show (`field` is a 37.7-million-triangle benchmark) |
+| `--scene triangle\|cubes\|tori\|materials\|field` | the sample scene to show (`field` is a 37.7-million-triangle benchmark) |
+| `--mesh FILE` | show a glTF 2.0 (`.gltf`, `.glb`) or OBJ file on a turntable instead |
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
 | `--frames N` (headless) | render N frames of one pose (`--animate`: advancing 1/60 s each) and print the average GPU time per pass |
 | `--mesh-shaders on\|off\|noocclusion\|nocull` | draw with task and mesh shaders where available; `noocclusion` keeps frustum and cone culling only, `nocull` turns meshlet culling off |
@@ -61,7 +69,7 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | Test | What it checks | GPU |
 | --- | --- | --- |
 | `render_graph` | culling, versions, barriers, lifetimes, attachments, validation of declarations, DOT export | no |
-| `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, meshlets and their culling tests, sphere projection, software rasterizer, OBJ loading | no |
+| `render_view` | projection, camera, transforms, meshes and tangents, frustum culling, sorting, meshlets and their culling tests, sphere projection, textures and mips, materials, blending and masking in the software rasterizer, OBJ and glTF loading | no |
 | `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
 | `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
 | `golden_metal` | the same goldens through the Metal backend, vertex shaders only (Apple platforms) | yes |

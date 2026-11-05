@@ -14,6 +14,14 @@ class Image;
 
 /// The logical device, its queues and the memory allocator. Every Vulkan buffer and image in Phox is
 /// created here. Objects created from a Device must be destroyed before it.
+/// Whether a device has the descriptor indexing features Phox's texture table needs (all of which are
+/// enabled on the Device): a partially bound, update-after-bind array of sampled images, indexed
+/// non-uniformly.
+bool hasBindlessTextures(const VkPhysicalDeviceVulkan12Features &features);
+
+/// The most textures the texture table (SetLayout::Bindless) holds, whatever the device allows.
+inline constexpr std::uint32_t kMaxBindlessTextures = 4096;
+
 class Device final : public phox::Device {
 public:
     /// @param surface        VK_NULL_HANDLE when headless; otherwise a queue that can present to it is set up
@@ -43,6 +51,8 @@ public:
     /// VK_EXT_mesh_shader is enabled with task and mesh shaders. Its limits are in meshShaderProperties().
     bool meshShaders() const { return m_meshShaders; }
     const VkPhysicalDeviceMeshShaderPropertiesEXT &meshShaderProperties() const { return m_meshShaderProperties; }
+    /// Size of the texture table: kMaxBindlessTextures, or less if the device allows fewer.
+    std::uint32_t bindlessTextureCount() const { return m_bindlessTextureCount; }
 
     VkDevice handle() const { return m_device; }
     VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
@@ -59,6 +69,7 @@ private:
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties m_properties{};
     VkPhysicalDeviceMeshShaderPropertiesEXT m_meshShaderProperties{};
+    std::uint32_t m_bindlessTextureCount = 0;
     VkDevice m_device = VK_NULL_HANDLE;
     VolkDeviceTable m_table{};
     VmaAllocator m_allocator = VK_NULL_HANDLE;

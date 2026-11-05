@@ -53,12 +53,16 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
         }
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
         const bool cullBackFaces = !object.material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
-        view.draws.push_back(
-            {object.id(), mesh, &object.material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
+        const DrawItem item{object.id(), mesh, &object.material(), model,
+                            glm::dot(center - camera.position, forward), cullBackFaces};
+        (object.material().alphaMode == AlphaMode::Blend ? view.transparent : view.draws).push_back(item);
     }
     // Front to back, so depth testing rejects hidden fragments early. Stable: ties keep scene order.
     std::stable_sort(view.draws.begin(), view.draws.end(),
                      [](const DrawItem &a, const DrawItem &b) { return a.viewDepth < b.viewDepth; });
+    // Back to front, so each blended item is composited over everything behind it.
+    std::stable_sort(view.transparent.begin(), view.transparent.end(),
+                     [](const DrawItem &a, const DrawItem &b) { return a.viewDepth > b.viewDepth; });
     return view;
 }
 

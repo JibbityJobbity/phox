@@ -59,6 +59,16 @@ bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char *name) {
                        [&](const VkExtensionProperties &e) { return std::strcmp(e.extensionName, name) == 0; });
 }
 
+} // namespace
+
+bool hasBindlessTextures(const VkPhysicalDeviceVulkan12Features &features) {
+    return features.descriptorIndexing && features.runtimeDescriptorArray && features.descriptorBindingPartiallyBound &&
+           features.descriptorBindingSampledImageUpdateAfterBind && features.descriptorBindingUpdateUnusedWhilePending &&
+           features.shaderSampledImageArrayNonUniformIndexing;
+}
+
+namespace {
+
 VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
     VmaAllocationCreateInfo info{};
     switch (memory) {
@@ -116,6 +126,25 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     features12.bufferDeviceAddress = VK_TRUE;
+    // The texture table (hasBindlessTextures): textures are added while earlier frames are still in flight.
+    features12.descriptorIndexing = VK_TRUE;
+    features12.runtimeDescriptorArray = VK_TRUE;
+    features12.descriptorBindingPartiallyBound = VK_TRUE;
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    {
+        VkPhysicalDeviceVulkan12Properties properties12{};
+        properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.pNext = &properties12;
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &properties);
+        m_bindlessTextureCount = std::min({kMaxBindlessTextures, properties12.maxDescriptorSetUpdateAfterBindSampledImages,
+                                           properties12.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                                           properties12.maxDescriptorSetUpdateAfterBindSamplers,
+                                           properties12.maxPerStageDescriptorUpdateAfterBindSamplers});
+    }
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.pNext = &features12;

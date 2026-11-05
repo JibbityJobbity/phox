@@ -63,11 +63,16 @@ bool envFlag(const char *name) {
     return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
 }
 
+// Textured surfaces differ more: implementations pick mips (and filter between them) differently on
+// minified and slanted surfaces, and the software rasterizer only samples the first mip.
+constexpr double kTexturedFractionOverTolerance = 0.02;
+
 struct GoldenCase {
     std::string name;
     std::string scene;
     float time; ///< animation time the scene is posed at
     phox::ToneMapping toneMapping{};
+    double allowedFraction = kMaxFractionOverTolerance; ///< of the pixels, may be over kChannelTolerance
 };
 
 const std::vector<GoldenCase> kCases = {
@@ -76,6 +81,8 @@ const std::vector<GoldenCase> kCases = {
     {"cubes", "cubes", 0.7f},
     {"cubes_aces", "cubes", 0.7f, {phox::ToneMapOperator::Aces, 1.6f}},
     {"tori", "tori", 0.8f}, // meshlets cut by the frustum and facing away
+    // metal/roughness, textures, normal map, alpha mask and blend, emission
+    {"materials", "materials", 0.7f, {}, kTexturedFractionOverTolerance},
 };
 
 const std::filesystem::path kGoldenDir = PHOX_GOLDEN_DIR;
@@ -148,7 +155,7 @@ int runCases(const Backend &backend, Path pathKind) {
         const phox::CpuImage expected = phox::readPpm(golden);
         const phox::ImageDiff diff = phox::compareImages(actual, expected, kChannelTolerance);
         const std::size_t allowed =
-            static_cast<std::size_t>(kMaxFractionOverTolerance * expected.width * expected.height);
+            static_cast<std::size_t>(c.allowedFraction * expected.width * expected.height);
         const bool pass = !diff.sizeMismatch && diff.pixelsOverTolerance <= allowed;
         std::cout << (pass ? "PASS " : "FAIL ") << c.name << " (" << path << "): max channel delta " << diff.maxChannelDelta << ", "
                   << diff.pixelsOverTolerance << " pixel(s) over tolerance (allowed " << allowed << ")"
