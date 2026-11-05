@@ -97,9 +97,27 @@ Scene ──extractView()──▶ RenderView ──feature passes──▶ Rend
 | `source/phox/` | library sources (`core/`, `vulkan/`, `platform/`) |
 | `shaders/` | GLSL, compiled to SPIR-V by CMake; `common.glsl` mirrors `phox/ShaderInterface.hpp` |
 | `shaders/metal/` | the MSL counterparts, compiled by the Metal backend at startup |
-| `standalone/` | the `PhoxSample` app |
+| `standalone/` | the `PhoxSample` app, and `PhoxRhiSample` (`standalone/rhi/`, the RHI stack below) |
 | `test/` | tests and golden images |
 | `docs/architecture.md` | the design and its rationale |
+
+### The RHI stack
+
+A second, independent stack sits beside the renderer above. It was built from the original baseline and
+has not been ported onto it (or it onto them) yet:
+
+| Path | Contents |
+| --- | --- |
+| `include/phox/rhi/`, `source/phox/rhi/` | `PhoxCore`: RHI interfaces (handles, descs, capabilities, `CommandList`, `Device`), its own log sink (`phox/rhi/Log.hpp`) |
+| `include/phox/graph/`, `source/phox/graph/` | `PhoxCore`: a render graph over the RHI (capability checks, barriers, transient pooling) |
+| `backends/null/` | `PhoxNull`: records commands, draws nothing; for tests without a GPU |
+| `backends/vulkan/` | `PhoxVulkan`: the RHI on Vulkan 1.3 (`phox::vulkan`, separate from the renderer's `phox::vk`) |
+| `include/phox/scene/` | `PhoxScene`: the baseline scene types in `phox::scene` |
+| `techniques/forward/` | `PhoxTechniques`: the forward technique built from graph components |
+
+Its tests are `image_compare`, `rhi_null`, `graph`, `camera`, `forward_graph`, and on a GPU `rhi_triangle`
+and `forward`. The last two compare exactly with `test/golden/triangle_640x480.ppm` from lavapipe; on
+other hardware set `PHOX_GOLDEN_TOLERANCE` (2 is enough on an RTX 3080).
 
 ## Render graph
 

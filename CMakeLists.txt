@@ -213,6 +213,100 @@ if(PHOX_ENABLE_METAL)
   list(APPEND sources ${metal_sources})
 endif()
 
+# ---- RHI core and backends ----
+# PhoxCore is the backend-agnostic layer (RHI interfaces, later the render graph) and depends on
+# nothing but the standard library. Each backend is its own target. The old Vulkan renderer in the
+# Phox target below stays in place until it is removed in a later phase.
+
+option(PHOX_BACKEND_VULKAN "Build the Vulkan RHI backend" ON)
+option(PHOX_BACKEND_NULL "Build the null RHI backend (records commands, draws nothing)" ON)
+
+set(PHOX_CORE_HEADERS
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Component.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Pass.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/RenderGraph.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/ResourceHandle.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/graph/Technique.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Backend.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Capabilities.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/CommandList.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Descs.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Device.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Formats.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Handles.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/rhi/Log.hpp
+)
+set(PHOX_CORE_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/Barriers.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/Internal.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/graph/RenderGraph.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/rhi/Backend.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/rhi/Log.cpp
+)
+
+add_library(PhoxCore STATIC ${PHOX_CORE_HEADERS} ${PHOX_CORE_SOURCES})
+target_compile_features(PhoxCore PUBLIC cxx_std_20)
+set_target_properties(PhoxCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(PHOX_BACKEND_NULL)
+  add_library(
+    PhoxNull STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/include/phox/null/NullDevice.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/source/NullCommandList.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/source/NullDevice.cpp
+  )
+  target_compile_features(PhoxNull PUBLIC cxx_std_20)
+  set_target_properties(PhoxNull PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(PhoxNull PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/backends/null/include)
+  target_link_libraries(PhoxNull PUBLIC PhoxCore)
+  # Backend.cpp (in PhoxCore) is the one core file that constructs backend devices. The cycle between
+  # these two static libraries is intentional: CMake supports it for static libraries.
+  target_compile_definitions(PhoxCore PRIVATE PHOX_HAS_NULL)
+  target_link_libraries(PhoxCore PRIVATE PhoxNull)
+endif()
+
+if(PHOX_BACKEND_VULKAN)
+  add_library(
+    PhoxVulkan STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/include/phox/vk/VulkanBackend.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/Pool.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/States.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VkCommon.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanCommandList.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanDevice.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/States.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VmaImpl.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanBackend.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanCommandList.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanDevice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source/VulkanPipelines.cpp
+  )
+  target_compile_features(PhoxVulkan PUBLIC cxx_std_20)
+  set_target_properties(PhoxVulkan PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(
+    PhoxVulkan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/source
+  )
+  target_link_libraries(PhoxVulkan PUBLIC PhoxCore PRIVATE volk::volk VulkanMemoryAllocator)
+  target_compile_definitions(PhoxCore PRIVATE PHOX_HAS_VULKAN)
+  target_link_libraries(PhoxCore PRIVATE PhoxVulkan)
+endif()
+
+foreach(rhi_target PhoxCore PhoxNull PhoxVulkan)
+  if(TARGET ${rhi_target})
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+      target_compile_options(${rhi_target} PRIVATE -Wall -Wextra -Wpedantic)
+      if(${rhi_target} STREQUAL PhoxVulkan)
+        # `VkFoo info{VK_STRUCTURE_TYPE_FOO};` is the standard Vulkan idiom and trips this warning.
+        target_compile_options(${rhi_target} PRIVATE -Wno-missing-field-initializers)
+      endif()
+    elseif(MSVC)
+      target_compile_options(${rhi_target} PRIVATE /W4)
+    endif()
+  endif()
+endforeach()
+
 # ---- Create library ----
 
 # Note: for header-only libraries change all PUBLIC flags to INTERFACE and create an interface
@@ -282,6 +376,9 @@ foreach(
   fullscreen.vert
   tonemap.frag
   depthpyramid.comp
+  # The RHI stack's forward technique (techniques/forward) and rhi_triangle test.
+  basic.vert
+  basic.frag
 )
   set(spv ${PHOX_SHADER_OUTPUT_DIR}/${shader}.spv)
   # Task and mesh shaders (VK_EXT_mesh_shader) need SPIR-V 1.4 or later.
@@ -315,6 +412,49 @@ endif()
 add_custom_target(PhoxShaders ALL DEPENDS ${PHOX_SHADER_SPV})
 add_dependencies(${PROJECT_NAME} PhoxShaders)
 target_compile_definitions(${PROJECT_NAME} PRIVATE PHOX_SHADER_DIR="${PHOX_SHADER_OUTPUT_DIR}")
+
+# ---- Scene and techniques ----
+# PhoxScene (scene description, camera) and PhoxTechniques (frames built from render graph components)
+# sit on top of PhoxCore and never touch a GPU API.
+
+add_library(
+  PhoxScene STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Camera.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Material.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Mesh.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/scene/Scene.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/scene/Camera.cpp
+)
+target_compile_features(PhoxScene PUBLIC cxx_std_20)
+set_target_properties(PhoxScene PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxScene PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(PhoxScene PUBLIC PhoxCore PRIVATE glm::glm)
+
+add_library(
+  PhoxTechniques STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/DrawMeshes.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/ForwardTechnique.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/Readback.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include/phox/forward/UploadMeshes.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/DrawMeshes.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/ForwardTechnique.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/Readback.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/source/UploadMeshes.cpp
+)
+target_compile_features(PhoxTechniques PUBLIC cxx_std_20)
+set_target_properties(PhoxTechniques PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(PhoxTechniques PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/techniques/forward/include)
+target_link_libraries(PhoxTechniques PUBLIC PhoxCore PhoxScene)
+add_dependencies(PhoxTechniques PhoxShaders)
+target_compile_definitions(PhoxTechniques PRIVATE PHOX_SHADER_DIR="${PHOX_SHADER_OUTPUT_DIR}")
+
+foreach(layer_target PhoxScene PhoxTechniques)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_options(${layer_target} PRIVATE -Wall -Wextra -Wpedantic)
+  elseif(MSVC)
+    target_compile_options(${layer_target} PRIVATE /W4)
+  endif()
+endforeach()
 
 target_include_directories(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

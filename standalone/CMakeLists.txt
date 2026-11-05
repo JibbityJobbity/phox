@@ -25,3 +25,7 @@ file(GLOB sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/source/*.cpp)
 add_executable(${PROJECT_NAME} ${sources})
 
 target_link_libraries(${PROJECT_NAME} Phox::Phox cxxopts::cxxopts)
+
+# The same baseline frame through the RHI stack: forward technique, render graph, RHI Vulkan backend.
+add_executable(PhoxRhiSample ${CMAKE_CURRENT_SOURCE_DIR}/rhi/main.cpp)
+target_link_libraries(PhoxRhiSample PRIVATE PhoxTechniques PhoxScene PhoxCore cxxopts::cxxopts)
