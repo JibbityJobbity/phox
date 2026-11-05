@@ -41,20 +41,20 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
     view.toneMapping = scene.toneMapping;
 
     const vec3 forward = camera.forward();
-    for (const auto &object : scene.objects()) {
-        const Mesh *mesh = object->mesh().get();
+    for (const Object &object : scene.objects()) {
+        const Mesh *mesh = object.mesh().get();
         if (mesh == nullptr || mesh->empty()) {
             continue;
         }
-        const mat4 model = object->transform().matrix();
+        const mat4 model = object.transform().matrix();
         if (outsideFrustum(view.viewProj * model, mesh->bounds())) {
             ++view.culled;
             continue;
         }
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
-        const bool cullBackFaces = !object->material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
+        const bool cullBackFaces = !object.material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
         view.draws.push_back(
-            {object->id(), mesh, &object->material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
+            {object.id(), mesh, &object.material(), model, glm::dot(center - camera.position, forward), cullBackFaces});
     }
     // Front to back, so depth testing rejects hidden fragments early. Stable: ties keep scene order.
     std::stable_sort(view.draws.begin(), view.draws.end(),

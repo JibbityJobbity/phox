@@ -13,6 +13,17 @@ set(ASSIMP_BUILD_TESTS OFF)
 set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF)
 set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF)
 set(ASSIMP_BUILD_OBJ_IMPORTER ON)
+# Newer compilers (e.g. clang 21's -Wnontrivial-memcall) warn in assimp 5.4.3, which builds with -Werror.
+set(ASSIMP_WARNINGS_AS_ERRORS OFF)
+
+# The Metal backend (Objective-C++), alongside Vulkan. Defaults to on where Metal exists.
+option(PHOX_ENABLE_METAL "Build the Metal backend (Apple platforms only)" ${APPLE})
+if(PHOX_ENABLE_METAL)
+  if(NOT APPLE)
+    message(FATAL_ERROR "PHOX_ENABLE_METAL needs an Apple platform")
+  endif()
+  enable_language(OBJCXX)
+endif()
 
 # ---- Include guards ----
 
@@ -48,7 +59,7 @@ CPMAddPackage(
   OPTIONS "VMA_ENABLE_INSTALL ON" "VMA_STATIC_VULKAN_FUNCTIONS OFF" "VMA_DYNAMIC_VULKAN_FUNCTIONS OFF"
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  target_compile_options(VulkanMemoryAllocator INTERFACE -Wno-nullability-completeness)
+  target_compile_options(VulkanMemoryAllocator INTERFACE -Wno-nullability-completeness -Wno-nullability-extension)
 endif()
 
 # Math types (phox/Math.hpp). Uses an installed glm when there is one.
@@ -87,6 +98,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Resources.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SampleScenes.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Scene.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/ShaderInterface.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/SoftwareRasterizer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/VertexLayout.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/Window.hpp
@@ -164,6 +176,43 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/pipeline/Shader.cpp
 )
 
+if(PHOX_ENABLE_METAL)
+  list(APPEND headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Buffer.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Conversions.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Device.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/GraphExecutor.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Image.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/MeshCache.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/MetalCommon.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/PipelineCache.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/Renderer.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/ShaderInterface.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/ShaderLibrary.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/TransientPool.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/passes/ForwardPass.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/passes/ReadbackPass.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/metal/passes/TonemapPass.hpp
+  )
+  set(metal_sources
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Buffer.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Conversions.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Device.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/GraphExecutor.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Image.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/MeshCache.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/PipelineCache.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/Renderer.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/ShaderLibrary.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/TransientPool.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/passes/ForwardPass.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/passes/ReadbackPass.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/metal/passes/TonemapPass.mm
+  )
+  set_source_files_properties(${metal_sources} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  list(APPEND sources ${metal_sources})
+endif()
+
 # ---- Create library ----
 
 # Note: for header-only libraries change all PUBLIC flags to INTERFACE and create an interface
@@ -178,6 +227,7 @@ target_compile_options(${PROJECT_NAME} PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>
 # Warnings for Phox's own sources only (dependencies are built separately).
 target_compile_options(
   ${PROJECT_NAME} PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Wshadow>
+                          $<$<COMPILE_LANG_AND_ID:OBJCXX,Clang,AppleClang>:-Wall -Wextra -Wshadow>
                           $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4>
 )
 
@@ -197,12 +247,19 @@ target_link_libraries(
 find_package(SDL2 REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
 
+if(PHOX_ENABLE_METAL)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE PHOX_HAS_METAL=1)
+  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+endif()
+
 # Public headers use glm (phox/Math.hpp); everyone must agree on its configuration.
 target_link_libraries(${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:glm::glm>)
 target_compile_definitions(${PROJECT_NAME} PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 # ---- Shaders ----
-# Compiled to SPIR-V at build time; the renderer finds them via PHOX_SHADER_DIR (absolute path).
+# GLSL is compiled to SPIR-V at build time; the renderer finds it via PHOX_SHADER_DIR (absolute path).
+# The Metal backend compiles shaders/metal/*.metal at runtime (an offline `metal` compiler needs Xcode's
+# Metal Toolchain), so those are copied to PHOX_SHADER_DIR/metal.
 
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang)
 if(NOT GLSLANG_VALIDATOR)
@@ -242,6 +299,19 @@ foreach(
   )
   list(APPEND PHOX_SHADER_SPV ${spv})
 endforeach()
+if(PHOX_ENABLE_METAL)
+  foreach(shader common.h forward.metal fullscreen.metal tonemap.metal)
+    set(copy ${PHOX_SHADER_OUTPUT_DIR}/metal/${shader})
+    add_custom_command(
+      OUTPUT ${copy}
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/shaders/metal/${shader} ${copy}
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/metal/${shader}
+      COMMENT "Copying Metal shader ${shader}"
+      VERBATIM
+    )
+    list(APPEND PHOX_SHADER_SPV ${copy})
+  endforeach()
+endif()
 add_custom_target(PhoxShaders ALL DEPENDS ${PHOX_SHADER_SPV})
 add_dependencies(${PROJECT_NAME} PhoxShaders)
 target_compile_definitions(${PROJECT_NAME} PRIVATE PHOX_SHADER_DIR="${PHOX_SHADER_OUTPUT_DIR}")

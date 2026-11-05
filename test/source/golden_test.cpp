@@ -3,11 +3,16 @@
 // with frustum and cone culling only. Every path must match the same images, and so must the software
 // rasterizer.
 //
+// Usage: PhoxGoldenTests [vulkan|metal]   (default vulkan). The goldens come from lavapipe whatever the
+// backend, so every backend is held to the same images. Backends without mesh shaders (Metal) run the
+// vertex shader path only.
+//
 // Environment:
 //   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing; a
 //                         comma-separated list of case names updates only those
-//   PHOX_VALIDATION=1     run with the validation layer (incl. synchronization) and fail on any message
-//   PHOX_REQUIRE_GPU=1    fail instead of skipping when no Vulkan device is available
+//   PHOX_VALIDATION=1     run with validation (Vulkan: the validation layer incl. synchronization; Metal:
+//                         API validation) and fail on any reported error
+//   PHOX_REQUIRE_GPU=1    fail instead of skipping when no device for the backend is available
 //   PHOX_REQUIRE_MESH_SHADERS=1  fail instead of skipping the mesh shader path when the device lacks it
 //   PHOX_DEVICE=<name>    render on the device whose name contains <name>, e.g. "llvmpipe"
 #include "phox/CpuImage.hpp"
@@ -78,12 +83,18 @@ const phox::Extent2D kExtent{320, 240};
 
 enum class Path { Vertex, MeshOcclusion, Mesh };
 
+struct Backend {
+    std::string name;
+    phox::RendererType type;
+    phox::RendererBackend expected;
+};
+
 // Renders every case with one renderer configuration. The vertex path also checks the software
 // rasterizer and is the one that rewrites goldens. Returns the number of failures, or kSkip.
-int runCases(Path pathKind) {
+int runCases(const Backend &backend, Path pathKind) {
     const bool meshShaders = pathKind != Path::Vertex;
     const bool validation = envFlag("PHOX_VALIDATION");
-    auto renderer = phox::Renderer::Create(phox::RendererType::Vulkan);
+    auto renderer = phox::Renderer::Create(backend.type);
     phox::RendererConfig config;
     config.debug = validation;
     config.headlessExtent = kExtent;
@@ -92,8 +103,8 @@ int runCases(Path pathKind) {
     renderer->initialize(config);
 
     const phox::RendererInfo info = renderer->info();
-    if (info.backend != phox::RendererBackend::Vulkan) {
-        std::cerr << "no Vulkan device available" << std::endl;
+    if (info.backend != backend.expected) {
+        std::cerr << "no " << backend.name << " device available" << std::endl;
         return envFlag("PHOX_REQUIRE_GPU") ? 1 : kSkip;
     }
     if (validation && !info.validation) {
@@ -114,7 +125,8 @@ int runCases(Path pathKind) {
     const std::string path = pathKind == Path::Vertex        ? "vertex shaders"
                              : pathKind == Path::MeshOcclusion ? "mesh shaders, occlusion culling"
                                                                : "mesh shaders";
-    std::cout << "device: " << info.deviceName << ", " << path << (validation ? " (validation on)" : "") << std::endl;
+    std::cout << backend.name << " device: " << info.deviceName << ", " << path << (validation ? " (validation on)" : "")
+              << std::endl;
 
     int failures = 0;
     for (const GoldenCase &c : kCases) {
@@ -144,7 +156,8 @@ int runCases(Path pathKind) {
         if (!pass) {
             const std::filesystem::path out =
                 std::filesystem::path("golden_out") /
-                (c.name + (pathKind == Path::Vertex ? ".ppm" : pathKind == Path::Mesh ? ".mesh.ppm" : ".occlusion.ppm"));
+                (c.name + "." + backend.name +
+                 (pathKind == Path::Vertex ? ".ppm" : pathKind == Path::Mesh ? ".mesh.ppm" : ".occlusion.ppm"));
             phox::writePpm(out, actual);
             std::cout << "  actual image written to " << std::filesystem::absolute(out).string() << std::endl;
             ++failures;
@@ -180,14 +193,28 @@ int runCases(Path pathKind) {
 
 } // namespace
 
-int main() {
-    const int vertex = runCases(Path::Vertex);
+int main(int argc, char **argv) {
+    const std::string backendName = argc > 1 ? argv[1] : "vulkan";
+    Backend backend{backendName, phox::RendererType::Vulkan, phox::RendererBackend::Vulkan};
+    if (backendName == "metal") {
+        backend.type = phox::RendererType::Metal;
+        backend.expected = phox::RendererBackend::Metal;
+    } else if (backendName != "vulkan") {
+        std::cerr << "usage: " << argv[0] << " [vulkan|metal]" << std::endl;
+        return 2;
+    }
+    if (!phox::Renderer::Available(backend.type)) {
+        std::cerr << "this build has no " << backendName << " backend" << std::endl;
+        return kSkip;
+    }
+
+    const int vertex = runCases(backend, Path::Vertex);
     if (vertex == kSkip) {
         return kSkip; // no device at all
     }
     int failures = vertex;
     for (Path path : {Path::MeshOcclusion, Path::Mesh}) {
-        const int result = runCases(path);
+        const int result = runCases(backend, path);
         if (result == kSkip) {
             break; // no mesh shaders
         }

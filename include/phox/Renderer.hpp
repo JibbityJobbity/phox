@@ -16,13 +16,16 @@ class Window;
 
 enum class RendererType {
     Vulkan,
+    Metal, ///< Apple platforms, when built with PHOX_ENABLE_METAL (the default there)
 };
 
 struct RendererConfig {
-    /// Enables the Khronos validation layer (with synchronization validation) and debug logging.
+    /// Enables debug logging and validation: the Khronos validation layer with synchronization validation
+    /// (Vulkan), or Metal API validation (MTL_DEBUG_LAYER).
     bool debug = false;
     /// When set, frames are presented to this window, which must outlive the renderer (call cleanup()
-    /// before destroying it). When null, rendering is headless and each frame is read back (lastFrame()).
+    /// before destroying it) and must have been created for the renderer's API (WindowConfig::api).
+    /// When null, rendering is headless and each frame is read back (lastFrame()).
     Window *window = nullptr;
     /// Size of headless frames.
     Extent2D headlessExtent{640, 480};
@@ -48,14 +51,16 @@ struct PassTiming {
     double milliseconds = 0.0;
 };
 
-enum class RendererBackend { None, Vulkan, Software };
+enum class RendererBackend { None, Vulkan, Metal, Software };
 
 struct RendererInfo {
     RendererBackend backend = RendererBackend::None;
     std::string deviceName;
     bool validation = false;              ///< the validation layer is active
-    std::uint32_t validationErrors = 0;   ///< error messages reported by the validation layer so far
-    std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far
+    /// Vulkan: error messages reported by the validation layer so far. Metal: command buffers that failed
+    /// (Metal's validation layer stops the process on an error instead of reporting it).
+    std::uint32_t validationErrors = 0;
+    std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far (Vulkan)
     bool meshShaders = false;             ///< meshes are drawn as meshlets with task and mesh shaders
     bool occlusionCulling = false;        ///< meshlets are also culled against a depth pyramid
 };
@@ -65,6 +70,8 @@ public:
     /// @brief Creates a renderer of a specified type/backend
     /// @throws exception when a renderer of @c type couldn't be created
     static std::unique_ptr<Renderer> Create(const RendererType type);
+    /// Whether this build includes the backend for @p type.
+    static bool Available(RendererType type);
 
     virtual ~Renderer() = default;
     /// Falls back to a software rasterizer (headless only) if the GPU backend cannot start.

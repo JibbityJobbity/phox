@@ -1,4 +1,5 @@
-// Interface shared by Phox's scene shaders. Mirrors include/phox/vulkan/ShaderInterface.hpp.
+// Interface shared by Phox's scene shaders. Mirrors include/phox/ShaderInterface.hpp (and shaders/metal/common.h)
+// and, for the meshlet path, include/phox/vulkan/ShaderInterface.hpp.
 //
 // Shaders of the meshlet path (forward.task, forward.mesh) define PHOX_MESHLET_DRAW before including
 // this file and get MeshletDrawPushConstants instead of DrawPushConstants. Both start with the same
