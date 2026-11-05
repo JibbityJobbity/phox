@@ -1,6 +1,7 @@
 # Phox
 
-A small C++20 renderer with a Vulkan 1.3 backend, built around a render graph. It draws a `Scene`
+A small C++20 renderer with a Vulkan 1.3 backend and, on Apple platforms, a native Metal backend, built
+around a render graph. It draws a `Scene`
 (meshes, materials, transforms, a camera and a directional light) either to a window or headless into an
 image, and falls back to a software rasterizer when there is no usable GPU.
 
@@ -36,7 +37,8 @@ Useful options:
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
 | `--time S`, `--size WxH`, `--output FILE` | headless: animation time, image size, output path |
 | `--tonemap clamp\|reinhard\|aces`, `--exposure X` | tone mapping |
-| `--debug` | validation layer and debug logging; exits with status 3 if validation reported anything |
+| `--backend vulkan\|metal` | the GPU backend (Metal on Apple platforms only; Vulkan there runs on MoltenVK) |
+| `--debug` | validation (Vulkan validation layer, or Metal API validation) and debug logging; exits with status 3 if validation reported anything |
 | `--device NAME` | use the GPU whose name contains NAME (also `PHOX_DEVICE`) |
 | `--dump-graph FILE` | write the frame's render graph as Graphviz DOT (`dot -Tsvg FILE -o graph.svg`) |
 
@@ -55,6 +57,7 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | `render_view` | projection, camera, transforms, meshes, frustum culling, sorting, software rasterizer, OBJ loading | no |
 | `scene_smoke` | the sample scenes and one headless frame (GPU or software fallback) | optional |
 | `golden` | renders the sample scenes and compares them with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
+| `golden_metal` | the same goldens through the Metal backend (Apple platforms) | yes |
 
 The golden test reads a few environment variables:
 
@@ -82,8 +85,10 @@ Scene ──extractView()──▶ RenderView ──feature passes──▶ Rend
 | `include/phox/pipeline/` | `PipelineDesc` and the shader/pipeline base types |
 | `include/phox/vulkan/` | the Vulkan backend: `Renderer`, `Device`, `FrameContext`, `GraphExecutor`, `TransientPool`, `PipelineCache`, `MeshCache`, ... |
 | `include/phox/vulkan/passes/` | feature passes that add themselves to a frame's graph |
+| `include/phox/metal/` | the Metal backend, the same shape as `vulkan/` (Objective-C++; `Renderer.hpp` is plain C++) |
 | `source/phox/` | library sources (`core/`, `vulkan/`, `platform/`) |
-| `shaders/` | GLSL, compiled to SPIR-V by CMake; `common.glsl` mirrors `vulkan/ShaderInterface.hpp` |
+| `shaders/` | GLSL, compiled to SPIR-V by CMake; `common.glsl` mirrors `phox/ShaderInterface.hpp` |
+| `shaders/metal/` | the MSL counterparts, compiled by the Metal backend at startup |
 | `standalone/` | the `PhoxSample` app |
 | `test/` | tests and golden images |
 | `docs/architecture.md` | the design and its rationale |

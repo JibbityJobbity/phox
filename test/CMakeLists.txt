@@ -55,6 +55,11 @@ enable_testing()
 add_test(NAME scene_smoke COMMAND ${PROJECT_NAME})
 add_test(NAME render_graph COMMAND PhoxGraphTests)
 add_test(NAME render_view COMMAND PhoxViewTests)
-add_test(NAME golden COMMAND PhoxGoldenTests WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME golden COMMAND PhoxGoldenTests vulkan WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # 77: no Vulkan device (set PHOX_REQUIRE_GPU=1 to make that a failure instead).
 set_tests_properties(golden PROPERTIES SKIP_RETURN_CODE 77)
+# The same goldens through the Metal backend (PHOX_ENABLE_METAL comes from Phox's CMakeLists).
+if(PHOX_ENABLE_METAL)
+  add_test(NAME golden_metal COMMAND PhoxGoldenTests metal WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(golden_metal PROPERTIES SKIP_RETURN_CODE 77)
+endif()

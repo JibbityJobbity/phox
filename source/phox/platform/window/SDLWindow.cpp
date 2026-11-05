@@ -1,6 +1,7 @@
 #include "phox/platform/SDLWindow.hpp"
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_metal.h>
 #include <SDL2/SDL_vulkan.h>
 
 #include <cstring>
@@ -9,20 +10,33 @@
 
 namespace phox {
 
-SDLWindow::SDLWindow(const WindowConfig &config) {
+SDLWindow::SDLWindow(const WindowConfig &config) : m_api(config.api) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
     }
+    const Uint32 apiFlag = m_api == GraphicsApi::Metal ? SDL_WINDOW_METAL : SDL_WINDOW_VULKAN;
     m_window = SDL_CreateWindow(config.title.c_str(), config.x, config.y, config.width, config.height,
-                                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN);
+                                apiFlag | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN);
     if (m_window == nullptr) {
         const std::string error = SDL_GetError();
         SDL_Quit();
         throw std::runtime_error("SDL_CreateWindow failed: " + error);
     }
+    if (m_api == GraphicsApi::Metal) {
+        m_metalView = SDL_Metal_CreateView(m_window); // a view backed by a CAMetalLayer
+        if (m_metalView == nullptr) {
+            const std::string error = SDL_GetError();
+            SDL_DestroyWindow(m_window);
+            SDL_Quit();
+            throw std::runtime_error("SDL_Metal_CreateView failed: " + error);
+        }
+    }
 }
 
 SDLWindow::~SDLWindow() {
+    if (m_metalView != nullptr) {
+        SDL_Metal_DestroyView(m_metalView);
+    }
     if (m_window != nullptr) {
         SDL_DestroyWindow(m_window);
     }
@@ -41,7 +55,11 @@ bool SDLWindow::pollEvents() {
 }
 
 void SDLWindow::framebufferSize(int &width, int &height) const {
-    SDL_Vulkan_GetDrawableSize(m_window, &width, &height);
+    if (m_api == GraphicsApi::Metal) {
+        SDL_Metal_GetDrawableSize(m_window, &width, &height);
+    } else {
+        SDL_Vulkan_GetDrawableSize(m_window, &width, &height);
+    }
 }
 
 std::vector<std::string> SDLWindow::requiredVulkanExtensions() const {
@@ -66,6 +84,10 @@ bool SDLWindow::createVulkanSurface(void *vkInstance, std::uint64_t *outSurface)
     std::memcpy(&raw, &surface, sizeof(surface));
     *outSurface = raw;
     return true;
+}
+
+void *SDLWindow::metalLayer() const {
+    return m_metalView != nullptr ? SDL_Metal_GetLayer(m_metalView) : nullptr;
 }
 
 } // namespace phox

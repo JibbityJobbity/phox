@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -121,15 +122,44 @@ struct ToneMapping {
 /// Applies @p mapping to a linear colour. The tonemap shader does the same on the GPU.
 vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping);
 
+/// Names an object in a Scene. It stays valid until that object is removed; after that the scene rejects
+/// it, even once the slot holds a new object (the generation differs). A copy of a scene keeps its ids.
+struct ObjectId {
+    std::uint32_t index = UINT32_MAX;
+    std::uint32_t generation = 0;
+    /// Whether the id was ever handed out (a default-constructed id is not). Use Scene::contains() to
+    /// ask whether the object still exists.
+    bool valid() const { return index != UINT32_MAX; }
+    friend bool operator==(const ObjectId &, const ObjectId &) = default;
+};
+
 /// What to draw and how to look at it. Plain data: renderers read it and never keep references past a
 /// render() call.
+///
+/// Objects are stored contiguously. Keep ObjectIds, not Object pointers or references: those are only
+/// valid until the next addObject() or removeObject().
 class Scene {
 public:
-    Object &addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
-    /// The first object called @p name, or nullptr.
-    Object *find(std::string_view name);
+    ObjectId addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
+    /// Removes the object; the order of the remaining objects may change. Returns false if @p id is stale.
+    bool removeObject(ObjectId id);
+    bool contains(ObjectId id) const;
 
-    const std::vector<std::unique_ptr<Object>> &objects() const { return m_objects; }
+    /// The object, or nullptr if @p id is stale.
+    Object *get(ObjectId id);
+    const Object *get(ObjectId id) const;
+    /// The object. @throws std::out_of_range if @p id is stale
+    Object &at(ObjectId id);
+    const Object &at(ObjectId id) const;
+
+    /// The first object called @p name, or an invalid id. A linear search, for tools and tests; keep the
+    /// id that addObject() returns instead.
+    ObjectId find(std::string_view name) const;
+
+    /// Every object, in no particular order. objectIds()[i] is the id of objects()[i].
+    std::span<Object> objects() { return m_objects; }
+    std::span<const Object> objects() const { return m_objects; }
+    std::span<const ObjectId> objectIds() const { return m_ids; }
     std::size_t objectCount() const { return m_objects.size(); }
 
     Camera &camera() { return m_camera; }
@@ -141,7 +171,16 @@ public:
     ToneMapping toneMapping;
 
 private:
-    std::vector<std::unique_ptr<Object>> m_objects;
+    struct Slot {
+        std::uint32_t dense = 0;      ///< the object's position in m_objects, while the slot is in use
+        std::uint32_t generation = 0; ///< bumped on removal, so ids into the old object go stale
+    };
+    const Object *lookup(ObjectId id) const;
+
+    std::vector<Object> m_objects;
+    std::vector<ObjectId> m_ids; ///< parallel to m_objects
+    std::vector<Slot> m_slots;   ///< indexed by ObjectId::index
+    std::vector<std::uint32_t> m_freeSlots;
     Camera m_camera;
     DirectionalLight m_light;
 };

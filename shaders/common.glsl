@@ -1,4 +1,4 @@
-// Interface shared by Phox's scene shaders. Mirrors include/phox/vulkan/ShaderInterface.hpp.
+// Interface shared by Phox's scene shaders. Mirrors include/phox/ShaderInterface.hpp (and shaders/metal/common.h).
 
 // Set 0 (SetLayout::Frame): per-frame data.
 layout(set = 0, binding = 0) uniform FrameUniforms {

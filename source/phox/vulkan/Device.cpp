@@ -7,6 +7,8 @@
 #include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Image.hpp"
 
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -46,6 +48,15 @@ QueueFamilies pickQueueFamilies(VkPhysicalDevice physicalDevice, VkSurfaceKHR su
         throw std::runtime_error("the device cannot present to the window surface");
     }
     return result;
+}
+
+bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char *name) {
+    std::uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, extensions.data());
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [&](const VkExtensionProperties &e) { return std::strcmp(e.extensionName, name) == 0; });
 }
 
 VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
@@ -92,6 +103,10 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     std::vector<const char *> extensions;
     if (surface != VK_NULL_HANDLE) {
         extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
+    // A portability implementation (MoltenVK) must have its subset enabled whenever it exposes it.
+    if (hasDeviceExtension(m_physicalDevice, "VK_KHR_portability_subset")) {
+        extensions.push_back("VK_KHR_portability_subset");
     }
 
     // Required by Phox (checked when the device is picked): barriers and submits use synchronization2,

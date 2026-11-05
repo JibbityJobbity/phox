@@ -84,6 +84,44 @@ void meshesValidateAndVersion() {
     CHECK(threw);
 }
 
+void objectIdsSurviveRemoval() {
+    Scene scene;
+    const ObjectId a = scene.addObject("a", nullptr, Material{"a"});
+    const ObjectId b = scene.addObject("b", nullptr, Material{"b"});
+    const ObjectId c = scene.addObject("c", nullptr, Material{"c"});
+    CHECK(a.valid() && !(a == b) && !ObjectId{}.valid() && !scene.contains(ObjectId{}));
+    CHECK(scene.find("b") == b && !scene.find("z").valid());
+
+    // Removing from the middle moves another object into the hole; every other id still finds its object.
+    CHECK(scene.removeObject(a));
+    CHECK(!scene.contains(a) && scene.get(a) == nullptr);
+    CHECK(!scene.removeObject(a));
+    CHECK(scene.objectCount() == 2);
+    CHECK(scene.at(b).name() == "b" && scene.at(c).name() == "c");
+    for (std::size_t i = 0; i < scene.objectCount(); ++i) {
+        CHECK(scene.get(scene.objectIds()[i]) == &scene.objects()[i]);
+    }
+
+    // The freed slot is reused with a new generation, so the stale id stays stale.
+    const ObjectId d = scene.addObject("d", nullptr, Material{"d"});
+    CHECK(d.index == a.index && d.generation != a.generation);
+    CHECK(!scene.contains(a) && scene.at(d).name() == "d");
+    bool threw = false;
+    try {
+        scene.at(a);
+    } catch (const std::out_of_range &) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Ids stay meaningful in a copy of the scene.
+    const Scene copy = scene;
+    CHECK(copy.at(c).name() == "c" && !copy.contains(a));
+
+    CHECK(scene.removeObject(c) && scene.removeObject(b) && scene.removeObject(d));
+    CHECK(scene.objectCount() == 0 && !scene.contains(b));
+}
+
 Scene twoCubeScene() {
     // A red cube 2 units away and a green one 6 units away, both straight ahead, plus one behind the camera.
     Scene scene;
@@ -166,6 +204,7 @@ int main() {
     cameraLooksAtItsTarget();
     transformScalesThenRotatesThenTranslates();
     meshesValidateAndVersion();
+    objectIdsSurviveRemoval();
     extractionCullsAndSorts();
     frustumTestUsesEveryPlane();
     rasterizerDepthTestsAndLights();

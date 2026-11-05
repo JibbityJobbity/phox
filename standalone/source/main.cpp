@@ -7,6 +7,7 @@
 #include <cxxopts.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,12 @@ ToneMapOperator parseToneMap(const std::string &name) {
   if (name == "reinhard") return ToneMapOperator::Reinhard;
   if (name == "aces") return ToneMapOperator::Aces;
   throw std::invalid_argument("--tonemap expects clamp, reinhard or aces");
+}
+
+RendererType parseBackend(const std::string &name) {
+  if (name == "vulkan") return RendererType::Vulkan;
+  if (name == "metal") return RendererType::Metal;
+  throw std::invalid_argument("--backend expects vulkan or metal");
 }
 
 Extent2D parseSize(const std::string &text) {
@@ -46,7 +53,8 @@ int main(int argc, char **argv) {
     ("time", "headless: the animation time to render, in seconds", cxxopts::value<float>()->default_value("0"))
     ("size", "headless: image size", cxxopts::value<std::string>()->default_value("640x480"))
     ("output", "headless: where to write the image (default build/rendered_<scene>.ppm)", cxxopts::value<std::string>())
-    ("debug", "enable the Vulkan validation layer and debug logging")
+    ("backend", "GPU backend: vulkan or metal (Apple platforms)", cxxopts::value<std::string>()->default_value("vulkan"))
+    ("debug", "enable validation (the Vulkan validation layer, or Metal API validation) and debug logging")
     ("device", "use the GPU whose name contains this text", cxxopts::value<std::string>())
     ("tonemap", "tone mapping: clamp, reinhard or aces", cxxopts::value<std::string>()->default_value("clamp"))
     ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
@@ -72,10 +80,23 @@ int main(int argc, char **argv) {
     sample.scene.toneMapping.op = parseToneMap(args["tonemap"].as<std::string>());
     sample.scene.toneMapping.exposure = args["exposure"].as<float>();
 
+    const RendererType backend = parseBackend(args["backend"].as<std::string>());
+    if (!Renderer::Available(backend)) {
+      throw std::invalid_argument("this build has no " + args["backend"].as<std::string>() + " backend");
+    }
+
+    // Metal reads this once, when the process creates its first Metal device. A Metal window does that
+    // before the renderer exists, so the renderer cannot turn validation on by itself.
+    if (backend == RendererType::Metal && args.count("debug")) {
+      setenv("MTL_DEBUG_LAYER", "1", 0);
+    }
+
     // Declared before the renderer so it is destroyed after it.
     std::unique_ptr<Window> window;
     if (args.count("window")) {
-      window = Window::Create();
+      WindowConfig windowConfig;
+      windowConfig.api = backend == RendererType::Metal ? GraphicsApi::Metal : GraphicsApi::Vulkan;
+      window = Window::Create(windowConfig);
     }
 
     RendererConfig config;
@@ -100,7 +121,7 @@ int main(int argc, char **argv) {
       std::cout << "Wrote the frame graph to " << path.string() << std::endl;
       graphWritten = true;
     };
-    std::unique_ptr<Renderer> renderer = Renderer::Create(RendererType::Vulkan);
+    std::unique_ptr<Renderer> renderer = Renderer::Create(backend);
     renderer->initialize(config);
 
     if (window) {
@@ -113,7 +134,8 @@ int main(int argc, char **argv) {
         sample.animate(sample.scene, seconds);
         renderer->render(sample.scene);
         dumpGraph(*renderer);
-        if (maxFrames > 0 && ++frames >= maxFrames) {
+        ++frames;
+        if (maxFrames > 0 && frames >= maxFrames) {
           break;
         }
       }

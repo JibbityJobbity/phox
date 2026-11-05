@@ -1,10 +1,14 @@
 // Renders known scenes headless and compares them with the images in test/golden/.
 //
+// Usage: PhoxGoldenTests [vulkan|metal]   (default vulkan). The goldens come from lavapipe whatever the
+// backend, so every backend is held to the same images.
+//
 // Environment:
 //   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing; a
 //                         comma-separated list of case names updates only those
-//   PHOX_VALIDATION=1     run with the validation layer (incl. synchronization) and fail on any message
-//   PHOX_REQUIRE_GPU=1    fail instead of skipping when no Vulkan device is available
+//   PHOX_VALIDATION=1     run with validation (Vulkan: the validation layer incl. synchronization; Metal:
+//                         API validation) and fail on any reported error
+//   PHOX_REQUIRE_GPU=1    fail instead of skipping when no device for the backend is available
 //   PHOX_DEVICE=<name>    render on the device whose name contains <name>, e.g. "llvmpipe"
 #include "phox/CpuImage.hpp"
 #include "phox/Renderer.hpp"
@@ -70,26 +74,41 @@ const std::vector<GoldenCase> kCases = {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    const std::string backendName = argc > 1 ? argv[1] : "vulkan";
+    phox::RendererType type = phox::RendererType::Vulkan;
+    phox::RendererBackend expected = phox::RendererBackend::Vulkan;
+    if (backendName == "metal") {
+        type = phox::RendererType::Metal;
+        expected = phox::RendererBackend::Metal;
+    } else if (backendName != "vulkan") {
+        std::cerr << "usage: " << argv[0] << " [vulkan|metal]" << std::endl;
+        return 2;
+    }
+    if (!phox::Renderer::Available(type)) {
+        std::cerr << "this build has no " << backendName << " backend" << std::endl;
+        return kSkip;
+    }
+
     const bool validation = envFlag("PHOX_VALIDATION");
     const std::filesystem::path goldenDir = PHOX_GOLDEN_DIR;
 
-    auto renderer = phox::Renderer::Create(phox::RendererType::Vulkan);
+    auto renderer = phox::Renderer::Create(type);
     phox::RendererConfig config;
     config.debug = validation;
     config.headlessExtent = {320, 240};
     renderer->initialize(config);
 
     const phox::RendererInfo info = renderer->info();
-    if (info.backend != phox::RendererBackend::Vulkan) {
-        std::cerr << "no Vulkan device available" << std::endl;
+    if (info.backend != expected) {
+        std::cerr << "no " << backendName << " device available" << std::endl;
         return envFlag("PHOX_REQUIRE_GPU") ? 1 : kSkip;
     }
     if (validation && !info.validation) {
         std::cerr << "PHOX_VALIDATION is set but the validation layer is not available" << std::endl;
         return 1;
     }
-    std::cout << "device: " << info.deviceName << (validation ? " (validation on)" : "") << std::endl;
+    std::cout << backendName << " device: " << info.deviceName << (validation ? " (validation on)" : "") << std::endl;
 
     int failures = 0;
     for (const GoldenCase &c : kCases) {
@@ -117,7 +136,7 @@ int main() {
                   << diff.pixelsOverTolerance << " pixel(s) over tolerance (allowed " << allowed << ")"
                   << (diff.sizeMismatch ? ", size mismatch" : "") << std::endl;
         if (!pass) {
-            const std::filesystem::path out = std::filesystem::path("golden_out") / (c.name + ".ppm");
+            const std::filesystem::path out = std::filesystem::path("golden_out") / (c.name + "." + backendName + ".ppm");
             phox::writePpm(out, actual);
             std::cout << "  actual image written to " << std::filesystem::absolute(out).string() << std::endl;
             ++failures;

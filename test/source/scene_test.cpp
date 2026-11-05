@@ -33,11 +33,12 @@ int main() {
     CHECK(phox::sampleSceneNames().size() == 2);
     phox::SampleScene cubes = phox::makeSampleScene("cubes");
     CHECK(cubes.scene.objectCount() == 6);
-    CHECK(cubes.scene.find("red") != nullptr);
-    CHECK(cubes.scene.find("nothing") == nullptr);
-    const phox::quat before = cubes.scene.find("red")->transform().rotation;
+    const phox::ObjectId red = cubes.scene.find("red");
+    CHECK(cubes.scene.contains(red));
+    CHECK(!cubes.scene.find("nothing").valid());
+    const phox::quat before = cubes.scene.at(red).transform().rotation;
     cubes.animate(cubes.scene, 1.0f);
-    CHECK(cubes.scene.find("red")->transform().rotation != before);
+    CHECK(cubes.scene.at(red).transform().rotation != before);
 
     bool threw = false;
     try {

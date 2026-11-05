@@ -2,7 +2,8 @@
 
 Status: implemented, 2026-10-28. This started as a plan written against commit `f746304`; the six milestones
 it laid out are now in the history (`8d30082` to `60a92e0`). The document describes the design as built, why
-it is shaped this way, and where the implementation departed from the plan. Section 11 lists what comes next.
+it is shaped this way, and where the implementation departed from the plan. Section 11 lists what comes next;
+section 12 describes the Metal backend added on 2026-11-04.
 
 ## 1. Shape
 
@@ -35,6 +36,7 @@ Namespaces:
 - `phox::` holds the scene, math, render graph, resource and pipeline descriptions, view extraction and the
   software rasterizer. Nothing in it includes a Vulkan header.
 - `phox::vk::` holds everything that touches Vulkan, including the bodies of the passes.
+- `phox::mtl::` is the Metal backend (Apple platforms), the same shape as `phox::vk::` (section 12).
 
 Two rules keep the design small:
 
@@ -48,7 +50,7 @@ Two rules keep the design small:
 
 | # | Decision | Choice | Why |
 |---|---|---|---|
-| 1 | Abstraction boundary | Descriptions and handles are backend-free; command recording is Vulkan-only, inside pass bodies | One backend exists. A portable command API is a project of its own |
+| 1 | Abstraction boundary | Descriptions and handles are backend-free; command recording is backend-specific, inside pass bodies | A portable command API is a project of its own. The Metal backend (section 12) reimplements only the executor, the caches and the pass bodies |
 | 2 | Rendering model | Vulkan 1.3: synchronization2 for barriers and submits, dynamic rendering | No render pass or framebuffer objects; matches a graph that does its own transitions |
 | 3 | Graph handles | Versioned (index + version); execution order is declaration order | Exact culling and hazard tracking now; reordering later needs no API change |
 | 4 | Attachments | Declared in pass setup; the backend begins and ends rendering | Pass bodies only bind and draw; the graph knows load, store and clear values |
@@ -173,7 +175,7 @@ previous one.
   the fixed set layouts: `Frame` (the per-frame uniform buffer) and `Texture` (a combined image sampler with an
   immutable linear clamp sampler, so a descriptor write needs only a view). The renderer builds its pipelines
   during initialization, so broken shaders select the software fallback instead of failing the first frame.
-- `shaders/common.glsl`, mirrored by `include/phox/vulkan/ShaderInterface.hpp`:
+- `shaders/common.glsl`, mirrored by `include/phox/ShaderInterface.hpp` (shared with the Metal backend):
   - set 0 `FrameUniforms` (256 bytes): view, proj, viewProj, camera position, light direction with the ambient
     term in w, light colour, resolution;
   - push constants `{vec4 albedo; mat4 model}` (80 bytes, vertex and fragment). The albedo comes first because
@@ -189,7 +191,8 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 - `Mesh`: indexed `Vertex {position, normal, uv}` with bounds, a never-reused id and a version for caching.
   Built-ins: `triangle`, `cube`, `plane`; `loadMesh()` reads model files through assimp (OBJ in this build).
 - `Object`: name, `shared_ptr<const Mesh>`, `Material {name, albedo}`, `Transform` (scale, rotate, translate).
-- `Scene`: objects, `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
+- `Scene`: objects, named by `ObjectId {index, generation}` handles that go stale on removal (a slot table over
+  a dense object array, so view extraction iterates contiguously; names are only for `find` and debugging), `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
   clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES).
 - `extractView(scene, extent)` computes the matrices from the target's aspect ratio, culls objects whose
   bounds lie outside a frustum plane, and sorts the rest front to back.
@@ -247,7 +250,11 @@ include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameC
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
                               ShaderInterface, MeshCache, Conversions, VulkanCommon
 include/phox/vulkan/passes/   ForwardPass, TonemapPass, ReadbackPass
+include/phox/metal/           Renderer, Device, Buffer, Image, TransientPool, GraphExecutor, PipelineCache,
+                              ShaderLibrary, ShaderInterface, MeshCache, Conversions, MetalCommon
+include/phox/metal/passes/    ForwardPass, TonemapPass, ReadbackPass
 shaders/                      common.glsl, forward.vert/.frag, fullscreen.vert, tonemap.frag
+shaders/metal/                common.h, forward.metal, fullscreen.metal, tonemap.metal
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
 test/golden/                  triangle, triangle_turned, cubes, cubes_aces
 ```
@@ -267,3 +274,45 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces
 - **Debug overlay.** An ImGui pass that writes the backbuffer after tonemap.
 - **sRGB output.** The swapchain is UNORM and colours are treated as display values; an sRGB swapchain with
   linear shading is the correct long-term choice and will change every golden.
+
+## 12. Metal backend
+
+`include/phox/metal/`, `source/phox/metal/*.mm` (Objective-C++ with ARC), `shaders/metal/`. Built when
+`PHOX_ENABLE_METAL` is on, which is the default on Apple platforms. It is selected with `RendererType::Metal`
+(`--backend metal`). Vulkan keeps working there through MoltenVK.
+
+The backend reuses everything above the executor unchanged: `Scene`, `extractView`, `RenderGraph` and its
+compile, `PipelineDesc` and the three feature passes' graph declarations. Only the pass bodies and the
+objects under them are Metal-specific. Its pieces map one to one onto the Vulkan ones:
+
+| Vulkan | Metal | Difference |
+|---|---|---|
+| `vk::GraphExecutor` | `mtl::GraphExecutor` | One encoder per pass, chosen by pass type (render, compute, blit); a render pass descriptor is built from the declared attachments. `barriers()` records nothing (below) |
+| synchronization2 barriers, layouts | none | Every resource uses Metal's automatic hazard tracking, which orders encoders that touch the same resource. Metal has no layouts |
+| `TransientPool` | `mtl::TransientPool` | Same policy, and immediate reuse is safe for the same reason: one queue, with ordering provided by hazard tracking instead of a barrier |
+| `FrameContext` ring, fences | a dispatch semaphore of 2 | A frame's completion handler gives its slot back. Command buffers keep the resources they reference alive, so there is no deletion queue |
+| `UploadArena`, descriptor sets | `setVertexBytes` / `setFragmentBytes` | `FrameUniforms` and per-draw constants go inline in the command buffer; the HDR texture is bound directly |
+| `PipelineCache`, set layouts, push constants | `mtl::PipelineCache` | Same descriptions. `SetLayout::Frame` is buffer 0, per-draw constants buffer 1, vertices buffer 30, `SetLayout::Texture` texture 0 (`metal/ShaderInterface.hpp`) |
+| `ShaderLibrary` (SPIR-V) | `mtl::ShaderLibrary` (MSL) | `"forward.vert"` is function `forward_vert` in `forward.metal`, compiled from source at startup. `#include "common.h"` is inlined by the loader |
+| `MeshCache` (device-local, copy and barrier) | `mtl::MeshCache` | Shared buffers written directly: unified memory on Apple silicon |
+| `Swapchain` | `CAMetalLayer` | The window owns the layer (`Window::metalLayer()`, `WindowConfig::api = GraphicsApi::Metal`); the drawable's texture is imported like the swapchain image |
+
+Decisions specific to this backend:
+
+- **Clip space.** `phox::perspective` flips y for Vulkan's y-down clip space. The MSL vertex shaders flip it
+  back (`toMetalClip`), so every vertex lands on the same pixel as in Vulkan and the window-space winding is
+  the same: pipelines keep `FrontFace::CounterClockwise`. Depth is [0, 1] in both.
+- **Shaders compiled at runtime**, with fast math off so results track the goldens. Precompiling to a
+  `.metallib` needs Xcode's Metal Toolchain, which a build cannot assume. MSL has no `inverse()`, so the
+  forward shader builds the normal matrix from cofactors.
+- **Validation.** `RendererConfig::debug` sets `MTL_DEBUG_LAYER` before the device is created and reports
+  whether it took effect (Metal reads it once per process; a Metal window creates a device first, so
+  PhoxSample sets it before creating the window). Metal's layer stops the process on an error instead of
+  reporting it, so `validationErrors` counts command buffers that failed.
+- **Verification.** `golden_metal` holds the backend to the lavapipe goldens. On an M2 Max its images are
+  identical to the Vulkan backend's (MoltenVK) on the same GPU, and the compiled frame graphs are the same.
+
+Next for this backend: memoryless depth (`MTLStorageModeMemoryless`) for attachments that are cleared and
+never stored, which the graph already knows; `MTLFence`s and untracked heaps when transients alias; private
+mesh buffers through a blit on GPUs without unified memory (Intel Macs); precompiled `.metallib`s when the
+toolchain is present.

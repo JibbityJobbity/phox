@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace phox {
 
@@ -161,18 +162,82 @@ mat4 Transform::matrix() const {
     return glm::translate(mat4(1.0f), position) * glm::mat4_cast(rotation) * glm::scale(mat4(1.0f), scale);
 }
 
-Object &Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform) {
-    m_objects.push_back(std::make_unique<Object>(std::move(name), std::move(mesh), std::move(material), transform));
-    return *m_objects.back();
+ObjectId Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform) {
+    std::uint32_t index;
+    if (!m_freeSlots.empty()) {
+        index = m_freeSlots.back();
+        m_freeSlots.pop_back();
+    } else {
+        if (m_slots.size() >= UINT32_MAX) {
+            throw std::length_error("Scene: too many objects");
+        }
+        index = static_cast<std::uint32_t>(m_slots.size());
+        m_slots.emplace_back();
+    }
+    m_objects.emplace_back(std::move(name), std::move(mesh), std::move(material), transform);
+    const ObjectId id{index, m_slots[index].generation};
+    m_ids.push_back(id);
+    m_slots[index].dense = static_cast<std::uint32_t>(m_objects.size() - 1);
+    return id;
 }
 
-Object *Scene::find(std::string_view name) {
-    for (const auto &object : m_objects) {
-        if (object->name() == name) {
-            return object.get();
+bool Scene::removeObject(ObjectId id) {
+    if (!contains(id)) {
+        return false;
+    }
+    Slot &slot = m_slots[id.index];
+    const std::uint32_t dense = slot.dense;
+    const std::uint32_t last = static_cast<std::uint32_t>(m_objects.size() - 1);
+    if (dense != last) {
+        // Fill the hole with the last object and point its slot at the new position.
+        m_objects[dense] = std::move(m_objects[last]);
+        m_ids[dense] = m_ids[last];
+        m_slots[m_ids[dense].index].dense = dense;
+    }
+    m_objects.pop_back();
+    m_ids.pop_back();
+    // A slot whose generation would wrap is retired rather than reused, so no id ever becomes valid again.
+    if (slot.generation != UINT32_MAX) {
+        ++slot.generation;
+        m_freeSlots.push_back(id.index);
+    }
+    return true;
+}
+
+bool Scene::contains(ObjectId id) const { return lookup(id) != nullptr; }
+
+const Object *Scene::lookup(ObjectId id) const {
+    if (id.index >= m_slots.size()) {
+        return nullptr;
+    }
+    const Slot &slot = m_slots[id.index];
+    // A free slot has already moved on to the next generation, so the check also rejects it.
+    if (slot.generation != id.generation || slot.dense >= m_ids.size() || m_ids[slot.dense] != id) {
+        return nullptr;
+    }
+    return &m_objects[slot.dense];
+}
+
+const Object *Scene::get(ObjectId id) const { return lookup(id); }
+Object *Scene::get(ObjectId id) { return const_cast<Object *>(lookup(id)); }
+
+const Object &Scene::at(ObjectId id) const {
+    const Object *object = lookup(id);
+    if (object == nullptr) {
+        throw std::out_of_range("Scene: no object with id " + std::to_string(id.index) + "." +
+                                std::to_string(id.generation));
+    }
+    return *object;
+}
+Object &Scene::at(ObjectId id) { return const_cast<Object &>(std::as_const(*this).at(id)); }
+
+ObjectId Scene::find(std::string_view name) const {
+    for (std::size_t i = 0; i < m_objects.size(); ++i) {
+        if (m_objects[i].name() == name) {
+            return m_ids[i];
         }
     }
-    return nullptr;
+    return {};
 }
 
 } // namespace phox

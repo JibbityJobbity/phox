@@ -13,10 +13,17 @@ enum class WindowBackend {
     Default
 };
 
+/// The API a window presents with. It is fixed when the window is created.
+enum class GraphicsApi {
+    Vulkan,
+    Metal, ///< Apple platforms only
+};
+
 struct WindowConfig {
     int x, y, width, height;
     WindowBackend backend;
     std::string title = "Phox";
+    GraphicsApi api = GraphicsApi::Vulkan;
     WindowConfig();
 };
 
@@ -38,6 +45,10 @@ public:
     /// returned through @p outSurface as raw bits so this header stays free of Vulkan types.
     /// The surface must be destroyed before the window.
     virtual bool createVulkanSurface(void *vkInstance, std::uint64_t *outSurface) = 0;
+
+    /// The CAMetalLayer (as void *) that presents into this window, or nullptr if the window was not
+    /// created for GraphicsApi::Metal. Owned by the window.
+    virtual void *metalLayer() const = 0;
 };
 
 }
