@@ -35,7 +35,8 @@ MeshletVisibility::Frame MeshletVisibility::prepare(const RenderView &view, cons
         needed += current(draw) ? 0 : wordsFor(draw);
     }
     const std::uint64_t capacity = m_buffer ? m_buffer->size() / sizeof(std::uint32_t) : 0;
-    if (m_used + needed > capacity) {
+    // Also on the first frame with nothing to draw: the renderer imports the buffer regardless.
+    if (!m_buffer || m_used + needed > capacity) {
         // Start over: every range is dropped and the bits cleared. Twice what this frame needs leaves room
         // for objects coming into view.
         m_ranges.clear();
