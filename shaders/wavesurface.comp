@@ -1,0 +1,77 @@
+#version 450
+// A square of water-like waves (vk::WaveSurface): resolution x resolution cells, two triangles each,
+// written as unindexed phox::Vertex data, and the indirect draw command that draws them.
+// Keep the surface in step with WaveSurface::referenceMesh, which builds the same one on the CPU.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// phox::Vertex is 12 tightly packed floats (position, normal, uv, tangent), which std430 cannot express
+// as a struct of vec3s.
+layout(set = 0, binding = 0, std430) writeonly buffer Vertices { float data[]; } vertices;
+layout(set = 0, binding = 1, std430) writeonly buffer Indirect {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+} indirect;
+
+layout(push_constant) uniform Params {
+    uint resolution;
+    float size;
+    float amplitude;
+    float wavenumber;
+    float time;
+} params;
+
+float height(vec2 p) {
+    return params.amplitude * sin(params.wavenumber * p.x + params.time) * cos(params.wavenumber * p.y + 0.7 * params.time);
+}
+
+// d height / dx and d height / dz
+vec2 slope(vec2 p) {
+    const float a = params.amplitude * params.wavenumber;
+    const float u = params.wavenumber * p.x + params.time;
+    const float v = params.wavenumber * p.y + 0.7 * params.time;
+    return vec2(a * cos(u) * cos(v), -a * sin(u) * sin(v));
+}
+
+void writeVertex(uint index, vec2 p) {
+    const vec2 s = slope(p);
+    const vec3 normal = normalize(vec3(-s.x, 1.0, -s.y));
+    // Along +x (increasing u), in the surface; v increases along +z, so the bitangent sign is -1.
+    vec3 tangent = vec3(1.0, s.x, 0.0);
+    tangent = normalize(tangent - normal * dot(normal, tangent));
+    const vec2 uv = p / params.size + 0.5;
+    const float values[12] = float[12](p.x, height(p), p.y, normal.x, normal.y, normal.z, uv.x, uv.y, tangent.x,
+                                       tangent.y, tangent.z, -1.0);
+    for (uint i = 0; i < 12; ++i) {
+        vertices.data[index * 12 + i] = values[i];
+    }
+}
+
+void main() {
+    const uint resolution = params.resolution;
+    const uvec2 cell = gl_GlobalInvocationID.xy;
+    if (cell.x == 0 && cell.y == 0) {
+        indirect.vertexCount = resolution * resolution * 6;
+        indirect.instanceCount = 1;
+        indirect.firstVertex = 0;
+        indirect.firstInstance = 0;
+    }
+    if (cell.x >= resolution || cell.y >= resolution) {
+        return;
+    }
+    const float step = params.size / float(resolution);
+    const vec2 p00 = vec2(-0.5 * params.size) + vec2(cell) * step;
+    const vec2 p10 = p00 + vec2(step, 0.0);
+    const vec2 p01 = p00 + vec2(0.0, step);
+    const vec2 p11 = p00 + vec2(step, step);
+    // Counter-clockwise seen from +y, as Mesh::plane.
+    const uint base = (cell.y * resolution + cell.x) * 6;
+    writeVertex(base + 0, p01);
+    writeVertex(base + 1, p11);
+    writeVertex(base + 2, p10);
+    writeVertex(base + 3, p01);
+    writeVertex(base + 4, p10);
+    writeVertex(base + 5, p00);
+}

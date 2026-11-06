@@ -17,6 +17,9 @@ image, and falls back to a software rasterizer when there is no usable GPU.
   textures, samplers, PNG and JPEG images.
 - **Forward rendering into HDR** with depth testing, then tone mapping (clamp, Reinhard or ACES) and sRGB
   encoding straight into the swapchain image.
+- **GPU-generated geometry**: an application adds compute passes to every frame (`vk::FrameFeature`), on
+  the async compute queue where the device has one, and the forward pass draws what they make with indirect
+  draws. See [architecture section 6.5](docs/architecture.md#65-generated-geometry).
 - **Mesh shading** where the device has `VK_EXT_mesh_shader`: meshes are split into meshlets with
   meshoptimizer, and a task shader skips meshlets outside the view frustum, facing away from the camera,
   or hidden behind what is already drawn (two-phase occlusion culling against a depth pyramid). Elsewhere
@@ -62,6 +65,7 @@ Useful options:
 | `--backend vulkan\|metal` | the GPU backend (Metal on Apple platforms only; Vulkan there runs on MoltenVK) |
 | `--debug` | validation (Vulkan validation layer, or Metal API validation) and debug logging; exits with status 3 if validation reported anything |
 | `--device NAME` | use the GPU whose name contains NAME (also `PHOX_DEVICE`) |
+| `--waves` | add a surface of waves made on the GPU every frame, by async compute where available (Vulkan) |
 | `--async-compute on\|off` | run async compute passes on a separate compute queue where the GPU has one (default on) |
 | `--dump-graph FILE` | write the frame's render graph as Graphviz DOT (`dot -Tsvg FILE -o graph.svg`) |
 
@@ -80,6 +84,7 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | `render_view` | projection, camera, transforms, meshes and tangents, frustum culling, sorting, meshlets and their culling tests, sphere projection, textures and mips, materials, blending and masking in the software rasterizer, OBJ and glTF loading | no |
 | `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
 | `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too. Then with cluster LOD, against `test/golden/*.lod.ppm` | yes (skips without one) |
+| `generated` | geometry generated on the GPU (`vk::WaveSurface`, drawn indirectly) matches the same mesh drawn from the scene, with async compute on and off | yes (skips without one) |
 | `golden_metal` | the same goldens through the Metal backend, vertex shaders only (Apple platforms) | yes |
 
 The golden test reads a few environment variables:

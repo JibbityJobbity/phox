@@ -3,6 +3,8 @@
 #include "phox/Renderer.hpp"
 #include "phox/SampleScenes.hpp"
 #include "phox/Window.hpp"
+#include "phox/vulkan/Renderer.hpp"
+#include "phox/vulkan/WaveSurface.hpp"
 
 #include <cxxopts.hpp>
 
@@ -106,6 +108,7 @@ int main(int argc, char **argv) {
     ("stats", "print what each frame drew (triangles before and after cluster LOD)")
     ("mesh-shaders", "draw with task and mesh shaders where available: on, off, noocclusion (frustum and cone "
                      "culling only) or nocull (no meshlet culling)", cxxopts::value<std::string>()->default_value("on"))
+    ("waves", "Vulkan: add a surface of waves made on the GPU every frame (by async compute where available)")
     ("async-compute", "run async compute passes on a separate compute queue where the GPU has one (on or off)",
      cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
@@ -199,6 +202,25 @@ int main(int argc, char **argv) {
     };
     std::unique_ptr<Renderer> renderer = Renderer::Create(backend);
     renderer->initialize(config);
+    if (args.count("waves")) {
+      auto *vulkan = dynamic_cast<vk::Renderer *>(renderer.get());
+      if (vulkan == nullptr) {
+        throw std::invalid_argument("--waves needs the Vulkan backend");
+      }
+      vk::WaveSurface::Settings settings;
+      settings.resolution = 128;
+      settings.size = 6.0f;
+      settings.model = glm::translate(mat4(1.0f), vec3(0.0f, -0.3f, 0.0f));
+      settings.material.name = "water";
+      settings.material.albedo = {0.05f, 0.25f, 0.55f, 1.0f};
+      settings.material.roughness = 0.15f;
+      auto waves = std::make_shared<vk::WaveSurface>(settings);
+      vulkan->addFeature(waves);
+      sample.animate = [animate = std::move(sample.animate), waves](Scene &scene, float t) {
+        animate(scene, t);
+        waves->setTime(t);
+      };
+    }
     const RendererInfo startInfo = renderer->info();
     std::cout << "Rendering on " << startInfo.deviceName << " with "
               << (startInfo.backend == RendererBackend::Software ? "the software rasterizer"

@@ -194,6 +194,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TextureCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/TransientPool.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/UploadArena.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/WaveSurface.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/DepthPyramidPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ForwardPass.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/passes/ReadbackPass.cpp
@@ -406,6 +407,7 @@ foreach(
   fullscreen.vert
   tonemap.frag
   depthpyramid.comp
+  wavesurface.comp
   # The RHI stack's forward technique (techniques/forward) and rhi_triangle test.
   basic.vert
   basic.frag

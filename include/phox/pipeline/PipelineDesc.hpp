@@ -64,8 +64,11 @@ enum class SetLayout : std::uint8_t {
     /// binding 0: the texture table, an array of textures each with its own sampler, fragment stage.
     /// Partially bound and updated while in use (the backend adds textures as frames need them).
     Bindless,
+    /// compute stage; bindings 0 to 3: storage buffers. For compute passes that generate data; bind the
+    /// ones the shader uses.
+    ComputeStorage,
 };
-inline constexpr std::size_t kSetLayoutCount = 6;
+inline constexpr std::size_t kSetLayoutCount = 7;
 
 /// Everything that identifies a graphics pipeline, in backend-free terms. Equal descriptions (ignoring
 /// the name) produce the same pipeline, so a backend can cache pipelines by description.

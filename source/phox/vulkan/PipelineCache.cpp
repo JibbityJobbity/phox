@@ -152,6 +152,10 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
     VkDescriptorSetLayoutBinding textures = binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
     textures.descriptorCount = device.bindlessTextureCount();
     layouts[static_cast<std::size_t>(SetLayout::Bindless)] = {textures};
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        layouts[static_cast<std::size_t>(SetLayout::ComputeStorage)].push_back(
+            binding(i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT));
+    }
 
     for (std::size_t i = 0; i < m_setLayouts.size(); ++i) {
         if (layouts[i].empty()) {

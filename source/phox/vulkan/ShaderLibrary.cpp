@@ -2,12 +2,19 @@
 
 #include "phox/vulkan/pipeline/Shader.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace phox::vk {
 
 ShaderLibrary::ShaderLibrary(Device &device, std::filesystem::path directory)
-    : m_device(device), m_directory(std::move(directory)) {}
+    : m_device(device), m_directories{std::move(directory)} {}
+
+void ShaderLibrary::addDirectory(std::filesystem::path directory) {
+    if (std::find(m_directories.begin(), m_directories.end(), directory) == m_directories.end()) {
+        m_directories.push_back(std::move(directory));
+    }
+}
 
 ShaderLibrary::~ShaderLibrary() = default;
 
@@ -30,7 +37,14 @@ const Shader &ShaderLibrary::get(const std::string &name) {
     } else {
         throw std::runtime_error("shader '" + name + "' needs a .vert, .frag, .comp, .task or .mesh extension");
     }
-    auto shader = Shader::fromFile(m_device, (m_directory / (name + ".spv")).string(), type);
+    std::filesystem::path path = m_directories.front() / (name + ".spv");
+    for (const std::filesystem::path &directory : m_directories) {
+        if (std::filesystem::exists(directory / (name + ".spv"))) {
+            path = directory / (name + ".spv");
+            break;
+        }
+    }
+    auto shader = Shader::fromFile(m_device, path.string(), type);
     return *m_shaders.emplace(name, std::move(shader)).first->second;
 }
 

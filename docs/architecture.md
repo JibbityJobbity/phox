@@ -473,6 +473,31 @@ What Nanite does beyond this, and where it would go here:
   once afterwards.
 - **Streaming.** Every level stays resident; pages of groups could be loaded on demand instead.
 
+### 6.5 Generated geometry
+
+Geometry made on the GPU every frame does not go through `MeshCache`, which is built for meshes that change
+now and then (a new version means new buffers, meshoptimizer and a full upload). It lives in the graph
+instead, whose rule 1 it fits: a compute pass writes it and the forward pass reads it within the frame.
+
+- `vk::FrameFeature` (`include/phox/vulkan/FrameFeature.hpp`): an application's work added to every frame of
+  a `vk::Renderer` (`addFeature`). `initialize(device, pipelines)` and `shutdown()` bracket the device's life;
+  `addPasses(context, draws)` runs ahead of the forward pass with the frame's graph, executor, device,
+  pipeline cache, frame context and view, adds its passes (typically compute, `async()`), and returns
+  `GeneratedDraw`s. `shaderDirectories()` adds the feature's compiled shaders to the `ShaderLibrary` search.
+- `GeneratedDraw`: graph buffers of unindexed `phox::Vertex` (read as Vertex) and a `VkDrawIndirectCommand`
+  (read as Indirect), a model matrix and a material (opaque, untextured). The vertex count comes from the
+  GPU, so a generator decides there how much it draws.
+- "forward generated": after the opaque passes and before "forward blend", the forward pipelines with
+  vertex shaders (whatever path the scene takes) draw each one with `vkCmdDrawIndirect`. Their materials
+  follow the view's items in the material table. They take no part in occlusion culling: they are drawn
+  after the late pass and are not in the depth pyramid.
+- `SetLayout::ComputeStorage`: four storage buffers for compute passes that generate data.
+- `vk::WaveSurface` (`shaders/wavesurface.comp`) is a sample feature: a grid of waves, two triangles per
+  cell, and its indirect command, written by one async compute pass. `referenceMesh()` builds the same
+  surface on the CPU; `generated_test` draws both and requires the same image (within the GPU's sin and cos),
+  with async compute on and off and with the scene on the vertex and mesh shader paths. `PhoxSample --waves`
+  adds it to any scene.
+
 ## 7. Upload and caches
 
 - `UploadArena`: one host-visible, persistently mapped buffer per frame context, bump-allocated and reset at
@@ -528,16 +553,16 @@ include/phox/pipeline/        PipelineDesc, Pipeline, Shader
 include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameContext, UploadArena,
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
                               ShaderInterface, MeshCache, TextureCache, MeshletVisibility, PassTimer, Conversions,
-                              VulkanCommon
+                              VulkanCommon, FrameFeature, WaveSurface
 include/phox/vulkan/passes/   ForwardPass, DepthPyramidPass, TonemapPass, ReadbackPass
 include/phox/metal/           Renderer, Device, Buffer, Image, TransientPool, GraphExecutor, PipelineCache,
                               ShaderLibrary, ShaderInterface, MeshCache, TextureCache, Conversions, MetalCommon
 include/phox/metal/passes/    ForwardPass, TonemapPass, ReadbackPass
 shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
                               forward_early.task and forward_late.task, depthpyramid.comp, fullscreen.vert,
-                              tonemap.frag
+                              tonemap.frag, wavesurface.comp
 shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
-test/source/                  render_graph_test, render_view_test, scene_test, golden_test
+test/source/                  render_graph_test, render_view_test, scene_test, golden_test, generated_test
 test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials; each also .lod.ppm
 ```
 

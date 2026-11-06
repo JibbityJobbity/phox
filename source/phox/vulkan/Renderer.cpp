@@ -10,6 +10,7 @@
 #include "phox/vulkan/Conversions.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
+#include "phox/vulkan/FrameFeature.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
 #include "phox/vulkan/MeshCache.hpp"
 #include "phox/vulkan/MeshletVisibility.hpp"
@@ -231,9 +232,10 @@ phox::FrameStatistics countStatistics(const phox::RenderView &view, const phox::
 }
 
 // Set 0 of the forward pipelines: the view's FrameUniforms and its material table, one entry per item
-// (view.draws, then view.transparent), with texture slots from @p textures.
+// (view.draws, then view.transparent, then @p generated), with texture slots from @p textures.
 VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &frame, phox::vk::PipelineCache &pipelines,
-                              const phox::RenderView &view, const phox::vk::TextureCache &textures) {
+                              const phox::RenderView &view, const phox::vk::TextureCache &textures,
+                              const std::vector<phox::vk::GeneratedDraw> &generated) {
     phox::vk::FrameUniforms uniforms;
     uniforms.view = view.view;
     uniforms.proj = view.proj;
@@ -249,7 +251,7 @@ VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &
 
     // At least one entry: a descriptor's range cannot be empty.
     std::vector<phox::MaterialData> materials;
-    materials.reserve(std::max<std::size_t>(view.itemCount(), 1));
+    materials.reserve(std::max<std::size_t>(view.itemCount() + generated.size(), 1));
     const auto slot = [&textures](const std::shared_ptr<const phox::Texture> &texture) {
         return texture ? textures.slot(*texture) : phox::kNoTexture;
     };
@@ -264,6 +266,9 @@ VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &
             entry.emissiveTexture = slot(material.emissiveTexture);
             materials.push_back(entry);
         }
+    }
+    for (const phox::vk::GeneratedDraw &draw : generated) {
+        materials.push_back(phox::materialData(draw.material)); // no textures (addForwardPass checks)
     }
     if (materials.empty()) {
         materials.emplace_back();
@@ -325,6 +330,10 @@ void Renderer::initialize(const RendererConfig &config) {
         }
         m_transients = std::make_unique<TransientPool>(*m_device, kFramesInFlight);
         const bool meshShaders = createPipelines();
+        for (const auto &feature : m_features) {
+            for (const auto &directory : feature->shaderDirectories()) m_shaders->addDirectory(directory);
+            feature->initialize(*m_device, *m_pipelines);
+        }
         m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders, m_config.meshLod, m_config.collectStatistics);
         m_textures = std::make_unique<TextureCache>(*m_device, *m_pipelines);
         if (meshShaders && m_config.meshletCulling && m_config.occlusionCulling) {
@@ -363,6 +372,9 @@ void Renderer::releaseVulkan() {
         m_device->waitIdle();
     }
     // Children before the device; everything below is safe to call on null members.
+    if (m_device) {
+        for (const auto &feature : m_features) feature->shutdown();
+    }
     m_readback.reset();
     for (auto &frame : m_frames) {
         frame.reset();
@@ -393,6 +405,17 @@ void Renderer::releaseVulkan() {
         vkDestroyInstance(m_instance, nullptr);
         m_instance = VK_NULL_HANDLE;
     }
+}
+
+void Renderer::addFeature(std::shared_ptr<FrameFeature> feature) {
+    if (!feature) {
+        return;
+    }
+    if (m_device && m_pipelines) {
+        for (const auto &directory : feature->shaderDirectories()) m_shaders->addDirectory(directory);
+        feature->initialize(*m_device, *m_pipelines);
+    }
+    m_features.push_back(std::move(feature));
 }
 
 RendererInfo Renderer::info() const {
@@ -505,16 +528,24 @@ void Renderer::render(const Scene &scene) {
     }
     m_meshes->prepare(view, frame, cmd, m_frameNumber);
     m_textures->prepare(view, frame, cmd, m_frameNumber);
-    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, *m_textures), m_textures->set()};
 
     // ---- Frame graph -------------------------------------------------------------------------
-    //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
-    //   forward -> hdr -> tonemap -> display -> readback -> host buffer [headless]
+    //   (features ->) forward -> hdr -> tonemap -> backbuffer                        [windowed]
+    //   (features ->) forward -> hdr -> tonemap -> display -> readback -> host buffer [headless]
     // With occlusion culling, "forward" is: (clear visibility ->) forward early -> depth pyramid ->
-    // forward late, with the meshlet visibility bits imported from the previous frame.
+    // forward late, with the meshlet visibility bits imported from the previous frame. Features add
+    // their passes first (typically async compute) and the geometry they make, which "forward
+    // generated" draws after the opaque items.
     RenderGraph graph(extent);
     graph.setAsyncCompute(m_device->asyncCompute());
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
+    std::vector<GeneratedDraw> generated;
+    for (const auto &feature : m_features) {
+        FrameFeatureContext context{graph, executor, *m_device, *m_pipelines, frame, view, m_frameNumber};
+        feature->addPasses(context, generated);
+    }
+    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, *m_textures, generated),
+                           m_textures->set()};
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
     MeshletVisibility::Frame visibility;
@@ -530,7 +561,8 @@ void Renderer::render(const Scene &scene) {
     }
     const ForwardPassOutput forward =
         addForwardPass(graph, view, sets, hdr, depth, *m_meshes, *m_pipelines,
-                       MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_visibility ? &occlusion : nullptr);
+                       MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_visibility ? &occlusion : nullptr,
+                       generated);
     if (m_config.collectStatistics) {
         m_statistics = countStatistics(view, *m_meshes, m_config.lodErrorPixels);
     }

@@ -16,6 +16,7 @@ namespace phox::vk {
 class Buffer;
 class Device;
 class FrameContext;
+class FrameFeature;
 class MeshCache;
 class TextureCache;
 class MeshletVisibility;
@@ -46,6 +47,13 @@ public:
     const std::string &frameGraphDot() const override { return m_frameGraphDot; }
     const std::vector<PassTiming> &gpuTimings() const override { return m_gpuTimings; }
     FrameStatistics frameStatistics() const override { return m_statistics; }
+
+    /// Adds @p feature's passes and generated draws to every frame from the next render() on. It is
+    /// initialized now if the renderer is, else in initialize(), and shut down in cleanup(). The software
+    /// fallback ignores features.
+    void addFeature(std::shared_ptr<FrameFeature> feature);
+    /// The Vulkan device; null before initialize() and for the software fallback.
+    Device *device() const { return m_device.get(); }
 
 private:
     void createInstance();
@@ -88,6 +96,7 @@ private:
 
     std::unique_ptr<ShaderLibrary> m_shaders;
     std::unique_ptr<PipelineCache> m_pipelines;
+    std::vector<std::shared_ptr<FrameFeature>> m_features;
     Format m_depthFormat = Format::D32Float;
 
     CpuImage m_lastFrame;

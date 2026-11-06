@@ -4,10 +4,12 @@
 #include "phox/RenderGraph.hpp"
 #include "phox/RenderView.hpp"
 #include "phox/pipeline/PipelineDesc.hpp"
+#include "phox/vulkan/FrameFeature.hpp"
 #include "phox/vulkan/MeshletVisibility.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace phox::vk {
 
@@ -63,9 +65,15 @@ struct MeshletOcclusion {
 /// With @p occlusion, the meshlets are drawn in two passes: "forward early" draws those visible last
 /// frame, a depth pyramid is built from its depth, and "forward late" draws the rest that are not hidden
 /// behind it, recording which meshlets are visible for the next frame. Needs D32Float depth.
+///
+/// @p generated, if any, is drawn after the opaque items with vertex shaders and indirect draws
+/// ("forward generated"), before the blended ones; its materials follow view.transparent's in the table.
+/// It takes no part in occlusion culling.
+/// @throws std::invalid_argument if a generated draw's material is not opaque or has textures
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
-                                 const MeshletSettings &meshlets = {}, const MeshletOcclusion *occlusion = nullptr);
+                                 const MeshletSettings &meshlets = {}, const MeshletOcclusion *occlusion = nullptr,
+                                 const std::vector<GeneratedDraw> &generated = {});
 
 } // namespace phox::vk
 

@@ -9,7 +9,9 @@
 #include "phox/vulkan/ShaderInterface.hpp"
 #include "phox/vulkan/passes/DepthPyramidPass.hpp"
 
+#include <algorithm>
 #include <array>
+#include <stdexcept>
 
 namespace phox::vk {
 
@@ -261,17 +263,79 @@ ForwardPassOutput addOpaquePasses(RenderGraph &graph, const RenderView &view, co
 
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
-                                 const MeshletSettings &meshletSettings, const MeshletOcclusion *occlusion) {
+                                 const MeshletSettings &meshletSettings, const MeshletOcclusion *occlusion,
+                                 const std::vector<GeneratedDraw> &generated) {
+    for (const GeneratedDraw &draw : generated) {
+        const auto textures = draw.material.textures();
+        if (draw.material.alphaMode != AlphaMode::Opaque ||
+            std::any_of(textures.begin(), textures.end(), [](const Texture *t) { return t != nullptr; })) {
+            throw std::invalid_argument("generated draws must have opaque materials without textures");
+        }
+    }
     const bool blended = !view.transparent.empty();
-    const ForwardPassOutput opaque =
-        addOpaquePasses(graph, view, sets, color, depth, meshes, pipelines, meshletSettings, occlusion, blended);
+    const Format colorFormat = graph.imageInfo(color).desc.format;
+    const Format depthFormat = graph.imageInfo(depth).desc.format;
+    ForwardPassOutput opaque = addOpaquePasses(graph, view, sets, color, depth, meshes, pipelines, meshletSettings,
+                                               occlusion, blended || !generated.empty());
+
+    if (!generated.empty()) {
+        // Indirect draws of GPU-made vertices, with the vertex pipelines whatever path the scene takes.
+        const PipelinePair pipeline = vertexPipelinePair(pipelines, colorFormat, depthFormat, false);
+        const auto firstMaterial = static_cast<std::uint32_t>(view.itemCount());
+        const VkDescriptorSet frameSet = sets.frame;
+        const VkDescriptorSet textureSet = sets.textures;
+        struct Data {
+            ForwardPassOutput out;
+            std::vector<GeneratedDraw> draws;
+        };
+        opaque = graph
+                     .addPass<Data>(
+                         "forward generated", PassType::Graphics,
+                         [&](PassBuilder &builder, Data &data) {
+                             data.out.color = builder.colorAttachment(opaque.color, LoadOp::Load, StoreOp::Store);
+                             data.out.depth = builder.depthAttachment(opaque.depth, LoadOp::Load,
+                                                                      blended ? StoreOp::Store : StoreOp::DontCare);
+                             for (const GeneratedDraw &draw : generated) {
+                                 builder.read(draw.vertices, BufferUsage::Vertex);
+                                 builder.read(draw.indirect, BufferUsage::Indirect);
+                             }
+                             data.draws = generated;
+                         },
+                         [frameSet, textureSet, pipeline, firstMaterial](const Data &data, phox::PassContext &context) {
+                             auto &ctx = PassContext::from(context);
+                             const auto &table = ctx.device().table();
+                             const VkCommandBuffer cmd = ctx.cmd();
+                             bindSets(ctx, pipeline, {frameSet, textureSet});
+                             const Pipeline *bound = nullptr;
+                             for (std::size_t i = 0; i < data.draws.size(); ++i) {
+                                 const GeneratedDraw &draw = data.draws[i];
+                                 // As extractView decides for scene items.
+                                 const bool cullBackFaces =
+                                     !draw.material.doubleSided && glm::determinant(mat3(draw.model)) > 0.0f;
+                                 const Pipeline *wanted = pipeline[cullBackFaces ? 1 : 0];
+                                 if (wanted != bound) {
+                                     table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wanted->handle());
+                                     bound = wanted;
+                                 }
+                                 const VkBuffer vertexBuffer = ctx.buffer(draw.vertices);
+                                 const VkDeviceSize offset = 0;
+                                 table.vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
+                                 DrawPushConstants constants;
+                                 constants.model = draw.model;
+                                 constants.material = firstMaterial + static_cast<std::uint32_t>(i);
+                                 table.vkCmdPushConstants(cmd, wanted->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                                          sizeof(constants), &constants);
+                                 table.vkCmdDrawIndirect(cmd, ctx.buffer(draw.indirect), 0, 1,
+                                                         sizeof(VkDrawIndirectCommand));
+                             }
+                         })
+                     .out;
+    }
     if (!blended) {
         return opaque;
     }
 
     // Blended draws, farthest first, over the opaque image. Their materials follow view.draws' in the table.
-    const Format colorFormat = graph.imageInfo(color).desc.format;
-    const Format depthFormat = graph.imageInfo(depth).desc.format;
     const PipelinePair pipeline =
         meshes.meshlets() ? meshletPipelinePair(pipelines, colorFormat, depthFormat, MeshletPhase::Single, true)
                           : vertexPipelinePair(pipelines, colorFormat, depthFormat, true);

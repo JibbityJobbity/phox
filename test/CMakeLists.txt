@@ -48,6 +48,8 @@ phox_add_test_executable(PhoxViewTests source/render_view_test.cpp)
 # Renders headless and compares with test/golden/*.ppm (see the comment at the top of the source).
 phox_add_test_executable(PhoxGoldenTests source/golden_test.cpp)
 target_compile_definitions(PhoxGoldenTests PRIVATE PHOX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+# GPU-generated geometry drawn by the Vulkan renderer, against the same mesh from the CPU.
+phox_add_test_executable(PhoxGeneratedTests source/generated_test.cpp)
 
 # ---- Register the tests ----
 
@@ -58,6 +60,8 @@ add_test(NAME render_view COMMAND PhoxViewTests)
 add_test(NAME golden COMMAND PhoxGoldenTests vulkan WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 # 77: no Vulkan device (set PHOX_REQUIRE_GPU=1 to make that a failure instead).
 set_tests_properties(golden PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME generated COMMAND PhoxGeneratedTests)
+set_tests_properties(generated PROPERTIES SKIP_RETURN_CODE 77)
 # The same goldens through the Metal backend (PHOX_ENABLE_METAL comes from Phox's CMakeLists).
 if(PHOX_ENABLE_METAL)
   add_test(NAME golden_metal COMMAND PhoxGoldenTests metal WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
