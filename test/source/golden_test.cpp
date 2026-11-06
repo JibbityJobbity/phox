@@ -1,7 +1,8 @@
 // Renders known scenes headless and compares them with the images in test/golden/: drawing with vertex
 // shaders, then with task and mesh shaders (if the device has them) with occlusion culling, and again
 // with frustum and cone culling only. Every path must match the same images, and so must the software
-// rasterizer.
+// rasterizer: culling never changes the picture. Last, mesh shaders with cluster LOD, which does change
+// it (within its error budget), against its own images (<case>.lod.ppm).
 //
 // Usage: PhoxGoldenTests [vulkan|metal]   (default vulkan). The goldens come from lavapipe whatever the
 // backend, so every backend is held to the same images. Backends without mesh shaders (Metal) run the
@@ -9,7 +10,8 @@
 //
 // Environment:
 //   PHOX_UPDATE_GOLDEN=1  write the rendered images to test/golden/ instead of comparing; a
-//                         comma-separated list of case names updates only those
+//                         comma-separated list of case names updates only those. The vertex path writes
+//                         <case>.ppm and the cluster LOD path <case>.lod.ppm (on a device with mesh shaders)
 //   PHOX_VALIDATION=1     run with validation (Vulkan: the validation layer incl. synchronization; Metal:
 //                         API validation) and fail on any reported error
 //   PHOX_REQUIRE_GPU=1    fail instead of skipping when no device for the backend is available
@@ -88,7 +90,7 @@ const std::vector<GoldenCase> kCases = {
 const std::filesystem::path kGoldenDir = PHOX_GOLDEN_DIR;
 const phox::Extent2D kExtent{320, 240};
 
-enum class Path { Vertex, MeshOcclusion, Mesh };
+enum class Path { Vertex, MeshOcclusion, Mesh, MeshLod };
 
 struct Backend {
     std::string name;
@@ -106,7 +108,8 @@ int runCases(const Backend &backend, Path pathKind) {
     config.debug = validation;
     config.headlessExtent = kExtent;
     config.meshShaders = meshShaders;
-    config.occlusionCulling = pathKind == Path::MeshOcclusion;
+    config.occlusionCulling = pathKind == Path::MeshOcclusion || pathKind == Path::MeshLod;
+    config.meshLod = pathKind == Path::MeshLod;
     renderer->initialize(config);
 
     const phox::RendererInfo info = renderer->info();
@@ -124,14 +127,17 @@ int runCases(const Backend &backend, Path pathKind) {
         renderer->cleanup();
         return envFlag("PHOX_REQUIRE_MESH_SHADERS") ? 1 : kSkip;
     }
-    if (info.occlusionCulling != (pathKind == Path::MeshOcclusion)) {
-        std::cerr << "occlusion culling is " << (info.occlusionCulling ? "on" : "off") << " but should not be"
-                  << std::endl;
+    if (info.occlusionCulling != (pathKind == Path::MeshOcclusion || pathKind == Path::MeshLod) ||
+        info.meshLod != (pathKind == Path::MeshLod)) {
+        std::cerr << "occlusion culling is " << (info.occlusionCulling ? "on" : "off") << " and cluster LOD "
+                  << (info.meshLod ? "on" : "off") << ", which this path should not have" << std::endl;
         return 1;
     }
-    const std::string path = pathKind == Path::Vertex        ? "vertex shaders"
+    const std::string path = pathKind == Path::Vertex          ? "vertex shaders"
                              : pathKind == Path::MeshOcclusion ? "mesh shaders, occlusion culling"
+                             : pathKind == Path::MeshLod       ? "mesh shaders, occlusion culling, cluster LOD"
                                                                : "mesh shaders";
+    const bool lod = pathKind == Path::MeshLod;
     std::cout << backend.name << " device: " << info.deviceName << ", " << path << (validation ? " (validation on)" : "")
               << std::endl;
 
@@ -144,9 +150,9 @@ int runCases(const Backend &backend, Path pathKind) {
             renderer->render(sample.scene);
         }
         const phox::CpuImage &actual = renderer->lastFrame();
-        const std::filesystem::path golden = kGoldenDir / (c.name + ".ppm");
+        const std::filesystem::path golden = kGoldenDir / (c.name + (lod ? ".lod.ppm" : ".ppm"));
 
-        if (!meshShaders && updateRequested(c.name)) {
+        if ((!meshShaders || lod) && updateRequested(c.name)) {
             phox::writePpm(golden, actual);
             std::cout << "updated " << golden.string() << std::endl;
             continue;
@@ -164,7 +170,10 @@ int runCases(const Backend &backend, Path pathKind) {
             const std::filesystem::path out =
                 std::filesystem::path("golden_out") /
                 (c.name + "." + backend.name +
-                 (pathKind == Path::Vertex ? ".ppm" : pathKind == Path::Mesh ? ".mesh.ppm" : ".occlusion.ppm"));
+                 (pathKind == Path::Vertex          ? ".ppm"
+                  : pathKind == Path::Mesh          ? ".mesh.ppm"
+                  : pathKind == Path::MeshOcclusion ? ".occlusion.ppm"
+                                                    : ".lod.ppm"));
             phox::writePpm(out, actual);
             std::cout << "  actual image written to " << std::filesystem::absolute(out).string() << std::endl;
             ++failures;
@@ -220,7 +229,7 @@ int main(int argc, char **argv) {
         return kSkip; // no device at all
     }
     int failures = vertex;
-    for (Path path : {Path::MeshOcclusion, Path::Mesh}) {
+    for (Path path : {Path::MeshOcclusion, Path::Mesh, Path::MeshLod}) {
         const int result = runCases(backend, path);
         if (result == kSkip) {
             break; // no mesh shaders

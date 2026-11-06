@@ -191,10 +191,10 @@ previous one.
   - set 0, binding 1: the frame's `MaterialData` array (80 bytes each, std430), one entry per drawn item;
   - set 1 (`SetLayout::Bindless`): the texture table (6.3);
   - push constants `DrawPushConstants {mat4 model; uint material}` (80 bytes, vertex stage);
-  - on the meshlet path, `MeshletDrawPushConstants` (112 bytes, task and mesh): the model matrix, the camera in
+  - on the meshlet path, `MeshletDrawPushConstants` (128 bytes, task and mesh): the model matrix, the camera in
     object space, the device addresses of the mesh's vertices and of its meshlets (followed by their data),
-    the meshlet count, the culling flags, the draw's first word of visibility bits (6.2) and the material
-    index. Code defining `PHOX_MESHLET_DRAW` gets this block, `PHOX_VERTEX_DRAW` the other. The vertex and
+    the meshlet count, the culling flags, the draw's first word of visibility bits (6.2), the material
+    index and the cluster LOD threshold (6.4). Code defining `PHOX_MESHLET_DRAW` gets this block, `PHOX_VERTEX_DRAW` the other. The vertex and
     mesh shaders pass the material index on as a flat varying, so `forward.frag` has no push constants and
     serves both paths.
 - `vk::DescriptorAllocator` is per frame: pools reset together and grow when one runs out.
@@ -224,7 +224,7 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 
-- `addForwardPass(graph, view, sets, color, depth, meshes, pipelines, meshletCulling, occlusion)`: clears,
+- `addForwardPass(graph, view, sets, color, depth, meshes, pipelines, meshletSettings, occlusion)`: clears,
   then draws each item with per-draw push constants, shaded by its material (6.3) and lit two-sided by the
   directional light: indexed draws, or one `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds
   meshlets (6.1). Two pipelines per path, culling none or back faces, share a layout, so the descriptor sets
@@ -244,7 +244,8 @@ with `RendererConfig::meshShaders` off, it uses the vertex pipeline. Both paths 
 - **Meshlets** (`phox/Meshlets.hpp`, core): `optimizeIndexOrder` reorders a mesh's indices for the vertex
   cache with meshoptimizer; `buildMeshlets` splits them into meshlets of at most 64 vertices and 124
   triangles (meshoptimizer, cone weight 0.25), orders each for locality and computes its bounding sphere and
-  normal cone. A `Meshlet` is laid out as the shaders read it (64 bytes). `MeshletMesh::data` holds each
+  normal cone. A `Meshlet` is laid out as the shaders read it (112 bytes, with its LOD fields, 6.4).
+  `MeshletMesh::data` holds each
   meshlet's vertex indices followed by its triangles, packed one per `uint` as three 8-bit local indices, so
   no 8-bit storage feature is needed.
 - **Buffers**: the meshlet path reads the vertex buffer and the meshlet buffer (meshlets, then their data)
@@ -299,8 +300,8 @@ the near plane are kept. The goldens are rendered with it, and must match the ot
   culling. The buffer is imported into each frame's graph (StorageWrite to StorageWrite; Undefined when
   cleared), read by the early pass and written by the late one.
 - **Task shaders**: `forward_task.glsl` built three ways (`forward.task`, `forward_early.task`,
-  `forward_late.task`), so each pipeline declares only the sets it uses: the late one adds set 1 (visibility)
-  and set 2 (the pyramid with a nearest sampler), the early one set 1.
+  `forward_late.task`), so each pipeline declares only the sets it uses: after set 1 (the texture table,
+  6.3) the late one adds set 2 (visibility) and set 3 (the pyramid with a nearest sampler), the early one set 2.
 - **Push constants**: to make room for the draw's visibility offset in 128 bytes, a mesh's meshlets and their
   data share one buffer, and the meshlets' offsets count from its start.
 
@@ -357,6 +358,70 @@ Elsewhere:
   items composite in the same space. It shades with `shadeMaterial`, the C++ twin of `forward.frag`, but
   samples only the first mip; the golden cases with textures allow more differing pixels for that, and for
   GPUs choosing mips differently.
+
+### 6.4 Cluster LOD
+
+With mesh shaders, each mesh carries a cluster LOD hierarchy, the scheme of Unreal's Nanite: for any view,
+the task shader picks, for each part of the mesh, the coarsest meshlets whose geometric error stays under
+`RendererConfig::lodErrorPixels` (1 by default) on screen. Different parts of one mesh are drawn at
+different levels, without cracks between them. `meshLod` turns it off (`PhoxSample --lod off`).
+
+**Building** (`buildMeshletLod`, core; on upload in `vk::MeshCache`, with meshoptimizer 1.3):
+
+1. Level 0 is `buildMeshlets` on the mesh.
+2. While more than one meshlet is left: partition the current meshlets into groups of about 16 that share
+   vertices (`meshopt_partitionClusters`, by position so seams do not separate neighbours); merge each
+   group's triangles and simplify them to about half (`meshopt_simplifyWithAttributes`, positions only, so
+   the error is geometric), then split the result into meshlets again. A group that keeps more than 85% of
+   its triangles is stuck and stays as it is.
+3. While simplifying, every vertex position used by more than one group is locked, and so is each group's
+   open border (`meshopt_SimplifyLockBorder`), which also covers the border with groups that got stuck at an
+   earlier level. Group borders therefore never move, and the next level's groups, partitioned anew, are
+   different, so last level's borders get simplified then.
+
+Every level indexes the mesh's own vertices; only meshlet data is added, about as much again as level 0
+(the 65k-triangle torus: 11 levels, 1473 meshlets, 131k triangles in all, built in about 100 ms).
+
+**Errors and bounds.** A group's *simplified bounds* are a sphere enclosing its meshlets' own LOD spheres and
+an error of at least the largest of theirs plus what the simplification moved (absolute, object space).
+Each meshlet stores two of these (`Meshlet::lodSphere`/`lodError` and `parentSphere`/`parentError`): the
+simplified bounds of the group that made it (zero error at level 0), and those of the group it is part of
+(`kLodNoParent` if that group got stuck). The bounds enclose rather than fit the geometry, so spheres and
+errors never shrink towards coarser levels.
+
+**Selection** (`lodSelected`, mirrored in `forward_task.glsl`): a meshlet is drawn if its own error projects
+to at most the threshold and its parent's to more. The projection is `error / (distance to the sphere) *
+proj[1][1] * height / 2`: the error in pixels at the nearest point of the sphere, rotation invariant, in
+object space (exact under uniform scale). Because of the containment above it never grows from parent to
+child, so along any chain of refinements exactly one meshlet passes; and every meshlet one group made
+shares that group's bounds bit for bit, so they all decide alike (the shader computes it `precise`, so
+the compiler cannot evaluate the shared bounds two ways). The drawn meshlets cover the surface exactly once.
+The selection runs before culling in the task shader, over every level's meshlets; occlusion culling (6.2)
+tracks visibility per meshlet as before, so a part that changes level is treated as newly visible.
+
+**Testing.** `render_view` checks the hierarchy (levels, halving, monotonic errors and nested spheres) and
+that for a closed, seamed torus the selected triangles form a closed surface (every edge, by position, used
+once in each direction) from a range of distances. `golden` runs the mesh paths without LOD against the full-
+detail goldens (culling must not change the picture), then once with LOD against `<case>.lod.ppm`, made on
+lavapipe; the RTX 3080 matches those within one level per channel.
+
+Measured on the RTX 3080 (`PhoxSample --scene field --size 1920x1080 --frames 40 --stats`): of the 15.3
+million triangles in the 234 tori that survive object culling, LOD at 1 pixel draws 152 thousand (1%);
+forward early goes from 0.66 ms to 0.08 ms, and early, pyramid and late together from 0.75 ms to 0.20 ms.
+Against full detail, about 6% of pixels differ by more than 2 levels: silhouettes move by up to a pixel,
+and shading follows the coarser triangles. The DamagedHelmet sample (15k triangles at 800 x 600) keeps 90%
+at 1 pixel and 51% at 8.
+
+What Nanite does beyond this, and where it would go here:
+
+- **Hierarchical culling.** The task shader tests every meshlet of every level, about twice level 0's
+  count. A bounding volume hierarchy over groups, traversed in a persistent compute pass, would skip whole
+  subtrees that are too fine or too coarse (meshoptimizer's clusterlod example builds one).
+- **GPU-driven instances.** Objects are still culled and drawn one by one from the CPU (see 11).
+- **Visibility buffer and software rasterization.** Small triangles cost the hardware rasterizer whole 2 x 2
+  quads; Nanite rasterizes them in compute with 64-bit atomics into a visibility buffer and shades each pixel
+  once afterwards.
+- **Streaming.** Every level stays resident; pages of groups could be loaded on demand instead.
 
 ## 7. Upload and caches
 
@@ -422,7 +487,7 @@ shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, f
                               tonemap.frag
 shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
-test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials
+test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials; each also .lod.ppm
 ```
 
 ## 11. Next, and where each thing plugs in
@@ -434,8 +499,9 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
   a BRDF lookup table, replaces the ambient term in `shadePbr`; smooth metals currently reflect nothing.
 - **Shadows.** Cascaded shadow maps for the directional light: a depth pass per cascade before "forward",
   sampled with PCF in `forward.frag`.
-- **Meshlet LOD and instancing.** A draw per object pushes 112 bytes; many instances of one mesh would rather
-  read transforms from a buffer, and distant objects want coarser meshlets (meshoptimizer's simplifier).
+- **Instancing.** A draw per object pushes 128 bytes; many instances of one mesh would rather read transforms
+  from a buffer. With the remaining Nanite pieces (6.4): hierarchical cluster culling, a visibility buffer
+  with software rasterization of small triangles, and streaming.
 
 - **Installable package.** Install the compiled shaders with a runtime lookup (an environment override or a
   path relative to the library), and export or bundle volk and VMA.

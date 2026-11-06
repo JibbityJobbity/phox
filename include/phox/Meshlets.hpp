@@ -17,21 +17,34 @@ class Mesh;
 inline constexpr std::uint32_t kMeshletMaxVertices = 64;
 inline constexpr std::uint32_t kMeshletMaxTriangles = 124;
 
+/// Meshlet::parentError of a meshlet that has no coarser version: it is drawn however small it gets.
+inline constexpr float kLodNoParent = 3.0e38f;
+
 /// A cluster of up to kMeshletMaxTriangles triangles of one mesh, with the bounds that let a task
-/// shader cull it as a whole. Laid out as the shaders read it (std430, 64 bytes), so arrays of these
-/// upload as they are.
+/// shader cull it as a whole, and its place in the mesh's cluster LOD hierarchy (buildMeshletLod). Laid
+/// out as the shaders read it (std430, 112 bytes), so arrays of these upload as they are.
 struct Meshlet {
     vec4 sphere{0.0f}; ///< xyz: centre of a sphere enclosing the meshlet (object space); w: its radius
     /// xyz: axis of a cone containing every triangle normal; w: cutoff. The meshlet faces away from a
     /// camera at c (object space) if dot(normalize(coneApex - c), axis) >= cutoff. Above 1 when no cone fits.
     vec4 cone{0.0f, 0.0f, 1.0f, 2.0f};
     vec4 coneApex{0.0f}; ///< xyz; w unused
+    /// Where lodError is measured: the bounds of the group whose simplification made this meshlet
+    /// (object space; xyz centre, w radius). Shared by every meshlet that group made.
+    vec4 lodSphere{0.0f};
+    /// The same for the coarser version of this meshlet: the bounds of its own group once simplified.
+    /// Shared by every meshlet of the group.
+    vec4 parentSphere{0.0f};
+    float lodError = 0.0f;              ///< object-space error of this meshlet's geometry; 0 for the original
+    float parentError = kLodNoParent;   ///< the error of its coarser version; never below lodError
+    std::uint32_t level = 0;            ///< 0: the original triangles; each level about halves them
+    std::uint32_t padding = 0;
     std::uint32_t vertexOffset = 0;   ///< first entry of MeshletMesh::data holding this meshlet's vertex indices
     std::uint32_t triangleOffset = 0; ///< first entry of MeshletMesh::data holding its triangles (see there)
     std::uint32_t vertexCount = 0;
     std::uint32_t triangleCount = 0;
 };
-static_assert(sizeof(Meshlet) == 64, "Meshlet must match the std430 layout in shaders/common.glsl");
+static_assert(sizeof(Meshlet) == 112, "Meshlet must match the std430 layout in shaders/common.glsl");
 
 /// A mesh split into meshlets. data holds, for each meshlet, vertexCount indices into the mesh's
 /// vertices, then triangleCount triangles packed one per entry as three 8-bit indices into that list
@@ -39,7 +52,11 @@ static_assert(sizeof(Meshlet) == 64, "Meshlet must match the std430 layout in sh
 struct MeshletMesh {
     std::vector<Meshlet> meshlets;
     std::vector<std::uint32_t> data;
+    std::uint32_t levels = 1; ///< LOD levels: 1 + the highest Meshlet::level
+    /// Triangles of all meshlets (of every level).
     std::size_t triangleCount() const;
+    /// Triangles of the meshlets of @p level.
+    std::size_t triangleCount(std::uint32_t level) const;
 };
 
 /// @p mesh's indices reordered for the GPU's post-transform vertex cache (meshoptimizer). The same
@@ -50,6 +67,29 @@ std::vector<std::uint32_t> optimizeIndexOrder(const Mesh &mesh);
 /// spatially close triangles together, and orders each meshlet's vertices and triangles for locality.
 /// Pass the output of optimizeIndexOrder for the best clusters.
 MeshletMesh buildMeshlets(const Mesh &mesh, const std::vector<std::uint32_t> &indices);
+
+/// Splits @p mesh into a cluster LOD hierarchy (as in Unreal's Nanite): level 0 is buildMeshlets on
+/// @p indices; then, until nothing simplifies further, neighbouring meshlets are grouped (about 16 per
+/// group), each group is merged and simplified to about half its triangles with the vertices it shares
+/// with other groups locked, and the result is split into meshlets again. Grouping differs from level to
+/// level, so the borders locked at one level are simplified at the next.
+///
+/// Every level uses the mesh's own vertices; only meshlet data is added (about as much again as level 0).
+/// Each meshlet records the error and bounds of its own group's simplification and of the one above it;
+/// lodSelected() then picks, for any camera, a set of meshlets that covers the surface once without cracks.
+MeshletMesh buildMeshletLod(const Mesh &mesh, const std::vector<std::uint32_t> &indices);
+
+/// The error @p error (object space), at a sphere @p sphere (xyz centre, w radius), as seen from
+/// @p camera, in pixels: error / distance to the sphere * @p pixelsPerUnit, where pixelsPerUnit is the
+/// projection's focal length in pixels (proj[1][1] * height / 2). Rotation invariant, and never decreasing
+/// for spheres that contain each other with errors that do not decrease, which is what keeps the selection
+/// consistent. The task shader computes the same.
+float lodProjectedError(const vec4 &sphere, float error, const vec3 &camera, float pixelsPerUnit);
+
+/// Whether @p meshlet is drawn for a camera at @p camera (object space) and an error budget of
+/// @p threshold pixels: its own error projects within the budget and its coarser version's does not. The
+/// task shader's LOD test.
+bool lodSelected(const Meshlet &meshlet, const vec3 &camera, float pixelsPerUnit, float threshold);
 
 /// Whether every triangle of @p meshlet faces away from a camera at @p camera (object space): the task
 /// shader's cone test. Conservative: false whenever it cannot tell.

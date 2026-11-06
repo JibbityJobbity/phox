@@ -39,6 +39,14 @@ struct ForwardSets {
     VkDescriptorSet textures = VK_NULL_HANDLE; ///< set 1: the texture table (TextureCache::set())
 };
 
+/// How the task shader picks meshlets (the meshlet path only).
+struct MeshletSettings {
+    /// Skip meshlets outside the frustum or (single-sided only) facing away.
+    bool culling = true;
+    /// Cluster LOD: the error, in pixels, a meshlet may show (meshes uploaded with hierarchies only).
+    float lodErrorPixels = 1.0f;
+};
+
 /// Two-phase occlusion culling of meshlets (the meshlet path only).
 struct MeshletOcclusion {
     BufferHandle visibility;                         ///< MeshletVisibility's buffer, imported
@@ -49,15 +57,15 @@ struct MeshletOcclusion {
 /// @p view lit by its directional light: view.draws, then view.transparent blended over them ("forward
 /// blend"). The material table in @p sets has one entry per item, view.draws' first. The meshes must
 /// have been uploaded with MeshCache::prepare, and the textures with TextureCache::prepare; if the mesh
-/// cache holds meshlets, they are drawn with task and mesh shaders, and @p meshletCulling lets the task
-/// shader skip those outside the frustum or (single-sided only) facing away.
+/// cache holds meshlets, they are drawn with task and mesh shaders, which pick and cull them as
+/// @p meshlets says.
 ///
 /// With @p occlusion, the meshlets are drawn in two passes: "forward early" draws those visible last
 /// frame, a depth pyramid is built from its depth, and "forward late" draws the rest that are not hidden
 /// behind it, recording which meshlets are visible for the next frame. Needs D32Float depth.
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
-                                 bool meshletCulling = true, const MeshletOcclusion *occlusion = nullptr);
+                                 const MeshletSettings &meshlets = {}, const MeshletOcclusion *occlusion = nullptr);
 
 } // namespace phox::vk
 

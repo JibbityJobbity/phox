@@ -43,6 +43,21 @@ struct RendererConfig {
     /// With meshlet culling: also cull meshlets hidden behind others, drawing in two passes around a
     /// depth pyramid. Needs a D32Float depth buffer (nearly every device).
     bool occlusionCulling = true;
+    /// With mesh shaders: build a cluster LOD hierarchy for each mesh (phox::buildMeshletLod) and draw, for
+    /// each part of a mesh, the coarsest meshlets whose error stays within lodErrorPixels on screen.
+    bool meshLod = true;
+    /// The geometric error, in pixels, cluster LOD may show. Larger draws fewer triangles.
+    float lodErrorPixels = 1.0f;
+    /// Fill frameStatistics() every frame. Costs CPU time (the LOD selection is repeated on the CPU).
+    bool collectStatistics = false;
+};
+
+/// What a frame drew, before culling (RendererConfig::collectStatistics).
+struct FrameStatistics {
+    std::uint64_t draws = 0;     ///< objects drawn, after frustum culling
+    std::uint64_t triangles = 0; ///< in their meshes at full detail
+    /// in the meshlets cluster LOD selected for them (before meshlet culling); equals triangles without LOD
+    std::uint64_t lodTriangles = 0;
 };
 
 /// GPU time of one render graph pass.
@@ -63,6 +78,7 @@ struct RendererInfo {
     std::uint32_t validationWarnings = 0; ///< warning messages reported by the validation layer so far (Vulkan)
     bool meshShaders = false;             ///< meshes are drawn as meshlets with task and mesh shaders
     bool occlusionCulling = false;        ///< meshlets are also culled against a depth pyramid
+    bool meshLod = false;                 ///< meshlets are drawn at the level of detail the view needs
 };
 
 class Renderer {
@@ -88,6 +104,9 @@ public:
     /// two behind the last render() call. Empty before then, for the software fallback, and on devices
     /// without timestamps.
     virtual const std::vector<PassTiming> &gpuTimings() const = 0;
+    /// The most recent frame's statistics, when RendererConfig::collectStatistics is set (otherwise, and
+    /// on backends that do not count, zeros).
+    virtual FrameStatistics frameStatistics() const { return {}; }
 };
 
 }

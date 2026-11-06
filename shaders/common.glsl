@@ -66,11 +66,19 @@ layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 // phox::Meshlet.
 struct Meshlet {
-    vec4 sphere;   // xyz: centre (object space); w: radius
-    vec4 cone;     // xyz: axis; w: cutoff, above 1 when there is no cone
-    vec4 coneApex; // xyz
-    uvec4 range;   // vertex offset, triangle offset (uints from the start of the meshlet buffer), counts
+    vec4 sphere;       // xyz: centre (object space); w: radius
+    vec4 cone;         // xyz: axis; w: cutoff, above 1 when there is no cone
+    vec4 coneApex;     // xyz
+    vec4 lodSphere;    // where lodError is measured
+    vec4 parentSphere; // where parentError is measured
+    float lodError;    // object space; 0 for the original triangles
+    float parentError; // kLodNoParent: no coarser version
+    uint level;
+    uint padding;
+    uvec4 range; // vertex offset, triangle offset (uints from the start of the meshlet buffer), counts
 };
+
+const float kLodNoParent = 3.0e38;
 
 // phox::Vertex, read as floats: position (0-2), normal (3-5), texcoord (6-7), tangent (8-11).
 const uint kVertexFloats = 12u;
@@ -92,6 +100,7 @@ layout(push_constant) uniform MeshletDrawPushConstants {
     uint flags;            // kMeshletFrustumCulling | kMeshletConeCulling
     uint visibilityOffset; // two-phase occlusion culling: the draw's first word of meshlet visibility bits
     uint material;         // index into `materials`
+    float lodThreshold;    // cluster LOD: the error, in pixels, a meshlet may show
 } draw;
 
 // From the task shader to the mesh shader: the meshlets that survived culling, one mesh shader

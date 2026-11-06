@@ -1,5 +1,7 @@
 // The task shader of the meshlet path. Culls a draw's meshlets, PHOX_TASK_GROUP_SIZE per workgroup, and
-// launches one mesh shader workgroup for each it keeps. Built three ways (see the .task files):
+// launches one mesh shader workgroup for each it keeps. A mesh's meshlets are every level of its cluster
+// LOD hierarchy (phox::buildMeshletLod); first each picks whether its level is the one to draw here
+// (lodSelected), then the culling tests below. Built three ways (see the .task files):
 //
 //   forward.task        frustum and, for single-sided meshes, cone culling (the flags in the push constants)
 //   forward_early.task  PHOX_OCCLUSION_EARLY: the same, but only for meshlets that were visible last frame
@@ -80,6 +82,29 @@ bool occluded(vec3 worldCenter, float radius) {
 }
 #endif
 
+// Mirrors phox::lodProjectedError: @p error at @p sphere (object space) as seen from the camera, in pixels.
+// `precise`: one group's sphere is tested as its meshlets' own and as the parent of the meshlets it was
+// made from, which must reach the same answer bit for bit. Without it the compiler may fuse the two
+// evaluations differently, and a group right at the threshold is then drawn at both levels or neither.
+float lodProjectedError(vec4 sphere, float error) {
+    if (error >= kLodNoParent) {
+        return kLodNoParent;
+    }
+    precise vec3 offset = sphere.xyz - draw.cameraPosition.xyz;
+    precise float distance = max(sqrt(dot(offset, offset)) - sphere.w, 1e-6);
+    precise float pixelsPerUnit = abs(frame.proj[1][1]) * 0.5 * frame.resolution.y;
+    precise float projected = error / distance * pixelsPerUnit;
+    return projected;
+}
+
+// Mirrors phox::lodSelected: this meshlet, and not a finer or coarser version of it, is drawn. Every
+// meshlet a group made shares that group's sphere and error, so they all decide alike: the drawn
+// meshlets cover the mesh once, without cracks.
+bool lodSelected(Meshlet meshlet) {
+    return lodProjectedError(meshlet.lodSphere, meshlet.lodError) <= draw.lodThreshold &&
+           lodProjectedError(meshlet.parentSphere, meshlet.parentError) > draw.lodThreshold;
+}
+
 // Frustum and cone culling, as the flags ask. Also returns the bounding sphere in world space.
 bool meshletVisible(Meshlet meshlet, out vec3 center, out float radius) {
     // Its radius grows by the largest scale of the transform.
@@ -118,7 +143,9 @@ void main() {
     if (index < draw.meshletCount) {
         vec3 center;
         float radius;
-        bool visible = meshletVisible(draw.meshlets.meshlets[index], center, radius);
+        Meshlet meshlet = draw.meshlets.meshlets[index];
+        // A meshlet of the wrong level is no part of the picture at all: not drawn, and not visible.
+        bool visible = lodSelected(meshlet) && meshletVisible(meshlet, center, radius);
 #if defined(PHOX_OCCLUSION_EARLY)
         state = wasVisible && visible ? 1u : 0u;
 #elif defined(PHOX_OCCLUSION_LATE)

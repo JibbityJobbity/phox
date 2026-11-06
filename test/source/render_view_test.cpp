@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -669,7 +670,94 @@ void loadsGltfFiles() {
     CHECK(threw);
 }
 
+// The triangles (as mesh vertex indices) of the meshlets lodSelected picks for @p camera.
+std::vector<std::array<std::uint32_t, 3>> selectedTriangles(const MeshletMesh &lod, const vec3 &camera,
+                                                           float pixelsPerUnit, float threshold) {
+    std::vector<std::array<std::uint32_t, 3>> triangles;
+    for (const Meshlet &meshlet : lod.meshlets) {
+        if (!lodSelected(meshlet, camera, pixelsPerUnit, threshold)) {
+            continue;
+        }
+        for (std::uint32_t t = 0; t < meshlet.triangleCount; ++t) {
+            const std::uint32_t packed = lod.data[meshlet.triangleOffset + t];
+            std::array<std::uint32_t, 3> triangle;
+            for (int k = 0; k < 3; ++k) triangle[k] = lod.data[meshlet.vertexOffset + ((packed >> (8 * k)) & 0xFFu)];
+            triangles.push_back(triangle);
+        }
+    }
+    return triangles;
+}
+
+// Edges (by vertex position) used by other than exactly one triangle in each direction: zero for a
+// closed surface without cracks or overlaps.
+std::size_t badEdges(const Mesh &mesh, const std::vector<std::array<std::uint32_t, 3>> &triangles) {
+    std::map<std::array<float, 3>, std::uint32_t> ids;
+    const auto id = [&](std::uint32_t v) {
+        const vec3 &p = mesh.vertices()[v].position;
+        return ids.try_emplace({p.x, p.y, p.z}, static_cast<std::uint32_t>(ids.size())).first->second;
+    };
+    std::map<std::pair<std::uint32_t, std::uint32_t>, int> directed;
+    for (const auto &t : triangles) {
+        const std::uint32_t a = id(t[0]), b = id(t[1]), c = id(t[2]);
+        if (a == b || b == c || a == c) {
+            continue; // degenerate: no area, no edges
+        }
+        ++directed[{a, b}];
+        ++directed[{b, c}];
+        ++directed[{c, a}];
+    }
+    std::size_t bad = 0;
+    for (const auto &[edge, count] : directed) {
+        const auto reverse = directed.find({edge.second, edge.first});
+        if (count != 1 || reverse == directed.end() || reverse->second != 1) ++bad;
+    }
+    return bad;
+}
+
+void clusterLodIsCrackFree() {
+    // A dense closed mesh, as in the "field" scene, with texture seams (the torus duplicates its seam vertices).
+    const Mesh torus = Mesh::torus(0.6f, 0.22f, 128, 64);
+    std::vector<std::array<std::uint32_t, 3>> original;
+    for (std::size_t i = 0; i + 2 < torus.indices().size(); i += 3) {
+        original.push_back({torus.indices()[i], torus.indices()[i + 1], torus.indices()[i + 2]});
+    }
+    CHECK(badEdges(torus, original) == 0); // closed to begin with, seams included
+    const MeshletMesh lod = buildMeshletLod(torus, optimizeIndexOrder(torus));
+    CHECK(lod.levels >= 4);
+    CHECK(lod.triangleCount(0) == torus.triangleCount());
+    CHECK(lod.triangleCount(1) < torus.triangleCount() * 3 / 4); // each level about halves the triangles
+    CHECK(badEdges(torus, selectedTriangles(lod, vec3(0.0f, 0.0f, 0.0f), 1000.0f, 0.0f)) == 0);
+    for (const Meshlet &meshlet : lod.meshlets) {
+        // Errors grow towards coarser levels, and a parent's sphere contains its children's.
+        CHECK(meshlet.parentError >= meshlet.lodError);
+        if (meshlet.parentError < kLodNoParent) {
+            const float gap = glm::length(vec3(meshlet.parentSphere) - vec3(meshlet.lodSphere));
+            CHECK(gap + meshlet.lodSphere.w <= meshlet.parentSphere.w * 1.0001f + 1e-5f);
+        }
+        CHECK((meshlet.level == 0) == (meshlet.lodError == 0.0f));
+    }
+
+    // From close up to far away: always closed, and fewer triangles the farther the camera.
+    std::size_t previous = torus.triangleCount() + 1;
+    for (float distance : {0.5f, 2.0f, 8.0f, 32.0f, 128.0f, 1024.0f}) {
+        const vec3 camera = glm::normalize(vec3(0.3f, 0.8f, 0.5f)) * distance;
+        const auto triangles = selectedTriangles(lod, camera, 540.0f, 1.0f);
+        CHECK(badEdges(torus, triangles) == 0);
+        CHECK(!triangles.empty() && triangles.size() <= previous);
+        previous = triangles.size();
+    }
+    CHECK(previous < torus.triangleCount() / 50); // far away, a few dozen triangles do
+
+    // Without a hierarchy every meshlet is level 0 and always drawn.
+    const MeshletMesh flat = buildMeshlets(torus, optimizeIndexOrder(torus));
+    for (const Meshlet &meshlet : flat.meshlets) {
+        CHECK(meshlet.level == 0 && meshlet.parentError >= kLodNoParent);
+        CHECK(lodSelected(meshlet, vec3(1000.0f), 540.0f, 1.0f));
+    }
+}
+
 int main() {
+    clusterLodIsCrackFree();
     loadsGltfFiles();
     texturesBuildMipChains();
     texturesSampleLikeTheGpu();

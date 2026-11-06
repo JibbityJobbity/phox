@@ -45,6 +45,7 @@ public:
     RendererInfo info() const override;
     const std::string &frameGraphDot() const override { return m_frameGraphDot; }
     const std::vector<PassTiming> &gpuTimings() const override { return m_gpuTimings; }
+    FrameStatistics frameStatistics() const override { return m_statistics; }
 
 private:
     void createInstance();
@@ -92,6 +93,7 @@ private:
     CpuImage m_lastFrame;
     std::string m_frameGraphDot;
     std::vector<PassTiming> m_gpuTimings;
+    FrameStatistics m_statistics;
     std::string m_deviceName;
     ValidationCounters m_validationCounters;
     bool m_validation = false;

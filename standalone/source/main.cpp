@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -100,6 +101,9 @@ int main(int argc, char **argv) {
     ("device", "use the GPU whose name contains this text", cxxopts::value<std::string>())
     ("tonemap", "tone mapping: clamp, reinhard or aces", cxxopts::value<std::string>()->default_value("clamp"))
     ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
+    ("lod", "with mesh shaders: cluster LOD (on or off)", cxxopts::value<std::string>()->default_value("on"))
+    ("lod-error", "cluster LOD: the error, in pixels, the picture may show", cxxopts::value<float>()->default_value("1"))
+    ("stats", "print what each frame drew (triangles before and after cluster LOD)")
     ("mesh-shaders", "draw with task and mesh shaders where available: on, off, noocclusion (frustum and cone "
                      "culling only) or nocull (no meshlet culling)", cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
@@ -165,6 +169,13 @@ int main(int argc, char **argv) {
     config.meshShaders = meshShaders != "off";
     config.meshletCulling = meshShaders != "nocull";
     config.occlusionCulling = meshShaders == "on";
+    const std::string lod = args["lod"].as<std::string>();
+    if (lod != "on" && lod != "off") {
+      throw std::invalid_argument("--lod expects on or off");
+    }
+    config.meshLod = lod == "on";
+    config.lodErrorPixels = args["lod-error"].as<float>();
+    config.collectStatistics = args.count("stats") > 0;
     // Writes the graph once, after the first frame that produced one.
     bool graphWritten = false;
     const auto dumpGraph = [&](const Renderer &r) {
@@ -188,7 +199,7 @@ int main(int argc, char **argv) {
                   : startInfo.occlusionCulling                   ? "mesh shaders, frustum, cone and occlusion culling"
                   : config.meshletCulling                        ? "mesh shaders, frustum and cone culling"
                                                                  : "mesh shaders, no meshlet culling")
-              << std::endl;
+              << (startInfo.meshLod ? ", cluster LOD" : "") << std::endl;
     // The first frames upload meshes and create pooled images, so they are left out of the averages.
     constexpr long kWarmupFrames = 3;
     TimingAverages timings;
@@ -232,6 +243,13 @@ int main(int argc, char **argv) {
       dumpGraph(*renderer);
       if (frames > 1) {
         timings.print();
+      }
+      if (config.collectStatistics) {
+        const FrameStatistics stats = renderer->frameStatistics();
+        std::cout << "Drew " << stats.draws << " object(s): " << stats.lodTriangles << " of " << stats.triangles
+                  << " triangles after cluster LOD (" << std::fixed << std::setprecision(1)
+                  << (stats.triangles > 0 ? 100.0 * static_cast<double>(stats.lodTriangles) / static_cast<double>(stats.triangles) : 0.0)
+                  << "%), before meshlet culling" << std::defaultfloat << std::endl;
       }
       const std::string output = args.count("output") ? args["output"].as<std::string>()
                                                       : "build/rendered_" + sample.name + ".ppm";

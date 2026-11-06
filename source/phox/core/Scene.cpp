@@ -199,14 +199,16 @@ Mesh Mesh::torus(float radius, float tubeRadius, std::uint32_t rings, std::uint3
     sides = std::max(sides, 3u);
     std::vector<Vertex> vertices;
     vertices.reserve(static_cast<std::size_t>(rings + 1) * (sides + 1));
-    // The seam vertices are duplicated so texture coordinates can wrap.
+    // The seam vertices are duplicated so texture coordinates can wrap. Their positions repeat the first
+    // ring's exactly (angles from the wrapped index, not 2 pi), so the seam is closed for tools that match
+    // vertices by position, such as the cluster LOD builder.
     for (std::uint32_t i = 0; i <= rings; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(rings);
-        const float theta = u * glm::two_pi<float>();
+        const float theta = static_cast<float>(i % rings) / static_cast<float>(rings) * glm::two_pi<float>();
         const vec3 around{std::cos(theta), 0.0f, std::sin(theta)};
         for (std::uint32_t j = 0; j <= sides; ++j) {
             const float v = static_cast<float>(j) / static_cast<float>(sides);
-            const float phi = v * glm::two_pi<float>();
+            const float phi = static_cast<float>(j % sides) / static_cast<float>(sides) * glm::two_pi<float>();
             const vec3 normal = std::cos(phi) * around + vec3(0.0f, std::sin(phi), 0.0f);
             vertices.push_back({radius * around + tubeRadius * normal, normal, {u, v}});
         }
@@ -229,14 +231,19 @@ Mesh Mesh::sphere(float radius, std::uint32_t segments, std::uint32_t rings) {
     rings = std::max(rings, 2u);
     std::vector<Vertex> vertices;
     vertices.reserve(static_cast<std::size_t>(segments + 1) * (rings + 1));
-    // Seam and pole vertices are duplicated so each gets its own texture coordinate.
+    // Seam and pole vertices are duplicated so each gets its own texture coordinate. Their positions are
+    // exactly equal (wrapped angles, exact poles), so the surface is closed for tools that match vertices
+    // by position.
     for (std::uint32_t j = 0; j <= rings; ++j) {
         const float v = static_cast<float>(j) / static_cast<float>(rings);
         const float phi = v * glm::pi<float>(); // from +Y down to -Y
+        const bool pole = j == 0 || j == rings;
+        const float sinPhi = pole ? 0.0f : std::sin(phi);
+        const float cosPhi = j == 0 ? 1.0f : j == rings ? -1.0f : std::cos(phi);
         for (std::uint32_t i = 0; i <= segments; ++i) {
             const float u = static_cast<float>(i) / static_cast<float>(segments);
-            const float theta = u * glm::two_pi<float>();
-            const vec3 normal{std::sin(phi) * std::cos(theta), std::cos(phi), -std::sin(phi) * std::sin(theta)};
+            const float theta = static_cast<float>(i % segments) / static_cast<float>(segments) * glm::two_pi<float>();
+            const vec3 normal{sinPhi * std::cos(theta), cosPhi, -sinPhi * std::sin(theta)};
             // The tangent is d(position)/d(theta), normalised. Increasing v points down, against
             // cross(normal, tangent), hence the handedness of -1.
             const vec3 tangent{-std::sin(theta), 0.0f, -std::cos(theta)};

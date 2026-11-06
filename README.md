@@ -23,6 +23,11 @@ image, and falls back to a software rasterizer when there is no usable GPU.
   the same images come from the vertex pipeline. See [architecture sections 6.1 and
   6.2](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
   dynamic rendering.
+- **Cluster LOD** (as in Nanite): each mesh is built into a hierarchy of meshlets at successive levels of
+  detail, simplified group by group with shared borders locked, and the task shader picks per part of the
+  mesh the coarsest meshlets whose error stays under a pixel, without cracks. On the `field` benchmark that
+  draws 1% of the triangles and cuts the forward passes from 0.75 ms to 0.20 ms. See [architecture section
+  6.4](docs/architecture.md#64-cluster-lod).
 - **Verified output**: golden images rendered on lavapipe, checked with the Khronos validation layer
   (including synchronization validation) on every CI run.
 
@@ -50,6 +55,8 @@ Useful options:
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
 | `--frames N` (headless) | render N frames of one pose (`--animate`: advancing 1/60 s each) and print the average GPU time per pass |
 | `--mesh-shaders on\|off\|noocclusion\|nocull` | draw with task and mesh shaders where available; `noocclusion` keeps frustum and cone culling only, `nocull` turns meshlet culling off |
+| `--lod on\|off`, `--lod-error PIXELS` | cluster LOD with mesh shaders, and the error it may show (default 1 pixel) |
+| `--stats` | print how many triangles cluster LOD selected out of the full detail |
 | `--time S`, `--size WxH`, `--output FILE` | headless: animation time, image size, output path |
 | `--tonemap clamp\|reinhard\|aces`, `--exposure X` | tone mapping |
 | `--backend vulkan\|metal` | the GPU backend (Metal on Apple platforms only; Vulkan there runs on MoltenVK) |
@@ -71,7 +78,7 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | `render_graph` | culling, versions, barriers, lifetimes, attachments, validation of declarations, DOT export | no |
 | `render_view` | projection, camera, transforms, meshes and tangents, frustum culling, sorting, meshlets and their culling tests, sphere projection, textures and mips, materials, blending and masking in the software rasterizer, OBJ and glTF loading | no |
 | `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
-| `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too | yes (skips without one) |
+| `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too. Then with cluster LOD, against `test/golden/*.lod.ppm` | yes (skips without one) |
 | `golden_metal` | the same goldens through the Metal backend, vertex shaders only (Apple platforms) | yes |
 
 The golden test reads a few environment variables:

@@ -204,6 +204,32 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
 }
 
 // Uploads the view's FrameUniforms and returns a set 0 descriptor set pointing at them.
+// What @p view draws: its items, their triangles, and the triangles of the meshlets cluster LOD picks for
+// them (the task shader's lodSelected, repeated on the CPU from the mesh cache's copies of the meshlets).
+phox::FrameStatistics countStatistics(const phox::RenderView &view, const phox::vk::MeshCache &meshes,
+                                      float lodErrorPixels) {
+    phox::FrameStatistics statistics;
+    const float pixelsPerUnit = std::abs(view.proj[1][1]) * 0.5f * static_cast<float>(view.extent.height);
+    for (const auto *items : {&view.draws, &view.transparent}) {
+        for (const phox::DrawItem &draw : *items) {
+            ++statistics.draws;
+            statistics.triangles += draw.mesh->triangleCount();
+            const phox::vk::MeshCache::GpuMesh &mesh = meshes.get(*draw.mesh);
+            if (!meshes.meshlets() || mesh.meshletInfo.empty()) {
+                statistics.lodTriangles += draw.mesh->triangleCount();
+                continue;
+            }
+            const phox::vec3 camera = glm::inverse(draw.model) * phox::vec4(view.cameraPosition, 1.0f);
+            for (const phox::Meshlet &meshlet : mesh.meshletInfo) {
+                if (phox::lodSelected(meshlet, camera, pixelsPerUnit, lodErrorPixels)) {
+                    statistics.lodTriangles += meshlet.triangleCount;
+                }
+            }
+        }
+    }
+    return statistics;
+}
+
 // Set 0 of the forward pipelines: the view's FrameUniforms and its material table, one entry per item
 // (view.draws, then view.transparent), with texture slots from @p textures.
 VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &frame, phox::vk::PipelineCache &pipelines,
@@ -299,7 +325,7 @@ void Renderer::initialize(const RendererConfig &config) {
         }
         m_transients = std::make_unique<TransientPool>(*m_device);
         const bool meshShaders = createPipelines();
-        m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders);
+        m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders, m_config.meshLod, m_config.collectStatistics);
         m_textures = std::make_unique<TextureCache>(*m_device, *m_pipelines);
         if (meshShaders && m_config.meshletCulling && m_config.occlusionCulling) {
             if (m_depthFormat == Format::D32Float) {
@@ -311,11 +337,12 @@ void Renderer::initialize(const RendererConfig &config) {
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
-        log::info("renderer initialized on {}{}, drawing with {}", m_deviceName, m_validation ? " (validation on)" : "",
+        log::info("renderer initialized on {}{}, drawing with {}{}", m_deviceName, m_validation ? " (validation on)" : "",
                   !meshShaders              ? "vertex shaders"
                   : m_visibility            ? "mesh shaders (frustum, cone and occlusion culling)"
                   : m_config.meshletCulling ? "mesh shaders (frustum and cone culling)"
-                                            : "mesh shaders (no meshlet culling)");
+                                            : "mesh shaders (no meshlet culling)",
+                  m_meshes->lod() ? fmt::format(", cluster LOD at {} px", m_config.lodErrorPixels) : std::string());
     } catch (const std::exception &e) {
         log::warn("Vulkan initialization failed, using the software fallback renderer: {}", e.what());
         releaseVulkan();
@@ -378,6 +405,7 @@ RendererInfo Renderer::info() const {
     result.validationWarnings = m_validationCounters.warnings.load();
     result.meshShaders = !m_useFallback && m_meshes && m_meshes->meshlets();
     result.occlusionCulling = !m_useFallback && m_visibility != nullptr;
+    result.meshLod = !m_useFallback && m_meshes && m_meshes->lod();
     return result;
 }
 
@@ -497,8 +525,12 @@ void Renderer::render(const Scene &scene) {
         occlusion.frame = &visibility;
         executor.bindBuffer(occlusion.visibility, m_visibility->buffer().handle());
     }
-    const ForwardPassOutput forward = addForwardPass(graph, view, sets, hdr, depth, *m_meshes, *m_pipelines,
-                                                     m_config.meshletCulling, m_visibility ? &occlusion : nullptr);
+    const ForwardPassOutput forward =
+        addForwardPass(graph, view, sets, hdr, depth, *m_meshes, *m_pipelines,
+                       MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_visibility ? &occlusion : nullptr);
+    if (m_config.collectStatistics) {
+        m_statistics = countStatistics(view, *m_meshes, m_config.lodErrorPixels);
+    }
 
     ImageHandle backbuffer;
     if (windowed) {

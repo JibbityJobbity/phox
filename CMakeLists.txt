@@ -69,8 +69,8 @@ CPMFindPackage(
   GIT_TAG 1.0.1
 )
 
-# Meshlets and vertex cache ordering (phox/Meshlets.hpp).
-CPMAddPackage("gh:zeux/meshoptimizer@0.22")
+# Meshlets, cluster LOD and vertex cache ordering (phox/Meshlets.hpp).
+CPMAddPackage("gh:zeux/meshoptimizer@1.3")
 
 CPMAddPackage(
   NAME assimp

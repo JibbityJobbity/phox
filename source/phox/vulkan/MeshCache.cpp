@@ -8,6 +8,7 @@
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 
+#include <chrono>
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
@@ -15,7 +16,8 @@
 
 namespace phox::vk {
 
-MeshCache::MeshCache(Device &device, bool meshlets) : m_device(device), m_meshlets(meshlets) {}
+MeshCache::MeshCache(Device &device, bool meshlets, bool lod, bool keepMeshlets)
+    : m_device(device), m_meshlets(meshlets), m_lod(meshlets && lod), m_keepMeshlets(keepMeshlets) {}
 
 MeshCache::~MeshCache() = default;
 
@@ -63,7 +65,9 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
         };
         const std::vector<std::uint32_t> indices = optimizeIndexOrder(mesh);
         if (m_meshlets) {
-            MeshletMesh meshlets = buildMeshlets(mesh, indices);
+            const auto start = std::chrono::steady_clock::now();
+            MeshletMesh meshlets = m_lod ? buildMeshletLod(mesh, indices) : buildMeshlets(mesh, indices);
+            const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             // The data follows the meshlets in the buffer: make its offsets count from the buffer's start.
             const auto dataStart =
                 static_cast<std::uint32_t>(meshlets.meshlets.size() * sizeof(Meshlet) / sizeof(std::uint32_t));
@@ -82,8 +86,14 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
                                      {meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size()}},
                                     usageBit(BufferUsage::StorageRead), "meshlets");
             entry.meshletCount = static_cast<std::uint32_t>(meshlets.meshlets.size());
-            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets)", mesh.id(), mesh.version(),
-                       mesh.triangleCount(), meshlets.meshlets.size());
+            entry.lodLevels = meshlets.levels;
+            if (m_keepMeshlets) {
+                entry.meshletInfo = meshlets.meshlets;
+            }
+            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets, {} LOD level(s), {} triangles "
+                       "in all; built in {:.1f} ms)",
+                       mesh.id(), mesh.version(), mesh.triangleCount(), meshlets.meshlets.size(), meshlets.levels,
+                       meshlets.triangleCount(), buildMs);
         } else {
             entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
                                     usageBit(BufferUsage::Vertex), "vertices");

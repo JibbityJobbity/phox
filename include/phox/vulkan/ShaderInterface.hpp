@@ -33,8 +33,12 @@ struct MeshletDrawPushConstants {
     std::uint32_t flags = 0;            ///< kMeshletFrustumCulling | kMeshletConeCulling
     std::uint32_t visibilityOffset = 0; ///< occlusion culling: the draw's first word of visibility bits
     std::uint32_t material = 0;         ///< index into the frame's MaterialData array
+    /// Cluster LOD: the error, in pixels, a meshlet may show (phox::lodSelected). Meshlets without a
+    /// hierarchy (level 0, no parent) pass whatever it is.
+    float lodThreshold = 1.0f;
+    std::uint32_t padding[3]{};
 };
-static_assert(sizeof(MeshletDrawPushConstants) == 112, "must match MeshletDrawPushConstants in shaders/common.glsl");
+static_assert(sizeof(MeshletDrawPushConstants) == 128, "must match MeshletDrawPushConstants in shaders/common.glsl");
 
 /// Push constants of the depth pyramid build (shaders/depthpyramid.comp), compute stage.
 struct DepthPyramidPushConstants {

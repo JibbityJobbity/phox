@@ -1,11 +1,13 @@
 #ifndef PHOX_VULKAN_MESH_CACHE_HPP
 #define PHOX_VULKAN_MESH_CACHE_HPP
 
+#include "phox/Meshlets.hpp"
 #include "phox/vulkan/VulkanCommon.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace phox {
 class Mesh;
@@ -35,14 +37,20 @@ public:
         /// from the start of the buffer, so shaders read both through one address.
         std::unique_ptr<Buffer> meshlets;
         std::uint32_t indexCount = 0;
-        std::uint32_t meshletCount = 0;
+        std::uint32_t meshletCount = 0; ///< of every LOD level
+        std::uint32_t lodLevels = 1;
+        /// A CPU copy of the meshlets, kept only with statistics on (MeshCache's @p keepMeshlets).
+        std::vector<Meshlet> meshletInfo;
         std::uint64_t version = 0;
         std::uint64_t lastUsed = 0;
     };
 
     /// @param meshlets  upload meshlets for task and mesh shaders instead of index buffers. Needs a device
     ///                  with mesh shaders.
-    MeshCache(Device &device, bool meshlets);
+    /// @param lod       meshlet path: build each mesh's cluster LOD hierarchy (phox::buildMeshletLod);
+    ///                  otherwise only its full-detail meshlets
+    /// @param keepMeshlets  keep a CPU copy of each mesh's meshlets in GpuMesh::meshletInfo
+    MeshCache(Device &device, bool meshlets, bool lod = false, bool keepMeshlets = false);
     ~MeshCache();
     MeshCache(const MeshCache &) = delete;
     MeshCache &operator=(const MeshCache &) = delete;
@@ -60,10 +68,14 @@ public:
     std::size_t size() const { return m_meshes.size(); }
     /// Meshes are uploaded as meshlets, for task and mesh shaders.
     bool meshlets() const { return m_meshlets; }
+    /// Meshlets come with cluster LOD hierarchies.
+    bool lod() const { return m_lod; }
 
 private:
     Device &m_device;
     bool m_meshlets;
+    bool m_lod;
+    bool m_keepMeshlets;
     std::unordered_map<std::uint64_t, GpuMesh> m_meshes;
 };
 
