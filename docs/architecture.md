@@ -503,6 +503,38 @@ instead, whose rule 1 it fits: a compute pass writes it and the forward pass rea
   with async compute on and off and with the scene on the vertex and mesh shader paths. `PhoxSample --waves`
   adds it to any scene.
 
+### 6.6 The fluid sample
+
+`standalone/fluid/` builds `PhoxFluid` (a static library: solvers, the frame feature, compute shaders compiled
+to its own directory and found through `FrameFeature::shaderDirectories`) and `PhoxFluidSample`; the tests add
+the same directory for `fluid_test`.
+
+- `fluid::FluidSolver`: a 2D fluid on an n x n grid over the unit square with solid walls. `beginFrame` imports
+  its persistent state, `step` adds one step's passes (any number per frame), `outputs` gives the step's
+  density (float per cell) and velocity (vec2 per cell). Inputs are the same for every solver
+  (`FluidInputs`: a time step and up to three Gaussian splats of force and dye), each scaling force to its
+  units. Every pass is `async()`.
+- `fluid::PersistentBuffer` imports a buffer with the async compute queue as its home, so it arrives from and
+  returns to the async queue's earlier work. `dispatchGrid` adds one pass of one shader over the grid, with
+  reads and writes as storage buffers in `SetLayout::ComputeStorage` and up to 128 bytes of push constants.
+- `StableFluids`: forces and dye in place; advection into the other buffer of each pair; divergence into a
+  transient; Jacobi iterations ping-ponging two pressure buffers (warm-started from the last step);
+  projection in place. Each pair's latest buffer is the only one imported with its contents. On a collocated
+  grid, central-difference divergence and the five-point Laplacian do not match exactly, so the projection
+  leaves about 1% relative divergence however many iterations it runs (0.75 without it, 0.02 after 40).
+- `LatticeBoltzmann`: one fused pass per step pulls the nine populations from the neighbours (half-way
+  bounce-back at walls), relaxes them (BGK, forces by velocity shift) into the other buffer, and writes
+  density and velocity. Mass is conserved to rounding (4096.01 of 4096 cells after 240 stirred steps).
+- `FluidFeature` runs the solver's steps, then "fluid surface" turns the density into a heightfield of
+  unindexed vertices and an indirect draw (6.5). Pipelined, it writes one of two surface buffers each frame
+  and draws the other, from the frame before: the draw then waits only for the async queue's earlier work
+  (3.6), and the queues overlap; the test checks that pipelined frame n + 1 is pixel for pixel frame n
+  unpipelined. `requestReadback()` copies the fields to host buffers for tests.
+
+On the RTX 3080 (release build, 512 x 512 stable fluids with 150 iterations, 1080p headless), async compute
+with pipelining takes 3.5 ms a frame and the other three combinations 3.7 ms: the scene's graphics work is
+small next to the solver's, and headless frames wait for each other.
+
 ## 7. Upload and caches
 
 - `UploadArena`: one host-visible, persistently mapped buffer per frame context, bump-allocated and reset at
@@ -567,7 +599,8 @@ shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, f
                               forward_early.task and forward_late.task, depthpyramid.comp, fullscreen.vert,
                               tonemap.frag, wavesurface.comp
 shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
-test/source/                  render_graph_test, render_view_test, scene_test, golden_test, generated_test
+test/source/                  render_graph_test, render_view_test, scene_test, golden_test, generated_test, fluid_test
+standalone/fluid/             the fluid sample: PhoxFluid (include/fluid, source, shaders) and main.cpp
 test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials; each also .lod.ppm
 ```
 

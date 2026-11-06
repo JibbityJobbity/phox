@@ -1,0 +1,42 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// Stable fluids, step 2: semi-Lagrangian advection of velocity and dye by the velocity. Each cell traces
+// back along the velocity and samples there (bilinear, clamped to the grid).
+
+layout(set = 0, binding = 0, std430) readonly buffer VelocityIn { vec2 data[]; } velocityIn;
+layout(set = 0, binding = 1, std430) readonly buffer DyeIn { float data[]; } dyeIn;
+layout(set = 0, binding = 2, std430) writeonly buffer VelocityOut { vec2 data[]; } velocityOut;
+layout(set = 0, binding = 3, std430) writeonly buffer DyeOut { float data[]; } dyeOut;
+layout(push_constant) uniform Params {
+    uint n;
+    float dt;
+    float velocityDissipation; // per second
+    float dyeDissipation;      // per second
+} params;
+
+// Bilinear weights and corners around x, in cell units (cell centres at integer + 0.5).
+void corners(vec2 x, out ivec2 c0, out ivec2 c1, out vec2 f) {
+    const vec2 g = clamp(x - 0.5, vec2(0.0), vec2(float(params.n - 1)));
+    c0 = ivec2(floor(g));
+    c1 = min(c0 + 1, ivec2(params.n - 1));
+    f = g - vec2(c0);
+}
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    const uint n = params.n;
+    if (outside(c, n)) return;
+    const uint i = cellIndex(c, n);
+    // Velocities are in domain units per second; a cell is 1 / n of the domain.
+    const vec2 x = vec2(c) + 0.5 - params.dt * velocityIn.data[i] * float(n);
+    ivec2 c0, c1;
+    vec2 f;
+    corners(x, c0, c1, f);
+    const uint i00 = cellIndex(c0, n), i10 = cellIndex(ivec2(c1.x, c0.y), n);
+    const uint i01 = cellIndex(ivec2(c0.x, c1.y), n), i11 = cellIndex(c1, n);
+    const vec2 u = mix(mix(velocityIn.data[i00], velocityIn.data[i10], f.x), mix(velocityIn.data[i01], velocityIn.data[i11], f.x), f.y);
+    const float d = mix(mix(dyeIn.data[i00], dyeIn.data[i10], f.x), mix(dyeIn.data[i01], dyeIn.data[i11], f.x), f.y);
+    velocityOut.data[i] = u * exp(-params.velocityDissipation * params.dt);
+    dyeOut.data[i] = d * exp(-params.dyeDissipation * params.dt);
+}

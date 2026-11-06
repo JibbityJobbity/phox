@@ -62,6 +62,12 @@ add_test(NAME golden COMMAND PhoxGoldenTests vulkan WORKING_DIRECTORY ${CMAKE_CU
 set_tests_properties(golden PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME generated COMMAND PhoxGeneratedTests)
 set_tests_properties(generated PROPERTIES SKIP_RETURN_CODE 77)
+# The fluid sample's solvers (standalone/fluid) on the GPU, read back.
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../standalone/fluid ${CMAKE_CURRENT_BINARY_DIR}/fluid)
+phox_add_test_executable(PhoxFluidTests source/fluid_test.cpp)
+target_link_libraries(PhoxFluidTests PRIVATE PhoxFluid)
+add_test(NAME fluid COMMAND PhoxFluidTests)
+set_tests_properties(fluid PROPERTIES SKIP_RETURN_CODE 77)
 # The same goldens through the Metal backend (PHOX_ENABLE_METAL comes from Phox's CMakeLists).
 if(PHOX_ENABLE_METAL)
   add_test(NAME golden_metal COMMAND PhoxGoldenTests metal WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

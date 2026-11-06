@@ -19,7 +19,7 @@ class Device;
 /// only where the queries can be reset from the CPU (Device::hostQueryReset).
 class PassTimer {
 public:
-    static constexpr std::uint32_t kMaxPasses = 32;
+    static constexpr std::uint32_t kMaxPasses = 256;
 
     explicit PassTimer(Device &device);
     ~PassTimer();

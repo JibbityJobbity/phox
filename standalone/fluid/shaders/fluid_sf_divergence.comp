@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// Stable fluids, step 3: the velocity's divergence, by central differences. Outside the box the velocity
+// is zero (solid walls). Keep in step with divergence() in the fluid tests.
+
+layout(set = 0, binding = 0, std430) readonly buffer Velocity { vec2 data[]; } velocity;
+layout(set = 0, binding = 1, std430) writeonly buffer Divergence { float data[]; } divergence;
+layout(push_constant) uniform Params { uint n; } params;
+
+vec2 at(ivec2 c) { return outside(c, params.n) ? vec2(0.0) : velocity.data[cellIndex(c, params.n)]; }
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.n)) return;
+    const float halfInverseH = 0.5 * float(params.n);
+    divergence.data[cellIndex(c, params.n)] =
+        halfInverseH * (at(c + ivec2(1, 0)).x - at(c - ivec2(1, 0)).x + at(c + ivec2(0, 1)).y - at(c - ivec2(0, 1)).y);
+}

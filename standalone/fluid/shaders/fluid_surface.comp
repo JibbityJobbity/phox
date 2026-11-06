@@ -1,0 +1,62 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// The fluid's surface: a heightfield over the grid's cell centres, height = (field - base) * scale,
+// written as unindexed phox::Vertex triangles (two per square between four centres) with the indirect
+// command that draws them. Normals from central differences.
+
+layout(set = 0, binding = 0, std430) readonly buffer Field { float data[]; } field;
+layout(set = 0, binding = 1, std430) writeonly buffer Vertices { float data[]; } vertices;
+layout(set = 0, binding = 2, std430) writeonly buffer Indirect {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+} indirect;
+layout(push_constant) uniform Params {
+    uint n;
+    float size;   // world units across
+    float base;
+    float scale;
+} params;
+
+float heightAt(ivec2 c) {
+    c = clamp(c, ivec2(0), ivec2(params.n - 1));
+    return (field.data[cellIndex(c, params.n)] - params.base) * params.scale;
+}
+
+vec2 xz(ivec2 c) { return (vec2(c) / float(params.n - 1) - 0.5) * params.size; }
+
+void writeVertex(uint index, ivec2 c) {
+    const float spacing = params.size / float(params.n - 1);
+    const float dx = (heightAt(c + ivec2(1, 0)) - heightAt(c - ivec2(1, 0))) / (2.0 * spacing);
+    const float dz = (heightAt(c + ivec2(0, 1)) - heightAt(c - ivec2(0, 1))) / (2.0 * spacing);
+    const vec3 normal = normalize(vec3(-dx, 1.0, -dz));
+    vec3 tangent = vec3(1.0, dx, 0.0);
+    tangent = normalize(tangent - normal * dot(normal, tangent));
+    const vec2 p = xz(c);
+    const vec2 uv = vec2(c) / float(params.n - 1);
+    const float values[12] = float[12](p.x, heightAt(c), p.y, normal.x, normal.y, normal.z, uv.x, uv.y, tangent.x,
+                                       tangent.y, tangent.z, -1.0);
+    for (uint i = 0; i < 12; ++i) vertices.data[index * 12 + i] = values[i];
+}
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    const uint squares = params.n - 1;
+    if (c.x == 0 && c.y == 0) {
+        indirect.vertexCount = squares * squares * 6;
+        indirect.instanceCount = 1;
+        indirect.firstVertex = 0;
+        indirect.firstInstance = 0;
+    }
+    if (outside(c, squares)) return;
+    // Counter-clockwise seen from +y, as Mesh::plane; +z is the grid's +y.
+    const uint base = (uint(c.y) * squares + uint(c.x)) * 6;
+    writeVertex(base + 0, c + ivec2(0, 1));
+    writeVertex(base + 1, c + ivec2(1, 1));
+    writeVertex(base + 2, c + ivec2(1, 0));
+    writeVertex(base + 3, c + ivec2(0, 1));
+    writeVertex(base + 4, c + ivec2(1, 0));
+    writeVertex(base + 5, c);
+}

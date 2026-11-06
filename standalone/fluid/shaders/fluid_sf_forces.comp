@@ -1,0 +1,30 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// Stable fluids, step 1: the splats push the velocity and add dye.
+
+layout(set = 0, binding = 0, std430) buffer Velocity { vec2 data[]; } velocity;
+layout(set = 0, binding = 1, std430) buffer Dye { float data[]; } dye;
+layout(push_constant) uniform Params {
+    uint n;
+    float dt;
+    uint splatCount;
+    float pad;
+    Splat splats[kMaxSplats];
+} params;
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.n)) return;
+    const uint i = cellIndex(c, params.n);
+    const vec2 p = cellCentre(c, params.n);
+    vec2 u = velocity.data[i];
+    float d = dye.data[i];
+    for (uint s = 0; s < min(params.splatCount, kMaxSplats); ++s) {
+        const float w = splatWeight(params.splats[s], p);
+        u += params.dt * params.splats[s].positionForce.zw * w;
+        d += params.dt * params.splats[s].radiusAmount.y * w;
+    }
+    velocity.data[i] = u;
+    dye.data[i] = d;
+}

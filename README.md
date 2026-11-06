@@ -72,6 +72,39 @@ Useful options:
 To run on lavapipe instead of your GPU, as CI does: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD ./build-standalone/PhoxSample`.
 Logging goes to stderr; `PHOX_LOG=debug|info|warn|error|off` sets the level.
 
+## Fluid sample
+
+`PhoxFluidSample` (`standalone/fluid/`, built with the standalone project) simulates a 2D fluid on the GPU
+and draws it as a surface the GPU builds every frame. Its solvers share one interface, `fluid::FluidSolver`:
+a solver imports its state into each frame's render graph and adds compute passes that run on the async
+compute queue where the device has one, and every solver leaves a density and a velocity field for the
+surface. Two are included:
+
+- `--solver stable`: incompressible Navier-Stokes after Stam's *Stable Fluids* (forces and dye,
+  semi-Lagrangian advection, then a pressure projection with Jacobi iterations). The surface is the dye.
+- `--solver lbm`: the lattice Boltzmann method on a D2Q9 lattice (streaming with bounce-back walls, BGK
+  collision, the emitters as a body force). Weakly compressible, so the surface shows its pressure: dips in
+  the vortex cores and waves running off them.
+
+```bash
+./build-standalone/PhoxFluidSample --window                  # stable fluids, until the window is closed
+./build-standalone/PhoxFluidSample --solver lbm --window
+./build-standalone/PhoxFluidSample --solver lbm --frames 300 --output build/fluid.ppm   # headless
+```
+
+| Option | Effect |
+| --- | --- |
+| `--solver stable\|lbm` | the solver |
+| `--resolution N`, `--steps N`, `--iterations N` | cells a side; solver steps per frame; Jacobi iterations per step (stable) |
+| `--pipelined on\|off` | draw the previous frame's surface while this frame simulates, so the queues overlap (default on) |
+| `--async-compute on\|off` | simulate on a separate compute queue where the GPU has one |
+| `--window`, `--frames N`, `--size WxH`, `--output FILE`, `--debug`, `--device NAME` | as for PhoxSample |
+
+A new solver implements `FluidSolver` (`standalone/fluid/include/fluid/FluidSolver.hpp`): `initialize` its
+buffers (`fluid::PersistentBuffer`), import them in `beginFrame`, add a step's passes with `fluid::dispatchGrid`
+(one compute shader invocation per cell, at most four storage buffers) and report its fields in `outputs()`.
+Its shaders go in `standalone/fluid/shaders/` and the list in `standalone/fluid/CMakeLists.txt`.
+
 ## Tests
 
 ```bash
@@ -85,6 +118,7 @@ cmake -S test -B build-test && cmake --build build-test && ctest --test-dir buil
 | `scene_smoke` | the sample scenes, one headless frame (GPU or software fallback) and its GPU pass timings | optional |
 | `golden` | renders the sample scenes with vertex shaders, with mesh shaders and occlusion culling, and with mesh shaders and frustum and cone culling only, and compares each with `test/golden/*.ppm`; the software rasterizer must match them too. Then with cluster LOD, against `test/golden/*.lod.ppm` | yes (skips without one) |
 | `generated` | geometry generated on the GPU (`vk::WaveSurface`, drawn indirectly) matches the same mesh drawn from the scene, with async compute on and off | yes (skips without one) |
+| `fluid` | the fluid solvers, read back: at rest they stay at rest; stable fluids' projection removes the divergence; lattice Boltzmann conserves mass and stays below the lattice's speed limit; both queues compute the same fields bit for bit; a pipelined frame shows the previous frame's surface | yes (skips without one) |
 | `golden_metal` | the same goldens through the Metal backend, vertex shaders only (Apple platforms) | yes |
 
 The golden test reads a few environment variables:

@@ -26,6 +26,10 @@ cd build-mac-test && PHOX_VALIDATION=1 PHOX_REQUIRE_GPU=1 ctest --output-on-fail
 
 On macOS ctest also runs `golden_metal` (the same goldens through the Metal backend).
 
+The standalone project also builds `PhoxFluidSample` (`standalone/fluid/`, Vulkan only): 2D fluid solvers
+behind `fluid::FluidSolver` on the async compute queue, drawn as GPU-generated geometry. Its shaders are
+compiled by `standalone/fluid/CMakeLists.txt`, which the tests also add (`fluid_test`).
+
 (On Linux the README uses `build-standalone` / `build-test`.)
 
 ## Portability notes

@@ -29,3 +29,9 @@ target_link_libraries(${PROJECT_NAME} Phox::Phox cxxopts::cxxopts)
 # The same baseline frame through the RHI stack: forward technique, render graph, RHI Vulkan backend.
 add_executable(PhoxRhiSample ${CMAKE_CURRENT_SOURCE_DIR}/rhi/main.cpp)
 target_link_libraries(PhoxRhiSample PRIVATE PhoxTechniques PhoxScene PhoxCore cxxopts::cxxopts)
+
+# The fluid sample: swappable 2D fluid solvers on the async compute queue, drawn as a GPU-made surface.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/fluid ${CMAKE_CURRENT_BINARY_DIR}/fluid)
+add_executable(PhoxFluidSample ${CMAKE_CURRENT_SOURCE_DIR}/fluid/main.cpp)
+target_link_libraries(PhoxFluidSample PRIVATE PhoxFluid cxxopts::cxxopts)
+set_target_properties(PhoxFluidSample PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)

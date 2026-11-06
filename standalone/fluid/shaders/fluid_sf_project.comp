@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// Stable fluids, step 5: subtract the pressure gradient, leaving the velocity (nearly) divergence free.
+// Each cell writes only its own velocity, so the velocity is updated in place.
+
+layout(set = 0, binding = 0, std430) readonly buffer Pressure { float data[]; } pressure;
+layout(set = 0, binding = 1, std430) buffer Velocity { vec2 data[]; } velocity;
+layout(push_constant) uniform Params { uint n; } params;
+
+float at(ivec2 c, float own) { return outside(c, params.n) ? own : pressure.data[cellIndex(c, params.n)]; }
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.n)) return;
+    const uint i = cellIndex(c, params.n);
+    const float own = pressure.data[i];
+    const float halfInverseH = 0.5 * float(params.n);
+    const vec2 gradient = halfInverseH * vec2(at(c + ivec2(1, 0), own) - at(c - ivec2(1, 0), own),
+                                              at(c + ivec2(0, 1), own) - at(c - ivec2(0, 1), own));
+    velocity.data[i] -= gradient;
+}
