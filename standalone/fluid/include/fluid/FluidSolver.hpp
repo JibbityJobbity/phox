@@ -6,6 +6,7 @@
 #include "phox/vulkan/FrameFeature.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -30,8 +31,10 @@ inline constexpr std::size_t kMaxSplats = 3; // shaders/fluid_common.glsl
 
 /// What a step leaves in the graph, n x n cells each (row by row, y up), for the surface and for tests.
 struct FluidOutputs {
-    phox::BufferHandle density;  ///< float per cell: the dye (stable fluids) or the density (lattice Boltzmann)
+    phox::BufferHandle density;  ///< float per cell: the dye (stable fluids) or the density (lattice Boltzmann, SPH)
     phox::BufferHandle velocity; ///< vec2 per cell, domain units per second (lattice units for LBM)
+    /// Particle solvers: vec4 per particle, position in the unit square (xy) and velocity (zw).
+    std::optional<phox::BufferHandle> particles;
 };
 
 /// A 2D fluid on an n x n grid over the unit square, with solid walls. Its state lives in buffers it owns
@@ -50,6 +53,8 @@ public:
     virtual void reset() = 0;
     /// The density a fluid at rest has (the surface's base height).
     virtual float restDensity() const = 0;
+    /// Particle solvers: how many particles FluidOutputs::particles holds.
+    virtual std::uint32_t particleCount() const { return 0; }
 
     /// Imports this frame's state. Call before step().
     virtual void beginFrame(phox::vk::FrameFeatureContext &context) = 0;

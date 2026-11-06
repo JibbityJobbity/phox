@@ -5,7 +5,8 @@ find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 
 set(PHOX_FLUID_SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(PHOX_FLUID_SHADER_INCLUDES ${CMAKE_CURRENT_LIST_DIR}/shaders/fluid_common.glsl
-                               ${CMAKE_CURRENT_LIST_DIR}/shaders/fluid_lbm_common.glsl)
+                               ${CMAKE_CURRENT_LIST_DIR}/shaders/fluid_lbm_common.glsl
+                               ${CMAKE_CURRENT_LIST_DIR}/shaders/fluid_sph_common.glsl)
 set(PHOX_FLUID_SHADER_SPV)
 foreach(
   shader
@@ -16,6 +17,14 @@ foreach(
   fluid_sf_project.comp
   fluid_lbm_init.comp
   fluid_lbm_step.comp
+  fluid_sph_init.comp
+  fluid_sph_count.comp
+  fluid_sph_scan.comp
+  fluid_sph_scatter.comp
+  fluid_sph_sort.comp
+  fluid_sph_density.comp
+  fluid_sph_integrate.comp
+  fluid_sph_fields.comp
   fluid_surface.comp
 )
   set(spv ${PHOX_FLUID_SHADER_OUTPUT_DIR}/${shader}.spv)
@@ -34,7 +43,8 @@ add_custom_target(PhoxFluidShaders DEPENDS ${PHOX_FLUID_SHADER_SPV})
 add_library(
   PhoxFluid STATIC
   ${CMAKE_CURRENT_LIST_DIR}/source/Persistent.cpp ${CMAKE_CURRENT_LIST_DIR}/source/StableFluids.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/source/LatticeBoltzmann.cpp ${CMAKE_CURRENT_LIST_DIR}/source/FluidFeature.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/source/LatticeBoltzmann.cpp ${CMAKE_CURRENT_LIST_DIR}/source/SmoothedParticles.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/source/FluidFeature.cpp
 )
 add_dependencies(PhoxFluid PhoxFluidShaders)
 target_include_directories(PhoxFluid PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)

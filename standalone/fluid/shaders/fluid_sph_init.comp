@@ -1,0 +1,14 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+#include "fluid_sph_common.glsl"
+// The tank filled with particles at rest on a square lattice, one per cell of the side x side grid.
+
+layout(set = 0, binding = 0, std430) writeonly buffer State { vec4 data[]; } state;
+layout(push_constant) uniform Params { SphCommon c; } params;
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.c.side)) return;
+    state.data[cellIndex(c, params.c.side)] = vec4(cellCentre(c, params.c.side), 0.0, 0.0);
+}

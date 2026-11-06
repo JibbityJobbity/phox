@@ -4,6 +4,7 @@
 #include "fluid/FluidSolver.hpp"
 #include "fluid/Persistent.hpp"
 
+#include "phox/Camera.hpp"
 #include "phox/Scene.hpp"
 #include "phox/vulkan/FrameFeature.hpp"
 
@@ -15,6 +16,12 @@
 #include <vector>
 
 namespace fluid {
+
+/// Where a point on the screen (0 to 1 across and down) looks at the fluid's surface, in the unit square
+/// the grid covers: a ray from @p camera against the plane the surface rests on (its local y = 0, @p size
+/// across, placed by @p model). Empty if the ray misses the surface. For pushing the fluid with the mouse.
+std::optional<phox::vec2> pointOnSurface(const phox::Camera &camera, float x, float y, float aspect,
+                                         const phox::mat4 &model, float size);
 
 /// Runs a FluidSolver in every frame of a vk::Renderer and draws its density as a surface: a compute pass
 /// turns the density into a heightfield (GPU-generated geometry), which the forward pass draws.
@@ -40,6 +47,7 @@ public:
         std::uint32_t resolution = 0;
         std::vector<float> density;         ///< n * n
         std::vector<phox::vec2> velocity;   ///< n * n
+        std::vector<phox::vec4> particles;  ///< particle solvers: position xy, velocity zw
     };
 
     FluidFeature(std::unique_ptr<FluidSolver> solver, Settings settings);
@@ -67,9 +75,10 @@ private:
     std::array<PersistentBuffer, 2> m_vertices, m_indirect;
     std::array<bool, 2> m_written{};
     std::uint64_t m_frames = 0;
-    std::unique_ptr<phox::vk::Buffer> m_readbackDensity, m_readbackVelocity; ///< host-visible
+    std::unique_ptr<phox::vk::Buffer> m_readbackDensity, m_readbackVelocity, m_readbackParticles; ///< host-visible
     bool m_readbackRequested = false;
     bool m_readbackPending = false;
+    bool m_lastReadbackHadParticles = false;
 };
 
 } // namespace fluid

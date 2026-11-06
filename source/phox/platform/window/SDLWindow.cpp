@@ -50,6 +50,22 @@ bool SDLWindow::pollEvents() {
             (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE)) {
             m_closeRequested = true;
         }
+        if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_LEAVE) {
+            m_pointer.inside = false;
+        }
+        if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) && event.button.button == SDL_BUTTON_LEFT) {
+            m_pointer.pressed = event.type == SDL_MOUSEBUTTONDOWN;
+        }
+    }
+    // Mouse coordinates are in window units, which differ from the drawable's pixels on HiDPI displays.
+    int x = 0, y = 0, width = 0, height = 0;
+    const Uint32 buttons = SDL_GetMouseState(&x, &y);
+    SDL_GetWindowSize(m_window, &width, &height);
+    if ((SDL_GetWindowFlags(m_window) & SDL_WINDOW_MOUSE_FOCUS) != 0 && width > 0 && height > 0) {
+        m_pointer.inside = true;
+        m_pointer.x = static_cast<float>(x) / static_cast<float>(width);
+        m_pointer.y = static_cast<float>(y) / static_cast<float>(height);
+        m_pointer.pressed = (buttons & SDL_BUTTON_LMASK) != 0;
     }
     return !m_closeRequested;
 }

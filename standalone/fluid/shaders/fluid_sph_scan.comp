@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+#include "fluid_sph_common.glsl"
+// Neighbour search, 2: each bin's slice of the sorted index list (start, count), and a cursor at its start
+// for the scatter. One group of 64 invocations: each sums a run of consecutive bins, one invocation
+// scans those 64 sums, and each then writes its run's starts.
+
+layout(set = 0, binding = 0, std430) readonly buffer Counts { uint data[]; } counts;
+layout(set = 0, binding = 1, std430) writeonly buffer Ranges { uvec2 data[]; } ranges;
+layout(set = 0, binding = 2, std430) writeonly buffer Cursor { uint data[]; } cursor;
+layout(push_constant) uniform Params { SphCommon c; } params;
+
+const uint kInvocations = 64; // the 8 x 8 group of fluid_common.glsl
+shared uint runStart[kInvocations];
+
+void main() {
+    const uint t = gl_LocalInvocationIndex;
+    const uint total = params.c.bins * params.c.bins;
+    const uint run = (total + kInvocations - 1) / kInvocations;
+    const uint begin = min(t * run, total);
+    const uint end = min(begin + run, total);
+    uint sum = 0;
+    for (uint b = begin; b < end; ++b) sum += counts.data[b];
+    runStart[t] = sum;
+    barrier();
+    if (t == 0) {
+        uint start = 0;
+        for (uint i = 0; i < kInvocations; ++i) {
+            const uint size = runStart[i];
+            runStart[i] = start;
+            start += size;
+        }
+    }
+    barrier();
+    uint start = runStart[t];
+    for (uint b = begin; b < end; ++b) {
+        const uint count = counts.data[b];
+        ranges.data[b] = uvec2(start, count);
+        cursor.data[b] = start;
+        start += count;
+    }
+}

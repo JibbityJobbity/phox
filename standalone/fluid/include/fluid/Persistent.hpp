@@ -41,7 +41,7 @@ private:
 };
 
 /// Adds an async compute pass running @p shader once per cell of a @p width x @p height grid, in 8 x 8
-/// groups, with set 0 (SetLayout::ComputeStorage) binding @p reads (StorageRead) and then @p writes
+/// groups, with set 0 (SetLayout::ComputeStorage, eight buffers at most) binding @p reads (StorageRead) and then @p writes
 /// (StorageWrite) in order, and @p push (at most 128 bytes) as push constants. Each write handle is
 /// replaced by the version the pass produces.
 void dispatchGrid(phox::vk::FrameFeatureContext &context, const std::string &name, const std::string &shader,

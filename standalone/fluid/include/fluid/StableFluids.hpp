@@ -29,7 +29,9 @@ public:
     float restDensity() const override { return 0.0f; }
     void beginFrame(phox::vk::FrameFeatureContext &context) override;
     void step(phox::vk::FrameFeatureContext &context, const FluidInputs &inputs) override;
-    FluidOutputs outputs() const override { return {m_dye[m_currentDye], m_velocity[m_currentVelocity]}; }
+    FluidOutputs outputs() const override {
+        return {m_dye[m_currentDye], m_velocity[m_currentVelocity], std::nullopt};
+    }
 
 private:
     Settings m_settings;

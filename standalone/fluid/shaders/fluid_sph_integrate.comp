@@ -1,0 +1,79 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+#include "fluid_sph_common.glsl"
+// Pressure (symmetric, so momentum is conserved), viscosity and the splats accelerate each particle; then
+// symplectic Euler, and the walls reflect what leaves the tank, damped.
+
+layout(set = 0, binding = 0, std430) readonly buffer State { vec4 data[]; } state;
+layout(set = 0, binding = 1, std430) readonly buffer Ranges { uvec2 data[]; } ranges;
+layout(set = 0, binding = 2, std430) readonly buffer Indices { uint data[]; } indices;
+layout(set = 0, binding = 3, std430) readonly buffer Pressure { vec2 data[]; } densityPressure;
+layout(set = 0, binding = 4, std430) writeonly buffer NextState { vec4 data[]; } next;
+layout(push_constant) uniform Params {
+    SphCommon c;
+    uint splatCount;
+    float forceScale;
+    float wallDamping;  // of the velocity across a wall
+    float drag;         // per second
+    float wallStiffness; // acceleration at a wall, falling to zero half a spacing from it
+    float splats[kMaxSplats * 6]; // position xy, force xy, radius, amount
+} params;
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.c.side)) return;
+    const uint i = cellIndex(c, params.c.side);
+    const vec2 p = state.data[i].xy;
+    vec2 v = state.data[i].zw;
+    const vec2 own = densityPressure.data[i];
+    const float h = params.c.h;
+    const ivec2 home = binOf(p, params.c.bins);
+
+    vec2 acceleration = vec2(0.0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ivec2 b = home + ivec2(dx, dy);
+            if (outside(b, params.c.bins)) continue;
+            const uvec2 range = ranges.data[binIndex(b, params.c.bins)];
+            for (uint k = range.x; k < range.x + range.y; ++k) {
+                const uint j = indices.data[k];
+                if (j == i) continue;
+                const vec4 other = state.data[j];
+                const vec2 r = p - other.xy;
+                const vec2 theirs = densityPressure.data[j];
+                acceleration -= params.c.mass * (own.y / (own.x * own.x) + theirs.y / (theirs.x * theirs.x)) *
+                                spikyGradient(r, h);
+                acceleration += params.c.viscosity * params.c.mass * (other.zw - v) / theirs.x *
+                                viscosityLaplacian(length(r), h);
+            }
+        }
+    }
+    // Walls push back closer than half a spacing, where no particle starts.
+    const float margin = 0.5 / float(params.c.side);
+    for (int axis = 0; axis < 2; ++axis) {
+        acceleration[axis] += params.wallStiffness * max(1.0 - p[axis] / margin, 0.0);
+        acceleration[axis] -= params.wallStiffness * max(1.0 - (1.0 - p[axis]) / margin, 0.0);
+    }
+    for (uint s = 0; s < min(params.splatCount, kMaxSplats); ++s) {
+        const uint o = s * 6;
+        const vec2 d = p - vec2(params.splats[o], params.splats[o + 1]);
+        const float radius = params.splats[o + 4];
+        acceleration += params.forceScale * vec2(params.splats[o + 2], params.splats[o + 3]) * exp(-dot(d, d) / (radius * radius));
+    }
+
+    v = (v + params.c.dt * acceleration) * exp(-params.drag * params.c.dt);
+    vec2 q = p + params.c.dt * v;
+    const float lo = 0.25 / float(params.c.side);
+    const float hi = 1.0 - lo;
+    for (int axis = 0; axis < 2; ++axis) {
+        if (q[axis] < lo) {
+            q[axis] = lo;
+            v[axis] = abs(v[axis]) * params.wallDamping;
+        } else if (q[axis] > hi) {
+            q[axis] = hi;
+            v[axis] = -abs(v[axis]) * params.wallDamping;
+        }
+    }
+    next.data[i] = vec4(q, v);
+}

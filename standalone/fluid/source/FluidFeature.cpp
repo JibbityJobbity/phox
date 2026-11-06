@@ -4,6 +4,7 @@
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,24 @@ struct SurfacePush {
 };
 
 } // namespace
+
+std::optional<vec2> pointOnSurface(const Camera &camera, float x, float y, float aspect, const mat4 &model, float size) {
+    // Into the surface's own space, where it is the plane y = 0.
+    const mat4 inverse = glm::inverse(camera.projection(aspect) * camera.view() * model);
+    const vec2 ndc{2.0f * x - 1.0f, 2.0f * y - 1.0f}; // Vulkan: y down, depth 0 to 1
+    const vec4 nearPoint = inverse * vec4(ndc, 0.0f, 1.0f);
+    const vec4 farPoint = inverse * vec4(ndc, 1.0f, 1.0f);
+    const vec3 from = vec3(nearPoint) / nearPoint.w;
+    const vec3 direction = vec3(farPoint) / farPoint.w - from;
+    if (std::abs(direction.y) < 1e-6f) return std::nullopt;
+    const float t = -from.y / direction.y;
+    if (t < 0.0f) return std::nullopt;
+    const vec3 hit = from + t * direction;
+    // The surface spans -size/2 to size/2 in x and z; the grid's +y is +z (shaders/fluid_surface.comp).
+    const vec2 point{hit.x / size + 0.5f, hit.z / size + 0.5f};
+    if (point.x < 0.0f || point.y < 0.0f || point.x > 1.0f || point.y > 1.0f) return std::nullopt;
+    return point;
+}
 
 FluidFeature::FluidFeature(std::unique_ptr<FluidSolver> solver, Settings settings)
     : m_solver(std::move(solver)), m_settings(settings) {
@@ -58,6 +77,11 @@ void FluidFeature::initialize(vk::Device &device, vk::PipelineCache &) {
         {cells * sizeof(float), usageBit(BufferUsage::TransferDst), MemoryLocation::Readback, "fluid density readback"});
     m_readbackVelocity = device.makeBuffer({cells * 2 * sizeof(float), usageBit(BufferUsage::TransferDst),
                                             MemoryLocation::Readback, "fluid velocity readback"});
+    if (m_solver->particleCount() > 0) {
+        m_readbackParticles = device.makeBuffer({std::uint64_t{m_solver->particleCount()} * sizeof(vec4),
+                                                 usageBit(BufferUsage::TransferDst), MemoryLocation::Readback,
+                                                 "fluid particles readback"});
+    }
     m_frames = 0;
     m_readbackPending = false;
 }
@@ -70,6 +94,7 @@ void FluidFeature::shutdown() {
     }
     m_readbackDensity.reset();
     m_readbackVelocity.reset();
+    m_readbackParticles.reset();
 }
 
 void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::GeneratedDraw> &draws) {
@@ -101,6 +126,7 @@ void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::G
     if (m_readbackRequested) {
         m_readbackRequested = false;
         m_readbackPending = true;
+        m_lastReadbackHadParticles = outputs.particles.has_value();
         const auto importReadback = [&](const char *name, const vk::Buffer &buffer) {
             const BufferHandle handle = context.graph.importBuffer(name, BufferDesc{buffer.size()}, BufferUsage::Undefined,
                                                                    BufferUsage::HostRead, Queue::AsyncCompute);
@@ -109,9 +135,14 @@ void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::G
         };
         struct Copy {
             BufferHandle density, velocity, densityOut, velocityOut;
+            std::optional<BufferHandle> particles, particlesOut;
         };
         const BufferHandle densityOut = importReadback("fluid density readback", *m_readbackDensity);
         const BufferHandle velocityOut = importReadback("fluid velocity readback", *m_readbackVelocity);
+        std::optional<BufferHandle> particlesOut;
+        if (outputs.particles && m_readbackParticles) {
+            particlesOut = importReadback("fluid particles readback", *m_readbackParticles);
+        }
         context.graph.addPass<Copy>(
             "fluid readback", PassType::Compute,
             [&](PassBuilder &builder, Copy &copy) {
@@ -119,16 +150,26 @@ void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::G
                 copy.velocity = builder.read(outputs.velocity, BufferUsage::TransferSrc);
                 copy.densityOut = builder.write(densityOut, BufferUsage::TransferDst);
                 copy.velocityOut = builder.write(velocityOut, BufferUsage::TransferDst);
+                if (particlesOut) {
+                    copy.particles = builder.read(*outputs.particles, BufferUsage::TransferSrc);
+                    copy.particlesOut = builder.write(*particlesOut, BufferUsage::TransferDst);
+                }
                 builder.async();
             },
-            [densityBytes = m_readbackDensity->size(), velocityBytes = m_readbackVelocity->size()](
-                const Copy &copy, PassContext &passContext) {
+            [densityBytes = m_readbackDensity->size(), velocityBytes = m_readbackVelocity->size(),
+             particleBytes = m_readbackParticles ? m_readbackParticles->size() : 0](const Copy &copy,
+                                                                                     PassContext &passContext) {
                 auto &ctx = vk::PassContext::from(passContext);
                 const auto &table = ctx.device().table();
                 const VkBufferCopy density{0, 0, densityBytes};
                 const VkBufferCopy velocity{0, 0, velocityBytes};
                 table.vkCmdCopyBuffer(ctx.cmd(), ctx.buffer(copy.density), ctx.buffer(copy.densityOut), 1, &density);
                 table.vkCmdCopyBuffer(ctx.cmd(), ctx.buffer(copy.velocity), ctx.buffer(copy.velocityOut), 1, &velocity);
+                if (copy.particles) {
+                    const VkBufferCopy particles{0, 0, particleBytes};
+                    table.vkCmdCopyBuffer(ctx.cmd(), ctx.buffer(*copy.particles), ctx.buffer(*copy.particlesOut), 1,
+                                          &particles);
+                }
             });
     }
     ++m_frames;
@@ -147,6 +188,11 @@ std::optional<FluidFeature::Readback> FluidFeature::readback() const {
     m_readbackVelocity->invalidate();
     std::memcpy(out.density.data(), m_readbackDensity->mapped(), cells * sizeof(float));
     std::memcpy(out.velocity.data(), m_readbackVelocity->mapped(), cells * sizeof(vec2));
+    if (m_readbackParticles && m_lastReadbackHadParticles) {
+        out.particles.resize(m_solver->particleCount());
+        m_readbackParticles->invalidate();
+        std::memcpy(out.particles.data(), m_readbackParticles->mapped(), out.particles.size() * sizeof(vec4));
+    }
     return out;
 }
 

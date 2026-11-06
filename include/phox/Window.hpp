@@ -19,6 +19,14 @@ enum class GraphicsApi {
     Metal, ///< Apple platforms only
 };
 
+/// The mouse, as of the last pollEvents().
+struct PointerState {
+    bool inside = false; ///< over the window
+    float x = 0.0f;      ///< 0 at the left edge, 1 at the right
+    float y = 0.0f;      ///< 0 at the top, 1 at the bottom
+    bool pressed = false; ///< the primary button is held
+};
+
 struct WindowConfig {
     int x, y, width, height;
     WindowBackend backend;
@@ -34,6 +42,9 @@ public:
 
     /// Pumps pending OS events. Returns false once the user has asked to close the window.
     virtual bool pollEvents() = 0;
+
+    /// Where the mouse is and whether its button is held. Windows that do not track it report none.
+    virtual PointerState pointer() const { return {}; }
 
     /// Size of the drawable area in pixels (may differ from the window size on HiDPI displays).
     virtual void framebufferSize(int &width, int &height) const = 0;

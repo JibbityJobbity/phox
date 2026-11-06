@@ -61,8 +61,8 @@ constexpr std::uint32_t kGroupSize = 8; // local_size in shaders/fluid_common.gl
 void dispatchGrid(vk::FrameFeatureContext &context, const std::string &name, const std::string &shader,
                   std::initializer_list<BufferHandle> reads, std::initializer_list<BufferHandle *> writes,
                   const void *push, std::size_t pushSize, std::uint32_t width, std::uint32_t height) {
-    if (reads.size() + writes.size() > 4 || pushSize > 128) {
-        throw std::invalid_argument("pass '" + name + "': at most 4 buffers and 128 bytes of push constants");
+    if (reads.size() + writes.size() > 8 || pushSize > 128) {
+        throw std::invalid_argument("pass '" + name + "': at most 8 buffers and 128 bytes of push constants");
     }
     const vk::Pipeline &pipeline = context.pipelines.get(gridPipelineDesc(shader));
     const VkDescriptorSetLayout setLayout = context.pipelines.setLayout(SetLayout::ComputeStorage);

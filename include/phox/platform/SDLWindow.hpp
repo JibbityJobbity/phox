@@ -15,6 +15,7 @@ public:
     SDLWindow &operator=(const SDLWindow &) = delete;
 
     bool pollEvents() override;
+    PointerState pointer() const override { return m_pointer; }
     void framebufferSize(int &width, int &height) const override;
     std::vector<std::string> requiredVulkanExtensions() const override;
     bool createVulkanSurface(void *vkInstance, std::uint64_t *outSurface) override;
@@ -25,6 +26,7 @@ private:
     GraphicsApi m_api = GraphicsApi::Vulkan;
     void *m_metalView = nullptr; ///< SDL_MetalView, for GraphicsApi::Metal
     bool m_closeRequested = false;
+    PointerState m_pointer;
 };
 
 }

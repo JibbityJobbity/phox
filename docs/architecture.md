@@ -496,7 +496,7 @@ instead, whose rule 1 it fits: a compute pass writes it and the forward pass rea
   vertex shaders (whatever path the scene takes) draw each one with `vkCmdDrawIndirect`. Their materials
   follow the view's items in the material table. They take no part in occlusion culling: they are drawn
   after the late pass and are not in the depth pyramid.
-- `SetLayout::ComputeStorage`: four storage buffers for compute passes that generate data.
+- `SetLayout::ComputeStorage`: eight storage buffers for compute passes that generate data.
 - `vk::WaveSurface` (`shaders/wavesurface.comp`) is a sample feature: a grid of waves, two triangles per
   cell, and its indirect command, written by one async compute pass. `referenceMesh()` builds the same
   surface on the CPU; `generated_test` draws both and requires the same image (within the GPU's sin and cos),
@@ -505,7 +505,7 @@ instead, whose rule 1 it fits: a compute pass writes it and the forward pass rea
 
 ### 6.6 The fluid sample
 
-`standalone/fluid/` builds `PhoxFluid` (a static library: solvers, the frame feature, compute shaders compiled
+`standalone/fluid/` builds `PhoxFluid` (a static library: three solvers, the frame feature, compute shaders compiled
 to its own directory and found through `FrameFeature::shaderDirectories`) and `PhoxFluidSample`; the tests add
 the same directory for `fluid_test`.
 
@@ -516,7 +516,8 @@ the same directory for `fluid_test`.
   units. Every pass is `async()`.
 - `fluid::PersistentBuffer` imports a buffer with the async compute queue as its home, so it arrives from and
   returns to the async queue's earlier work. `dispatchGrid` adds one pass of one shader over the grid, with
-  reads and writes as storage buffers in `SetLayout::ComputeStorage` and up to 128 bytes of push constants.
+  reads and writes as storage buffers in `SetLayout::ComputeStorage` (eight at most) and up to 128 bytes of
+  push constants.
 - `StableFluids`: forces and dye in place; advection into the other buffer of each pair; divergence into a
   transient; Jacobi iterations ping-ponging two pressure buffers (warm-started from the last step);
   projection in place. Each pair's latest buffer is the only one imported with its contents. On a collocated
@@ -525,11 +526,30 @@ the same directory for `fluid_test`.
 - `LatticeBoltzmann`: one fused pass per step pulls the nine populations from the neighbours (half-way
   bounce-back at walls), relaxes them (BGK, forces by velocity shift) into the other buffer, and writes
   density and velocity. Mass is conserved to rounding (4096.01 of 4096 cells after 240 stirred steps).
+- `SmoothedParticles`: weakly compressible SPH (2D poly6, spiky and viscosity kernels; linear
+  pressure `c^2 rho0 (rho / rho_lattice - 1)`; viscosity, drag and damped, soft walls), particles filling the
+  tank on a lattice. Per step: neighbour search (clear, count with integer atomics, a one-group scan,
+  scatter with atomics, then each bin sorted by particle index, since the atomics' order is not
+  reproducible and every later sum runs in bin order), density and pressure, then forces and symplectic
+  Euler. No floating-point atomics: everything is a gather. Densities are compared with what the initial
+  lattice has at the same point (`latticeDensity` in the shaders), not with one rest density: particles at a
+  wall, short of neighbours, are then at rest too, so pressure can be signed (the full tank resists being
+  stretched as well as squeezed) without the wall pulling particles in. The fields are gathered onto the
+  grid with a kernel twice as wide (smoother to look at) and the same lattice comparison, after a second
+  neighbour search of the moved particles; the graph culls it for all but a frame's last step.
+  `FluidOutputs::particles` exposes the particles, which the test reads back to recompute the fields by
+  brute force (agreement to 1e-6: the neighbour search misses no one).
+  Weakly compressible SPH needs to stay well below its speed of sound, and only viscosity and drag limit
+  how fast stirring spins a closed tank up: forces are scaled down, and the time step stays under
+  0.4 h / c (eight steps a frame by default).
 - `FluidFeature` runs the solver's steps, then "fluid surface" turns the density into a heightfield of
   unindexed vertices and an indirect draw (6.5). Pipelined, it writes one of two surface buffers each frame
   and draws the other, from the frame before: the draw then waits only for the async queue's earlier work
   (3.6), and the queues overlap; the test checks that pipelined frame n + 1 is pixel for pixel frame n
-  unpipelined. `requestReadback()` copies the fields to host buffers for tests.
+  unpipelined. `requestReadback()` copies the fields (and particles) to host buffers for tests.
+- The mouse: `Window::pointer()` (SDL: position as a fraction of the window, and the left button) and
+  `fluid::pointOnSurface`, a ray from the camera onto the surface's plane. Dragging replaces the third
+  emitter with a splat that follows the drag.
 
 On the RTX 3080 (release build, 512 x 512 stable fluids with 150 iterations, 1080p headless), async compute
 with pipelining takes 3.5 ms a frame and the other three combinations 3.7 ms: the scene's graphics work is

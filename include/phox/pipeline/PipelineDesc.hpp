@@ -64,7 +64,7 @@ enum class SetLayout : std::uint8_t {
     /// binding 0: the texture table, an array of textures each with its own sampler, fragment stage.
     /// Partially bound and updated while in use (the backend adds textures as frames need them).
     Bindless,
-    /// compute stage; bindings 0 to 3: storage buffers. For compute passes that generate data; bind the
+    /// compute stage; bindings 0 to 7: storage buffers. For compute passes that generate data; bind the
     /// ones the shader uses.
     ComputeStorage,
 };

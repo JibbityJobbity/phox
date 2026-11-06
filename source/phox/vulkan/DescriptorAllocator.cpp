@@ -21,7 +21,7 @@ VkDescriptorPool DescriptorAllocator::createPool() {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSets},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSets},
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kSets},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSets},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSets * 8}, // SetLayout::ComputeStorage has eight
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSets / 4},
     }};
     VkDescriptorPoolCreateInfo info{};

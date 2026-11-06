@@ -1,0 +1,18 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+#include "fluid_sph_common.glsl"
+// Neighbour search, 3: each particle's index into its bin's slice, in whatever order the atomics give.
+
+layout(set = 0, binding = 0, std430) readonly buffer State { vec4 data[]; } state;
+layout(set = 0, binding = 1, std430) buffer Cursor { uint data[]; } cursor;
+layout(set = 0, binding = 2, std430) writeonly buffer Indices { uint data[]; } indices;
+layout(push_constant) uniform Params { SphCommon c; } params;
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.c.side)) return;
+    const uint i = cellIndex(c, params.c.side);
+    const uint slot = atomicAdd(cursor.data[binIndex(binOf(state.data[i].xy, params.c.bins), params.c.bins)], 1u);
+    indices.data[slot] = i;
+}
