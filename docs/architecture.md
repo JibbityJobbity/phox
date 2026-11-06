@@ -157,7 +157,12 @@ graphics queue, which is what lavapipe (one queue) and the goldens see; the resu
 `compile()` splits the live passes into `Submission`s, one queue each, in an order that is safe to submit:
 
 - Each queue starts with a submission that exists even when empty. The graphics one carries the work the
-  renderer records before the graph (uploads), and imports arrive through their home queue's first submission.
+  renderer records before the graph (uploads); with async compute on it carries only that, and graphics
+  passes start a second one. An import arrives on its home queue: from the graphics queue's first submission,
+  or from the async compute queue's work submitted before the graph (`Submission::waitEarlier`, resolved by
+  the executor to the timeline value from before the frame). Neither waits for the frame's own passes on
+  the home queue, so a buffer simulated on the async queue in one frame can be drawn in the next while the
+  async queue computes the frame after.
 - A pass whose resource was last used on the other queue needs that submission to complete first. Its
   submission gets a `wait` for it, which closes the submission it waits for (later work there goes into a new
   one, so the signal comes as early as possible). A submission that already holds passes is not given a new

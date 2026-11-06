@@ -148,14 +148,19 @@ struct CompiledPass {
 /// Work for one queue, submitted as a unit. Submissions are numbered in an order that has every wait
 /// after the submission it waits for, so a backend can submit them in that order.
 ///
-/// Each queue's first submission comes first and exists even when empty: the work done before the
-/// graph (e.g. uploads recorded into the frame's command buffer) belongs to the graphics one, and imports
-/// arrive through it (see RenderGraph::importImage).
+/// Each queue's first submission comes first and exists even when empty. The graphics one holds the
+/// work done before the graph (e.g. uploads recorded into the frame's command buffer); with async compute
+/// on it holds only that, so that waiting for it (for an import arriving on the graphics queue) does not
+/// wait for the frame's graphics passes. Imports arriving on the async compute queue come from work
+/// submitted there before the graph (waitEarlier).
 struct Submission {
     Queue queue = Queue::Graphics;
     std::vector<std::uint32_t> passes; ///< indices into compiledPasses(), in order
     /// The submission on the other queue that must complete first. Its index is lower than this one's.
     std::optional<std::uint32_t> wait;
+    /// Without a wait: the other queue's work submitted before this graph must complete first (an import
+    /// whose home is that queue). A wait covers it, as it comes later on the same queue.
+    bool waitEarlier = false;
     bool signals = false;       ///< a submission on the other queue waits for this one
     BarrierBatch finalBarriers; ///< after the passes: imports whose home is this queue leave the graph
 };
@@ -280,8 +285,11 @@ public:
     /// the contents don't matter); the graph leaves it in @p final (Undefined: whatever state it is in).
     /// @p home is the queue it arrives on and leaves on: its contents were last used by earlier work on
     /// that queue, and later work there may use it after the frame. A pass on the other queue that uses
-    /// it first waits for that queue's first submission, and if the last use is on the other queue, the
-    /// graph ends with a submission on @p home that waits for it. Without async compute, every import's
+    /// it first waits for that work only (the graphics queue's first submission, or the async compute
+    /// queue's work submitted before the graph), not for the frame's passes there. If the last use is on
+    /// the other queue, the graph ends with a submission on @p home that waits for it. So a buffer written
+    /// on the async queue in one frame can be drawn on the graphics queue in the next while the async
+    /// queue works on the frame after. Without async compute, every import's
     /// home is the graphics queue. An import used on both queues must be created for both
     /// (ImageCreateInfo::sharedQueues).
     ImageHandle importImage(std::string name, ImageDesc desc, ImageUsage initial, ImageUsage final,

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -517,20 +518,18 @@ void asyncComputeSplitsSubmissions() {
                   nullptr);
     graph.execute(backend);
 
+    // 0: the work before the graph only; 1: the async passes; 2: sky; 3: what needs the async results.
     const std::vector<Submission> &subs = graph.submissions();
-    CHECK(subs.size() == 3);
-    CHECK(subs[0].queue == Queue::Graphics && subs[0].passes == std::vector<std::uint32_t>{2} && !subs[0].wait);
+    CHECK(subs.size() == 4);
+    CHECK(subs[0].queue == Queue::Graphics && subs[0].passes.empty() && !subs[0].signals);
     CHECK(subs[1].queue == Queue::AsyncCompute && (subs[1].passes == std::vector<std::uint32_t>{0, 1}) && subs[1].signals);
-    CHECK(subs[2].queue == Queue::Graphics && (subs[2].passes == std::vector<std::uint32_t>{3, 4}) && subs[2].wait == 1u);
-    CHECK(subs[2].finalBarriers.images.size() == 1 && subs[0].finalBarriers.empty());
+    CHECK(subs[2].queue == Queue::Graphics && subs[2].passes == std::vector<std::uint32_t>{2} && !subs[2].wait);
+    CHECK(subs[3].queue == Queue::Graphics && (subs[3].passes == std::vector<std::uint32_t>{3, 4}) && subs[3].wait == 1u);
+    CHECK(subs[3].finalBarriers.images.size() == 1 && subs[2].finalBarriers.empty());
     CHECK(graph.compiledPasses()[0].queue == Queue::AsyncCompute && graph.compiledPasses()[3].queue == Queue::Graphics);
 
     const std::vector<std::string> expected = {
         "submit 0 graphics",
-        "acquire color",
-        "barrier color Undefined->Color",
-        "begin sky",
-        "end sky",
         "submit 1 async",
         "acquire particles",
         "barrier particles Undefined->StorageWrite",
@@ -542,7 +541,12 @@ void asyncComputeSplitsSubmissions() {
         "begin surface",
         "end surface",
         "release particles",
-        "submit 2 graphics wait 1",
+        "submit 2 graphics",
+        "acquire color",
+        "barrier color Undefined->Color",
+        "begin sky",
+        "end sky",
+        "submit 3 graphics wait 1",
         "barrier color Color->Color",
         "barrier vertices StorageWrite->Vertex",
         "begin draw",
@@ -567,7 +571,45 @@ void asyncComputeSplitsSubmissions() {
     CHECK(graph.bufferInfo(particles).queues == queueBit(Queue::AsyncCompute));
     CHECK(graph.imageInfo(color).queues == queueBit(Queue::Graphics));
     const auto first = graph.firstUse(swap);
-    CHECK(first && first->submission == 2);
+    CHECK(first && first->submission == 3);
+}
+
+// The frame pipelining a simulation wants: the async queue computes step n + 1 into one buffer while the
+// graphics queue draws step n from the other, written on the async queue last frame. The draw waits only
+// for the async work submitted before this graph, so the two queues overlap; the async queue's next use
+// of the drawn buffer waits for the draw.
+void pipelinedImportsOverlap() {
+    RenderGraph graph;
+    graph.setAsyncCompute(true);
+    const BufferHandle next = graph.importBuffer("surface next", {64}, BufferUsage::StorageWrite,
+                                                 BufferUsage::StorageWrite, Queue::AsyncCompute);
+    const BufferHandle shown = graph.importBuffer("surface shown", {64}, BufferUsage::StorageWrite,
+                                                  BufferUsage::StorageWrite, Queue::AsyncCompute);
+    const ImageHandle color = graph.createImage("color", kColor);
+    graph.addPass("simulate", PassType::Compute,
+                  [&](PassBuilder &b) {
+                      b.write(next, BufferUsage::StorageWrite);
+                      b.async();
+                  },
+                  nullptr);
+    graph.addPass("draw", PassType::Graphics,
+                  [&](PassBuilder &b) {
+                      b.read(shown, BufferUsage::Vertex);
+                      b.colorAttachment(color, LoadOp::Clear);
+                      b.keep();
+                  },
+                  nullptr);
+    graph.compile();
+    const std::vector<Submission> &subs = graph.submissions();
+    CHECK(subs.size() == 4);
+    CHECK(subs[1].queue == Queue::AsyncCompute && subs[1].passes == std::vector<std::uint32_t>{0});
+    CHECK(!subs[1].signals); // nothing this frame waits for the simulation
+    CHECK(subs[2].queue == Queue::Graphics && subs[2].passes == std::vector<std::uint32_t>{1});
+    CHECK(!subs[2].wait && subs[2].waitEarlier && subs[2].signals);
+    // The shown buffer goes home: a final async submission waits for the draw.
+    CHECK(subs[3].queue == Queue::AsyncCompute && subs[3].wait == 2u && subs[3].passes.empty());
+    CHECK(subs[3].finalBarriers.buffers.size() == 1 && subs[3].finalBarriers.buffers[0].buffer == shown.index);
+    CHECK(graph.compiledPasses()[1].barriers.buffers[0].crossQueue);
 }
 
 // Without an async queue the same passes run in order on the graphics queue, as one submission.
@@ -643,11 +685,12 @@ void randomGraphsAreOrdered() {
         graph.setAsyncCompute(true);
         constexpr int kBuffers = 4;
         std::vector<BufferHandle> buffers;
+        std::vector<std::optional<Queue>> homes(kBuffers);
         for (int i = 0; i < kBuffers; ++i) {
             if (next(3) == 0) {
+                homes[i] = next(2) == 0 ? Queue::Graphics : Queue::AsyncCompute;
                 buffers.push_back(graph.importBuffer("b" + std::to_string(i), {16}, BufferUsage::StorageWrite,
-                                                     BufferUsage::StorageWrite,
-                                                     next(2) == 0 ? Queue::Graphics : Queue::AsyncCompute));
+                                                     BufferUsage::StorageWrite, *homes[i]));
             } else {
                 buffers.push_back(graph.createBuffer("b" + std::to_string(i), {16}));
             }
@@ -693,6 +736,11 @@ void randomGraphsAreOrdered() {
             return wait && *wait >= earlier && subs[*wait].queue == subs[earlier].queue;
         };
         for (int i = 0; i < kBuffers; ++i) {
+            // An import first used on the other queue waits for what came before it on its home queue.
+            if (homes[i] && !uses[i].empty() && passes[uses[i][0]].queue != *homes[i]) {
+                const Submission &first = subs[passes[uses[i][0]].submission];
+                CHECK(first.wait || (*homes[i] == Queue::AsyncCompute && first.waitEarlier));
+            }
             for (std::size_t u = 1; u < uses[i].size(); ++u) {
                 CHECK(after(passes[uses[i][u - 1]].submission, passes[uses[i][u]].submission));
             }
@@ -720,6 +768,7 @@ int main() {
     asyncComputeSplitsSubmissions();
     asyncPassesWithoutAsyncCompute();
     importsReturnToTheirHomeQueue();
+    pipelinedImportsOverlap();
     randomGraphsAreOrdered();
     std::cout << "render graph tests passed" << std::endl;
     return 0;

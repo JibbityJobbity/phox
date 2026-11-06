@@ -395,7 +395,8 @@ void RenderGraph::compile() {
         std::optional<PassType> pass;
         bool written = false;
         std::optional<Queue> queue; ///< of the previous use; empty: none (a transient's contents are discarded)
-        std::uint32_t submission = 0;
+        /// of the previous use; empty with a queue: work there before the graph (an import's arrival)
+        std::optional<std::uint32_t> submission;
     };
     const auto homeOf = [&](const Resource &res) { return m_asyncCompute ? res.home : Queue::Graphics; };
     const auto slot = [](Queue queue) { return static_cast<std::size_t>(queue); };
@@ -404,15 +405,15 @@ void RenderGraph::compile() {
     std::array<std::optional<std::uint32_t>, 2> open; // per queue: where its next pass goes, if still open
     std::array<std::uint32_t, 2> last{};               // per queue: its latest submission
     const auto addSubmission = [&](Queue queue) {
-        m_submissions.push_back(Submission{queue, {}, std::nullopt, false, {}});
+        m_submissions.push_back(Submission{queue, {}, std::nullopt, false, false, {}});
         const auto index = static_cast<std::uint32_t>(m_submissions.size() - 1);
         open[slot(queue)] = last[slot(queue)] = index;
         return index;
     };
-    std::array<std::uint32_t, 2> initial{};
-    initial[slot(Queue::Graphics)] = addSubmission(Queue::Graphics);
+    addSubmission(Queue::Graphics);
     if (m_asyncCompute) {
-        initial[slot(Queue::AsyncCompute)] = addSubmission(Queue::AsyncCompute);
+        open[slot(Queue::Graphics)].reset(); // only the work before the graph: passes start a new submission
+        addSubmission(Queue::AsyncCompute);
     }
     // The submission on @p queue the next work goes into, once submission @p wait on the other queue has
     // completed. A submission's wait covers all of it, so one that already holds passes is not given a
@@ -433,23 +434,35 @@ void RenderGraph::compile() {
         }
         return *current;
     };
+    // The same, after the other queue's work from before the graph.
+    const auto submissionAfterEarlier = [&](Queue queue) {
+        std::optional<std::uint32_t> &current = open[slot(queue)];
+        if (current && (m_submissions[*current].wait || m_submissions[*current].waitEarlier)) {
+            return *current;
+        }
+        if (!current || !m_submissions[*current].passes.empty()) {
+            addSubmission(queue);
+        }
+        m_submissions[*current].waitEarlier = true;
+        return *current;
+    };
 
     std::vector<State> imageState(m_images.size());
     std::vector<State> bufferState(m_buffers.size());
     for (std::size_t i = 0; i < m_images.size(); ++i) {
         const ImageResource &img = m_images[i];
-        imageState[i] = {img.initial, std::nullopt, img.hasContents(0), std::nullopt, 0};
+        imageState[i] = {img.initial, std::nullopt, img.hasContents(0), std::nullopt, std::nullopt};
         if (img.imported) {
             imageState[i].queue = homeOf(img);
-            imageState[i].submission = initial[slot(homeOf(img))];
+            if (homeOf(img) == Queue::Graphics) imageState[i].submission = 0u;
         }
     }
     for (std::size_t i = 0; i < m_buffers.size(); ++i) {
         const BufferResource &buf = m_buffers[i];
-        bufferState[i] = {buf.initial, std::nullopt, buf.hasContents(0), std::nullopt, 0};
+        bufferState[i] = {buf.initial, std::nullopt, buf.hasContents(0), std::nullopt, std::nullopt};
         if (buf.imported) {
             bufferState[i].queue = homeOf(buf);
-            bufferState[i].submission = initial[slot(homeOf(buf))];
+            if (homeOf(buf) == Queue::Graphics) bufferState[i].submission = 0u;
         }
     }
 
@@ -465,15 +478,22 @@ void RenderGraph::compile() {
         }
         const Queue queue = pass.async && m_asyncCompute ? Queue::AsyncCompute : Queue::Graphics;
         std::optional<std::uint32_t> wait;
+        bool waitEarlier = false;
         for (const PassBuilder::Access &access : pass.accesses) {
             const State &state = access.image ? imageState[access.index] : bufferState[access.index];
             if (state.queue && *state.queue != queue) {
-                wait = std::max(wait.value_or(0), state.submission);
+                if (state.submission) {
+                    wait = std::max(wait.value_or(0), *state.submission);
+                } else {
+                    waitEarlier = true;
+                }
             }
         }
         std::uint32_t submission = 0;
         if (wait) {
             submission = submissionAfter(queue, *wait);
+        } else if (waitEarlier) {
+            submission = submissionAfterEarlier(queue);
         } else {
             if (!open[slot(queue)]) {
                 addSubmission(queue);
@@ -555,7 +575,7 @@ void RenderGraph::compile() {
         std::optional<std::uint32_t> wait;
         const auto lastUseElsewhere = [&](const Resource &res, const State &state) {
             if (res.imported && homeOf(res) == home && state.queue != home) {
-                wait = std::max(wait.value_or(0), state.submission);
+                wait = std::max(wait.value_or(0), state.submission.value()); // used on the other queue in the graph
             }
         };
         for (std::size_t i = 0; i < m_images.size(); ++i) lastUseElsewhere(m_images[i], imageState[i]);

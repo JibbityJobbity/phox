@@ -79,6 +79,8 @@ public:
     VkSemaphore timeline(Queue queue) const { return m_timelines[static_cast<std::size_t>(queue)].semaphore; }
     /// The value the next submission to @p queue signals; each call returns a larger one.
     std::uint64_t signalValue(Queue queue);
+    /// The value the latest submission to @p queue signals (0: none yet).
+    std::uint64_t lastSignalValue(Queue queue) const { return m_timelines[static_cast<std::size_t>(queue)].value; }
     /// Blocks until @p queue's timeline reaches @p value (0: returns at once).
     void waitTimeline(Queue queue, std::uint64_t value) const;
 

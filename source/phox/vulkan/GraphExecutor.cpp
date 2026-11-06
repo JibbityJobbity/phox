@@ -253,6 +253,9 @@ std::uint64_t GraphExecutor::submit(const FrameSubmit &extra) {
     }
 
     std::vector<std::uint64_t> values(submissions.size(), 0);
+    // What each queue had been given before this graph, for imports arriving from there (waitEarlier).
+    const std::uint64_t earlier[2] = {m_device.lastSignalValue(Queue::Graphics),
+                                      m_device.lastSignalValue(Queue::AsyncCompute)};
     std::uint64_t computeValue = 0;
     for (std::size_t i = 0; i < submissions.size(); ++i) {
         if (!needed[i]) {
@@ -266,12 +269,15 @@ std::uint64_t GraphExecutor::submit(const FrameSubmit &extra) {
         values[i] = m_device.signalValue(submission.queue);
 
         std::vector<VkSemaphoreSubmitInfo> waits;
-        if (submission.wait) {
-            const Queue other = submission.queue == Queue::Graphics ? Queue::AsyncCompute : Queue::Graphics;
+        const Queue other = submission.queue == Queue::Graphics ? Queue::AsyncCompute : Queue::Graphics;
+        const std::uint64_t waitValue = submission.wait        ? values.at(*submission.wait)
+                                        : submission.waitEarlier ? earlier[static_cast<std::size_t>(other)]
+                                                                 : 0;
+        if (waitValue != 0) {
             VkSemaphoreSubmitInfo wait{};
             wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
             wait.semaphore = m_device.timeline(other);
-            wait.value = values.at(*submission.wait);
+            wait.value = waitValue;
             wait.stageMask = recorded.waitStages != VK_PIPELINE_STAGE_2_NONE ? recorded.waitStages
                                                                               : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
             waits.push_back(wait);
