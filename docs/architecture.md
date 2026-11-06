@@ -23,8 +23,8 @@ section 12 describes the Metal backend added on 2026-11-04.
       v
   vk::GraphExecutor (per frame, owns nothing across frames)
       |
-      +-- FrameContext (ring of 2): command pool, fence, acquire semaphore, UploadArena,
-      |                             DescriptorAllocator, DeletionQueue
+      +-- FrameContext (ring of 2): command pools (graphics, async compute), fence, acquire semaphore,
+      |                             UploadArena, DescriptorAllocator, DeletionQueue
       +-- TransientPool: graph images and buffers, recycled across passes and frames
       +-- PipelineCache + ShaderLibrary: PipelineDesc -> VkPipeline; fixed set layouts
       +-- MeshCache: device-local mesh buffers, uploaded once per mesh version
@@ -54,7 +54,7 @@ Two rules keep the design small:
 | 2 | Rendering model | Vulkan 1.3: synchronization2 for barriers and submits, dynamic rendering | No render pass or framebuffer objects; matches a graph that does its own transitions |
 | 3 | Graph handles | Versioned (index + version); execution order is declaration order | Exact culling and hazard tracking now; reordering later needs no API change |
 | 4 | Attachments | Declared in pass setup; the backend begins and ends rendering | Pass bodies only bind and draw; the graph knows load, store and clear values |
-| 5 | Transient memory | Pool keyed by description and usage, reusable as soon as released | Steady-state frames create nothing; aliasing can come later |
+| 5 | Transient memory | Pool keyed by description, usage and queues; reusable as soon as released on one queue, after the frame when used on both | Steady-state frames create nothing; aliasing can come later |
 | 6 | Frames in flight | 2 | Enough to overlap CPU and GPU |
 | 7 | Math | glm behind `phox/Math.hpp`, configured for Vulkan's [0, 1] depth | Quaternions, frustums and clip-space conventions are easy to get wrong by hand |
 | 8 | Verification | Golden images rendered on lavapipe, checked under synchronization validation | Lavapipe is deterministic and runs the real code path in CI |
@@ -123,9 +123,10 @@ either side writes, records first and last use, builds attachment lists and the 
 one pass must match in size), and emits final barriers for imports. `firstUse(image)` reports how an import is
 first touched; `toDot()` exports the compiled graph.
 
-`execute()` drives a `GraphBackend`: for each live pass, acquire the transients first used there, issue its
-barriers as one batch, `beginPass`, run the body, `endPass`, release the transients last used there; then
-the final barriers.
+`execute()` drives a `GraphBackend`: for each submission (3.6; just one without async compute)
+`beginSubmission`, then for each of its passes acquire the transients first used there, issue its barriers as
+one batch, `beginPass`, run the body, `endPass`, release the transients last used there; then the
+submission's final barriers and `endSubmission`.
 
 ### 3.5 The Vulkan executor
 
@@ -139,9 +140,56 @@ stages, so barriers cover what task shaders read and write. A pass may order its
 its own (the depth pyramid does, between mips); the graph sees the pass's usage of the whole resource.
 
 The pool hands a released resource out again immediately rather than after the frames in flight have
-finished, as first planned. That is safe because all frames go to one queue and a transient's first use is a
-barrier from ALL_COMMANDS / MEMORY_WRITE, which orders it after every earlier use. Resources idle for 60
-frames are destroyed.
+finished, as first planned. That is safe because a transient's first use is a barrier from ALL_COMMANDS /
+MEMORY_WRITE, which orders it after every earlier use on the same queue, and the pool keeps resources apart by
+the queues that use them (`ImageInfo::queues`): one used on the graphics queue only ever goes back to that
+queue, likewise for async compute. One used on both is not ordered by such a barrier, so it is free again
+only once its frame has completed (`collect()`, frames-in-flight later). Resources idle for 60 frames are
+destroyed.
+
+### 3.6 Async compute
+
+A compute pass that calls `PassBuilder::async()` runs on a second queue when the graph has one
+(`RenderGraph::setAsyncCompute(true)`, which the renderer sets when `vk::Device::asyncCompute()`: the device has
+a compute-only queue family and `RendererConfig::asyncCompute` is on). Otherwise it runs in order on the
+graphics queue, which is what lavapipe (one queue) and the goldens see; the results must be the same.
+
+`compile()` splits the live passes into `Submission`s, one queue each, in an order that is safe to submit:
+
+- Each queue starts with a submission that exists even when empty. The graphics one carries the work the
+  renderer records before the graph (uploads), and imports arrive through their home queue's first submission.
+- A pass whose resource was last used on the other queue needs that submission to complete first. Its
+  submission gets a `wait` for it, which closes the submission it waits for (later work there goes into a new
+  one, so the signal comes as early as possible). A submission that already holds passes is not given a new
+  wait, since the wait would hold back the passes already in it; the pass then starts a new submission.
+- The rule applies to every use after a use on the other queue, two reads included. Each use is then ordered
+  after the one before it, and through it after all earlier ones, without tracking per-queue histories.
+- Imports have a home queue (`importImage(..., Queue home)`, graphics by default). If the last use is on the
+  other queue, the graph ends with a submission on the home queue that waits for it, and the final barriers
+  go at the end of each home queue's last submission.
+
+The barrier for a use after the other queue is marked `crossQueue`. The submission's semaphore wait already
+orders it after the earlier use and makes its writes visible, so the Vulkan executor gives the barrier only the
+waiting stages as its first half (nothing to make available) and the layout change. The wait blocks exactly
+those stages.
+
+In Vulkan, every submission signals its queue's timeline semaphore (`vk::Device::timeline`) and waits on the
+other's value where the graph says; `GraphExecutor::submit()` adds the swapchain's semaphores (waited for by the
+submission that first uses the image, signalled by the last graphics one) and the frame's fence (last graphics
+one). The frame context also remembers the compute timeline value of its last compute submission and waits
+for it before reuse. Empty submissions nobody waits for are skipped.
+
+There are no queue family ownership transfers. With async compute on, buffers are created with concurrent
+sharing across the two families, and images only when a transient is used on both queues
+(`ImageCreateInfo::sharedQueues`), since concurrent images can lose compression. Imports used on both queues
+must be created that way. Transfers would have needed a release and acquire with matching layouts on both
+sides, often in different frames (a buffer simulated in frame N and drawn in frame N + 1), for no gain on
+buffers. Timestamps are reset from the CPU (`hostQueryReset`) so that passes on either queue can be timed.
+
+`render_graph_test` checks the split, the waits and the barriers on a fluid-shaped frame, imports returning to
+their home queue, async passes without async compute, and on 500 random graphs that every use after a use on
+the other queue is ordered after it. Synchronization validation reports a race on the RTX 3080 if the
+executor leaves out the waits.
 
 ## 4. Frame orchestration
 
@@ -159,9 +207,11 @@ graph: forward -> hdr -> tonemap -> backbuffer       (windowed: the swapchain im
        forward -> hdr -> tonemap -> display -> readback -> imported HostRead buffer   (headless)
        with occlusion culling, forward is (clear visibility ->) forward early -> depth pyramid -> forward late
 compile; execute
-submit2: wait imageAvailable at firstUseStage(backbuffer); signal renderFinished[image]; fence
+submit (3.6): one submit2 per submission, each signalling its queue's timeline; the submission that first
+       uses the backbuffer waits imageAvailable at firstUseStage(backbuffer); the last graphics one signals
+       renderFinished[image] and the fence
 present                                              suboptimal or out of date: recreate
-headless: wait the fence, copy the readback buffer into lastFrame()
+headless: wait the fence and the compute timeline, copy the readback buffer into lastFrame()
 ```
 
 `vkDeviceWaitIdle` appears only in swapchain recreation and teardown. The fence is reset right before
@@ -463,6 +513,7 @@ What Nanite does beyond this, and where it would go here:
 | `compile(Extent2D)` | `RenderGraph(Extent2D)`; `compile()` | `execute()` can compile on demand |
 | `beginGraphics` / `endGraphics` | `beginPass` / `endPass` for every pass | Also carries debug labels for non-graphics passes |
 | Pool reuse after the frames in flight | Immediate reuse | Safe on one queue (section 3.5) and needs fewer images |
+| Async compute with ownership transfers | Concurrent sharing for buffers and shared transients; semaphores only | Transfers need matching release and acquire barriers, often a frame apart (3.6) |
 | Time in the frame uniforms | Left out | No shader uses it, and it would make goldens depend on wall time |
 | Windowed frame with three passes | Two: forward, then tonemap straight into the swapchain image | The blit pass became unnecessary |
 | Install workflow kept | Removed | The package installs neither its shaders nor the volk and VMA headers its Vulkan headers include |
@@ -507,7 +558,6 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
   path relative to the library), and export or bundle volk and VMA.
 - **Aliasing.** Transients with disjoint lifetimes share one VMA allocation (`vmaCreateAliasingImage`). Compile
   already knows the lifetimes; the executor adds aliasing barriers.
-- **Async compute.** A per-pass queue in `PassBuilder`; compile emits semaphores and ownership transfers.
 - **Pass reordering.** A topological sort over versions that shortens lifetimes. Versioned handles make this
   internal.
 - **Shader reflection.** SPIRV-Reflect fills set layouts and push constant ranges from the SPIR-V.

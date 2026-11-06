@@ -62,6 +62,7 @@ Useful options:
 | `--backend vulkan\|metal` | the GPU backend (Metal on Apple platforms only; Vulkan there runs on MoltenVK) |
 | `--debug` | validation (Vulkan validation layer, or Metal API validation) and debug logging; exits with status 3 if validation reported anything |
 | `--device NAME` | use the GPU whose name contains NAME (also `PHOX_DEVICE`) |
+| `--async-compute on\|off` | run async compute passes on a separate compute queue where the GPU has one (default on) |
 | `--dump-graph FILE` | write the frame's render graph as Graphviz DOT (`dot -Tsvg FILE -o graph.svg`) |
 
 To run on lavapipe instead of your GPU, as CI does: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD ./build-standalone/PhoxSample`.
@@ -171,6 +172,9 @@ graph.execute(executor);
 - Barriers come from how usages change between passes (and write hazards), batched per pass.
 - Transient resources live from their first to their last use and come from a pool, so steady-state
   frames create nothing.
+- Compute passes that call `b.async()` run on a separate compute queue when the device has one; the graph
+  splits the frame into submissions and orders them with timeline semaphores. Elsewhere they run in order on
+  the graphics queue. See [architecture section 3.6](docs/architecture.md#36-async-compute).
 - Invalid declarations (reading before anything writes, loading undefined contents, stale versions,
   attachments in compute passes, ...) throw when the pass is added.
 

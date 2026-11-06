@@ -106,6 +106,8 @@ int main(int argc, char **argv) {
     ("stats", "print what each frame drew (triangles before and after cluster LOD)")
     ("mesh-shaders", "draw with task and mesh shaders where available: on, off, noocclusion (frustum and cone "
                      "culling only) or nocull (no meshlet culling)", cxxopts::value<std::string>()->default_value("on"))
+    ("async-compute", "run async compute passes on a separate compute queue where the GPU has one (on or off)",
+     cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
     ("h,help", "show this help");
   // clang-format on
@@ -176,6 +178,11 @@ int main(int argc, char **argv) {
     config.meshLod = lod == "on";
     config.lodErrorPixels = args["lod-error"].as<float>();
     config.collectStatistics = args.count("stats") > 0;
+    const std::string asyncCompute = args["async-compute"].as<std::string>();
+    if (asyncCompute != "on" && asyncCompute != "off") {
+      throw std::invalid_argument("--async-compute expects on or off");
+    }
+    config.asyncCompute = asyncCompute == "on";
     // Writes the graph once, after the first frame that produced one.
     bool graphWritten = false;
     const auto dumpGraph = [&](const Renderer &r) {
@@ -199,7 +206,8 @@ int main(int argc, char **argv) {
                   : startInfo.occlusionCulling                   ? "mesh shaders, frustum, cone and occlusion culling"
                   : config.meshletCulling                        ? "mesh shaders, frustum and cone culling"
                                                                  : "mesh shaders, no meshlet culling")
-              << (startInfo.meshLod ? ", cluster LOD" : "") << std::endl;
+              << (startInfo.meshLod ? ", cluster LOD" : "") << (startInfo.asyncCompute ? ", async compute queue" : "")
+              << std::endl;
     // The first frames upload meshes and create pooled images, so they are left out of the averages.
     constexpr long kWarmupFrames = 3;
     TimingAverages timings;

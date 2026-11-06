@@ -22,22 +22,34 @@ bool compatible(const BufferCreateInfo &a, const BufferCreateInfo &b) {
 }
 
 template <class Entries, class Info>
-auto *findFree(Entries &entries, const Info &info) {
+auto *findFree(Entries &entries, const Info &info, QueueMask queues) {
     for (auto &entry : entries) {
-        if (!entry.inUse && compatible(entry.info, info)) return &entry;
+        if (!entry.inUse && entry.queues == queues && compatible(entry.info, info)) return &entry;
     }
     return static_cast<typename Entries::value_type *>(nullptr);
 }
 
+bool bothQueues(QueueMask queues) { return queues == (queueBit(Queue::Graphics) | queueBit(Queue::AsyncCompute)); }
+
 template <class Entries, class T> void markReleased(Entries &entries, const T &resource, std::uint64_t frame) {
     for (auto &entry : entries) {
         if (entry.resource.get() == &resource) {
-            entry.inUse = false;
+            // Used on both queues: still busy until collect() knows the frame has completed.
+            entry.pending = bothQueues(entry.queues);
+            entry.inUse = entry.pending;
             entry.lastUsed = frame;
             return;
         }
     }
     throw std::logic_error("TransientPool::release: resource is not from this pool");
+}
+
+template <class Entries> void freeCompleted(Entries &entries, std::uint64_t frame, std::uint64_t framesInFlight) {
+    for (auto &entry : entries) {
+        if (entry.pending && frame >= entry.lastUsed + framesInFlight) {
+            entry.pending = entry.inUse = false;
+        }
+    }
 }
 
 template <class Entries> std::size_t evict(Entries &entries, std::uint64_t frame, std::uint64_t after) {
@@ -49,14 +61,17 @@ template <class Entries> std::size_t evict(Entries &entries, std::uint64_t frame
 
 } // namespace
 
-TransientPool::TransientPool(Device &device) : m_device(device) {}
+TransientPool::TransientPool(Device &device, std::uint64_t framesInFlight)
+    : m_device(device), m_framesInFlight(framesInFlight) {}
 
 TransientPool::~TransientPool() = default;
 
-Image &TransientPool::acquire(const ImageCreateInfo &info, std::uint64_t frame) {
-    auto *entry = findFree(m_images, info);
+Image &TransientPool::acquire(const ImageCreateInfo &info, std::uint64_t frame, QueueMask queues) {
+    auto *entry = findFree(m_images, info, queues);
     if (entry == nullptr) {
-        m_images.push_back({m_device.makeImage(info), info});
+        ImageCreateInfo shared = info;
+        shared.sharedQueues = bothQueues(queues);
+        m_images.push_back({m_device.makeImage(shared), info, queues});
         entry = &m_images.back();
         log::debug("transient pool: created image '{}' {}x{} ({} pooled)", info.name, info.extent.width,
                    info.extent.height, m_images.size());
@@ -66,10 +81,10 @@ Image &TransientPool::acquire(const ImageCreateInfo &info, std::uint64_t frame) 
     return *entry->resource;
 }
 
-Buffer &TransientPool::acquire(const BufferCreateInfo &info, std::uint64_t frame) {
-    auto *entry = findFree(m_buffers, info);
+Buffer &TransientPool::acquire(const BufferCreateInfo &info, std::uint64_t frame, QueueMask queues) {
+    auto *entry = findFree(m_buffers, info, queues);
     if (entry == nullptr) {
-        m_buffers.push_back({m_device.makeBuffer(info), info});
+        m_buffers.push_back({m_device.makeBuffer(info), info, queues});
         entry = &m_buffers.back();
         log::debug("transient pool: created buffer '{}' of {} bytes ({} pooled)", info.name, info.size,
                    m_buffers.size());
@@ -84,6 +99,8 @@ void TransientPool::release(const Image &image, std::uint64_t frame) { markRelea
 void TransientPool::release(const Buffer &buffer, std::uint64_t frame) { markReleased(m_buffers, buffer, frame); }
 
 void TransientPool::collect(std::uint64_t frame) {
+    freeCompleted(m_images, frame, m_framesInFlight);
+    freeCompleted(m_buffers, frame, m_framesInFlight);
     const std::size_t images = evict(m_images, frame, kEvictAfterFrames);
     const std::size_t buffers = evict(m_buffers, frame, kEvictAfterFrames);
     if (images + buffers > 0) {

@@ -1,6 +1,7 @@
 // Render graph logic, checked against a backend that records what it is asked to do. No GPU needed.
 #include "phox/RenderGraph.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -71,6 +72,14 @@ public:
             log.push_back("barrier " + m_graph.bufferInfo(b.buffer).name + " " + name(b.from) + "->" + name(b.to));
         }
     }
+    void beginSubmission(const Submission &submission, std::uint32_t index) override {
+        if (logSubmissions) {
+            log.push_back("submit " + std::to_string(index) +
+                          (submission.queue == Queue::AsyncCompute ? " async" : " graphics") +
+                          (submission.wait ? " wait " + std::to_string(*submission.wait) : std::string()));
+        }
+    }
+    bool logSubmissions = false;
     void beginPass(const CompiledPass &pass) override { log.push_back("begin " + pass.name); }
     void endPass(const CompiledPass &pass) override { log.push_back("end " + pass.name); }
     PassContext &passContext() override { return *this; }
@@ -466,6 +475,231 @@ void dotShowsPassesAndCulling() {
     }
 }
 
+
+// A fluid step on the async queue, whose output the graphics queue draws: the draw waits for it, the pass
+// before the draw does not.
+void asyncComputeSplitsSubmissions() {
+    RenderGraph graph;
+    graph.setAsyncCompute(true);
+    RecordingBackend backend(graph);
+    backend.logSubmissions = true;
+    const BufferHandle particles = graph.createBuffer("particles", {1024});
+    const BufferHandle vertices = graph.createBuffer("vertices", {4096});
+    const ImageHandle color = graph.createImage("color", kColor);
+    const ImageHandle swap = graph.importImage("backbuffer", kColor, ImageUsage::Undefined, ImageUsage::Present);
+    BufferHandle simulated, surface;
+    ImageHandle sky, drawn;
+    graph.addPass("simulate", PassType::Compute,
+                  [&](PassBuilder &b) {
+                      simulated = b.write(particles, BufferUsage::StorageWrite);
+                      b.async();
+                  },
+                  nullptr);
+    graph.addPass("surface", PassType::Compute,
+                  [&](PassBuilder &b) {
+                      b.read(simulated, BufferUsage::StorageRead);
+                      surface = b.write(vertices, BufferUsage::StorageWrite);
+                      b.async();
+                  },
+                  nullptr);
+    graph.addPass("sky", PassType::Graphics, [&](PassBuilder &b) { sky = b.colorAttachment(color, LoadOp::Clear); }, nullptr);
+    graph.addPass("draw", PassType::Graphics,
+                  [&](PassBuilder &b) {
+                      b.read(surface, BufferUsage::Vertex);
+                      drawn = b.colorAttachment(sky, LoadOp::Load);
+                  },
+                  nullptr);
+    graph.addPass("blit", PassType::Transfer,
+                  [&](PassBuilder &b) {
+                      b.read(drawn, ImageUsage::TransferSrc);
+                      b.write(swap, ImageUsage::TransferDst);
+                  },
+                  nullptr);
+    graph.execute(backend);
+
+    const std::vector<Submission> &subs = graph.submissions();
+    CHECK(subs.size() == 3);
+    CHECK(subs[0].queue == Queue::Graphics && subs[0].passes == std::vector<std::uint32_t>{2} && !subs[0].wait);
+    CHECK(subs[1].queue == Queue::AsyncCompute && (subs[1].passes == std::vector<std::uint32_t>{0, 1}) && subs[1].signals);
+    CHECK(subs[2].queue == Queue::Graphics && (subs[2].passes == std::vector<std::uint32_t>{3, 4}) && subs[2].wait == 1u);
+    CHECK(subs[2].finalBarriers.images.size() == 1 && subs[0].finalBarriers.empty());
+    CHECK(graph.compiledPasses()[0].queue == Queue::AsyncCompute && graph.compiledPasses()[3].queue == Queue::Graphics);
+
+    const std::vector<std::string> expected = {
+        "submit 0 graphics",
+        "acquire color",
+        "barrier color Undefined->Color",
+        "begin sky",
+        "end sky",
+        "submit 1 async",
+        "acquire particles",
+        "barrier particles Undefined->StorageWrite",
+        "begin simulate",
+        "end simulate",
+        "acquire vertices",
+        "barrier particles StorageWrite->StorageRead",
+        "barrier vertices Undefined->StorageWrite",
+        "begin surface",
+        "end surface",
+        "release particles",
+        "submit 2 graphics wait 1",
+        "barrier color Color->Color",
+        "barrier vertices StorageWrite->Vertex",
+        "begin draw",
+        "end draw",
+        "release vertices",
+        "barrier color Color->TransferSrc",
+        "barrier backbuffer Undefined->TransferDst",
+        "begin blit",
+        "end blit",
+        "release color",
+        "barrier backbuffer TransferDst->Present",
+    };
+    if (backend.log != expected) {
+        for (const std::string &line : backend.log) std::cerr << line << "\n";
+    }
+    CHECK(backend.log == expected);
+    // Only the draw's use of the vertices crosses queues.
+    for (const BufferBarrier &b : graph.compiledPasses()[3].barriers.buffers) CHECK(b.crossQueue);
+    for (const ImageBarrier &b : graph.compiledPasses()[3].barriers.images) CHECK(!b.crossQueue);
+    const QueueMask both = queueBit(Queue::Graphics) | queueBit(Queue::AsyncCompute);
+    CHECK(graph.bufferInfo(vertices).queues == both);
+    CHECK(graph.bufferInfo(particles).queues == queueBit(Queue::AsyncCompute));
+    CHECK(graph.imageInfo(color).queues == queueBit(Queue::Graphics));
+    const auto first = graph.firstUse(swap);
+    CHECK(first && first->submission == 2);
+}
+
+// Without an async queue the same passes run in order on the graphics queue, as one submission.
+void asyncPassesWithoutAsyncCompute() {
+    RenderGraph graph;
+    RecordingBackend backend(graph);
+    const BufferHandle data = graph.createBuffer("data", {256});
+    const ImageHandle color = graph.createImage("color", kColor);
+    BufferHandle written;
+    graph.addPass("compute", PassType::Compute,
+                  [&](PassBuilder &b) {
+                      written = b.write(data, BufferUsage::StorageWrite);
+                      b.async();
+                  },
+                  nullptr);
+    graph.addPass("draw", PassType::Graphics,
+                  [&](PassBuilder &b) {
+                      b.read(written, BufferUsage::Vertex);
+                      b.colorAttachment(color, LoadOp::Clear);
+                      b.keep();
+                  },
+                  nullptr);
+    graph.execute(backend);
+    CHECK(graph.submissions().size() == 1);
+    CHECK((graph.submissions()[0].passes == std::vector<std::uint32_t>{0, 1}));
+    for (const CompiledPass &pass : graph.compiledPasses()) {
+        CHECK(pass.queue == Queue::Graphics && pass.submission == 0);
+        for (const BufferBarrier &b : pass.barriers.buffers) CHECK(!b.crossQueue);
+    }
+    CHECK(graph.bufferInfo(data).queues == queueBit(Queue::Graphics));
+    CHECK(throws([&] { graph.addPass("not compute", PassType::Graphics, [&](PassBuilder &b) { b.async(); }, nullptr); }));
+}
+
+// An import arrives and leaves on its home queue: a pass on the other queue waits for the home queue's
+// first submission, and a final submission on the home queue waits for the last use.
+void importsReturnToTheirHomeQueue() {
+    RenderGraph graph;
+    graph.setAsyncCompute(true);
+    const BufferHandle state = graph.importBuffer("state", {64}, BufferUsage::StorageWrite, BufferUsage::StorageWrite);
+    const BufferHandle field = graph.importBuffer("field", {64}, BufferUsage::StorageWrite, BufferUsage::StorageWrite,
+                                                  Queue::AsyncCompute);
+    graph.addPass("step", PassType::Compute,
+                  [&](PassBuilder &b) {
+                      b.write(state, BufferUsage::StorageWrite);
+                      b.read(field, BufferUsage::StorageRead);
+                      b.async();
+                  },
+                  nullptr);
+    graph.compile();
+    const std::vector<Submission> &subs = graph.submissions();
+    CHECK(subs.size() == 3);
+    CHECK(subs[0].queue == Queue::Graphics && subs[0].passes.empty() && subs[0].signals);
+    CHECK(subs[1].queue == Queue::AsyncCompute && subs[1].wait == 0u && subs[1].signals);
+    CHECK(subs[2].queue == Queue::Graphics && subs[2].wait == 1u && subs[2].passes.empty());
+    // state goes back to the graphics queue; field never left the async one, where it returns to StorageWrite.
+    CHECK(subs[2].finalBarriers.buffers.size() == 1 && subs[2].finalBarriers.buffers[0].crossQueue);
+    CHECK(subs[1].finalBarriers.buffers.size() == 1 && !subs[1].finalBarriers.buffers[0].crossQueue);
+    CHECK(subs[1].finalBarriers.buffers[0].buffer == field.index);
+    const BufferBarrier &step = graph.compiledPasses()[0].barriers.buffers[0];
+    CHECK(step.buffer == state.index && step.crossQueue);
+}
+
+// Every use of a resource after a use on the other queue is in a submission that waits for that one (or
+// a later one on the same queue), and waits only ever point backwards. Checked on many random graphs.
+void randomGraphsAreOrdered() {
+    std::uint32_t seed = 12345;
+    const auto next = [&](std::uint32_t n) {
+        seed = seed * 1664525u + 1013904223u;
+        return (seed >> 8) % n;
+    };
+    for (int round = 0; round < 500; ++round) {
+        RenderGraph graph;
+        graph.setAsyncCompute(true);
+        constexpr int kBuffers = 4;
+        std::vector<BufferHandle> buffers;
+        for (int i = 0; i < kBuffers; ++i) {
+            if (next(3) == 0) {
+                buffers.push_back(graph.importBuffer("b" + std::to_string(i), {16}, BufferUsage::StorageWrite,
+                                                     BufferUsage::StorageWrite,
+                                                     next(2) == 0 ? Queue::Graphics : Queue::AsyncCompute));
+            } else {
+                buffers.push_back(graph.createBuffer("b" + std::to_string(i), {16}));
+            }
+        }
+        std::vector<bool> written(kBuffers, false);
+        for (int i = 0; i < kBuffers; ++i) written[i] = graph.bufferInfo(buffers[i]).imported;
+        // uses[b]: (pass, writes) in order
+        std::vector<std::vector<int>> uses(kBuffers);
+        const int passCount = 3 + static_cast<int>(next(8));
+        for (int p = 0; p < passCount; ++p) {
+            const bool async = next(2) == 0;
+            graph.addPass("p" + std::to_string(p), PassType::Compute,
+                          [&](PassBuilder &b) {
+                              for (int i = 0; i < kBuffers; ++i) {
+                                  const std::uint32_t action = next(3); // 0: none, 1: read, 2: write
+                                  if (action == 1 && written[i]) {
+                                      b.read(buffers[i], BufferUsage::StorageRead);
+                                      uses[i].push_back(p);
+                                  } else if (action == 2) {
+                                      buffers[i] = b.write(buffers[i], BufferUsage::StorageWrite);
+                                      written[i] = true;
+                                      uses[i].push_back(p);
+                                  }
+                              }
+                              if (async) b.async();
+                              b.keep();
+                          },
+                          nullptr);
+        }
+        graph.compile();
+        const std::vector<Submission> &subs = graph.submissions();
+        const std::vector<CompiledPass> &passes = graph.compiledPasses();
+        for (std::size_t s = 0; s < subs.size(); ++s) {
+            if (subs[s].wait) {
+                CHECK(*subs[s].wait < s && subs[*subs[s].wait].queue != subs[s].queue && subs[*subs[s].wait].signals);
+            }
+            for (std::uint32_t p : subs[s].passes) CHECK(passes[p].submission == s && passes[p].queue == subs[s].queue);
+        }
+        // Does submission @p later start after submission @p earlier has completed?
+        const auto after = [&](std::uint32_t earlier, std::uint32_t later) {
+            if (subs[earlier].queue == subs[later].queue) return earlier <= later;
+            const auto &wait = subs[later].wait;
+            return wait && *wait >= earlier && subs[*wait].queue == subs[earlier].queue;
+        };
+        for (int i = 0; i < kBuffers; ++i) {
+            for (std::size_t u = 1; u < uses[i].size(); ++u) {
+                CHECK(after(passes[uses[i][u - 1]].submission, passes[uses[i][u]].submission));
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -483,6 +717,10 @@ int main() {
     relativeExtentsResolve();
     passDataFlowsFromSetupToExecute();
     dotShowsPassesAndCulling();
+    asyncComputeSplitsSubmissions();
+    asyncPassesWithoutAsyncCompute();
+    importsReturnToTheirHomeQueue();
+    randomGraphsAreOrdered();
     std::cout << "render graph tests passed" << std::endl;
     return 0;
 }

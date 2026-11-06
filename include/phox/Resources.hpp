@@ -80,6 +80,14 @@ enum class MemoryLocation : std::uint8_t {
     Readback,    ///< written by the GPU, read by the CPU; persistently mapped
 };
 
+/// The queues work is submitted to. AsyncCompute runs compute passes alongside the graphics queue on
+/// devices that have a separate compute queue.
+enum class Queue : std::uint8_t { Graphics, AsyncCompute };
+
+constexpr std::uint32_t queueBit(Queue queue) { return 1u << static_cast<std::uint32_t>(queue); }
+/// A set of queues, as a mask of queueBit().
+using QueueMask = std::uint32_t;
+
 struct ImageCreateInfo {
     Extent2D extent;
     Format format = Format::RGBA8Unorm;
@@ -87,6 +95,9 @@ struct ImageCreateInfo {
     std::uint32_t arrayLayers = 1;
     ImageUsageMask usage = 0;
     std::string name; ///< for debuggers and validation messages
+    /// Used on both the graphics and the async compute queue (Vulkan: concurrent sharing). Buffers are
+    /// always shared between the queues, so they have no such flag.
+    bool sharedQueues = false;
 };
 
 struct BufferCreateInfo {

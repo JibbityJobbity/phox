@@ -19,6 +19,11 @@
 ///
 /// Passes run in the order they are added. The graph is meant to be rebuilt every frame; it holds no
 /// GPU objects itself (a GraphBackend creates and binds them).
+///
+/// With async compute enabled (setAsyncCompute), compute passes marked async() run on a second queue.
+/// The graph then splits the live passes into submissions, one queue each, and orders them by having a
+/// submission wait for the one on the other queue that last used what it needs. Without it, every pass
+/// runs on the graphics queue in one submission, in the order added.
 namespace phox {
 
 inline constexpr std::uint32_t kInvalidResource = UINT32_MAX;
@@ -69,6 +74,7 @@ struct ImageInfo {
     Extent2D extent;          ///< desc.extent resolved against the output extent (set by compile())
     bool imported = false;    ///< owned outside the graph (e.g. a swapchain image)
     ImageUsageMask usage = 0; ///< every usage of the image in the compiled graph
+    QueueMask queues = 0;     ///< the queues whose passes use it in the compiled graph
 };
 
 /// What a backend needs to create or bind a buffer.
@@ -78,16 +84,22 @@ struct BufferInfo {
     BufferDesc desc;
     bool imported = false;
     BufferUsageMask usage = 0;
+    QueueMask queues = 0;
 };
 
 /// A state change the graph needs before a pass (or at the end of the graph). from == to is a pure
 /// execution and memory dependency, e.g. between two passes that write the same attachment.
+///
+/// A crossQueue barrier follows a use on the other queue. The submission it is in waits for the one that
+/// made that use, which orders the two and makes the writes visible; the barrier itself only has to
+/// change the layout after that wait.
 struct ImageBarrier {
     std::uint32_t image = 0;
     ImageUsage from = ImageUsage::Undefined;
     ImageUsage to = ImageUsage::Undefined;
     std::optional<PassType> fromPass; ///< empty: the state the image entered the graph in
     std::optional<PassType> toPass;   ///< empty: the state the image leaves the graph in
+    bool crossQueue = false;
 };
 
 struct BufferBarrier {
@@ -96,6 +108,7 @@ struct BufferBarrier {
     BufferUsage to = BufferUsage::Undefined;
     std::optional<PassType> fromPass;
     std::optional<PassType> toPass;
+    bool crossQueue = false;
 };
 
 /// Barriers issued together, as one call in the backend.
@@ -120,6 +133,8 @@ struct CompiledPass {
     std::string name;
     PassType type = PassType::Graphics;
     bool culled = false;
+    Queue queue = Queue::Graphics; ///< where it runs: AsyncCompute only for async() passes with async compute on
+    std::uint32_t submission = 0;  ///< index into RenderGraph::submissions() (live passes only)
     BarrierBatch barriers;                    ///< issued before the pass
     std::vector<Attachment> colorAttachments; ///< graphics passes only
     std::optional<Attachment> depthAttachment;
@@ -130,6 +145,21 @@ struct CompiledPass {
     std::vector<std::uint32_t> releaseBuffers;
 };
 
+/// Work for one queue, submitted as a unit. Submissions are numbered in an order that has every wait
+/// after the submission it waits for, so a backend can submit them in that order.
+///
+/// Each queue's first submission comes first and exists even when empty: the work done before the
+/// graph (e.g. uploads recorded into the frame's command buffer) belongs to the graphics one, and imports
+/// arrive through it (see RenderGraph::importImage).
+struct Submission {
+    Queue queue = Queue::Graphics;
+    std::vector<std::uint32_t> passes; ///< indices into compiledPasses(), in order
+    /// The submission on the other queue that must complete first. Its index is lower than this one's.
+    std::optional<std::uint32_t> wait;
+    bool signals = false;       ///< a submission on the other queue waits for this one
+    BarrierBatch finalBarriers; ///< after the passes: imports whose home is this queue leave the graph
+};
+
 /// Base for the backend-specific object handed to a pass's execute callback (for Vulkan it carries the
 /// command buffer and the resources). Callbacks downcast it to their backend's type.
 class PassContext {
@@ -137,13 +167,18 @@ public:
     virtual ~PassContext() = default;
 };
 
-/// What the graph drives while executing. For each live pass, in order: acquire the transients it
-/// uses first, issue its barriers, beginPass, run the pass, endPass, release the transients it uses
-/// last. Then the final barriers. "release" means no later pass records a use; the backend decides
-/// when memory is actually reusable.
+/// What the graph drives while executing. For each submission, in order: beginSubmission, then for each
+/// of its passes: acquire the transients it uses first, issue its barriers, beginPass, run the pass,
+/// endPass, release the transients it uses last. Then the submission's final barriers, and
+/// endSubmission. "release" means no later pass records a use; the backend decides when memory is
+/// actually reusable (a resource used on both queues must outlive the frame, as the queues' order is
+/// only known once the frame's submissions run). Without async compute there is one submission.
 class GraphBackend {
 public:
     virtual ~GraphBackend() = default;
+    /// Starts recording @p submission (the index into RenderGraph::submissions()).
+    virtual void beginSubmission(const Submission &, std::uint32_t /*index*/) {}
+    virtual void endSubmission(const Submission &, std::uint32_t /*index*/) {}
     virtual void acquire(const ImageInfo &image) = 0;
     virtual void acquire(const BufferInfo &buffer) = 0;
     virtual void release(const ImageInfo &image) = 0;
@@ -186,6 +221,11 @@ public:
     /// Never cull this pass, even if nothing it writes is used (e.g. it has effects outside the graph).
     /// Writing an imported resource already counts as such an effect.
     void keep();
+    /// Run this compute pass on the async compute queue, if the graph has one (RenderGraph::setAsyncCompute);
+    /// otherwise it runs on the graphics queue in order, like any other pass. Its results are the same
+    /// either way.
+    /// @throws std::logic_error if the pass is not a compute pass
+    void async();
 
 private:
     friend class RenderGraph;
@@ -212,6 +252,7 @@ private:
     std::vector<Attachment> m_colors;
     std::optional<Attachment> m_depth;
     bool m_keep = false;
+    bool m_async = false;
 };
 
 class RenderGraph {
@@ -223,6 +264,13 @@ public:
     explicit RenderGraph(Extent2D output = {}) : m_output(output) {}
 
     Extent2D outputExtent() const { return m_output; }
+    /// Run async() passes on the async compute queue. Off by default; turn it on only when the backend has
+    /// such a queue.
+    void setAsyncCompute(bool enabled) {
+        m_asyncCompute = enabled;
+        m_isCompiled = false;
+    }
+    bool asyncCompute() const { return m_asyncCompute; }
 
     /// A graph-owned image that lives only for the passes that use it.
     ImageHandle createImage(std::string name, ImageDesc desc);
@@ -230,10 +278,19 @@ public:
     BufferHandle createBuffer(std::string name, BufferDesc desc);
     /// An image owned outside the graph. @p initial is its state when the graph starts (Undefined means
     /// the contents don't matter); the graph leaves it in @p final (Undefined: whatever state it is in).
-    ImageHandle importImage(std::string name, ImageDesc desc, ImageUsage initial, ImageUsage final);
+    /// @p home is the queue it arrives on and leaves on: its contents were last used by earlier work on
+    /// that queue, and later work there may use it after the frame. A pass on the other queue that uses
+    /// it first waits for that queue's first submission, and if the last use is on the other queue, the
+    /// graph ends with a submission on @p home that waits for it. Without async compute, every import's
+    /// home is the graphics queue. An import used on both queues must be created for both
+    /// (ImageCreateInfo::sharedQueues).
+    ImageHandle importImage(std::string name, ImageDesc desc, ImageUsage initial, ImageUsage final,
+                            Queue home = Queue::Graphics);
     /// A buffer owned outside the graph. HostWrite as @p initial means the CPU filled it before the
     /// frame; HostRead as @p final makes the GPU's writes visible to the CPU once the frame completes.
-    BufferHandle importBuffer(std::string name, BufferDesc desc, BufferUsage initial, BufferUsage final);
+    /// @p home: see importImage.
+    BufferHandle importBuffer(std::string name, BufferDesc desc, BufferUsage initial, BufferUsage final,
+                              Queue home = Queue::Graphics);
 
     /// Adds a pass. @p setup runs immediately and declares the pass's resources; @p execute runs during
     /// execute(). Throws (see PassBuilder) if the declarations are invalid; the graph is then unchanged.
@@ -267,9 +324,13 @@ public:
     struct FirstUse {
         ImageUsage usage;
         PassType pass;
+        std::uint32_t submission = 0; ///< the submission of that pass
     };
     bool compiled() const { return m_isCompiled; }
     const std::vector<CompiledPass> &compiledPasses() const;
+    /// The live passes grouped by queue, in an order that is safe to submit.
+    const std::vector<Submission> &submissions() const;
+    /// The barriers that leave the imports in their final states: every submission's finalBarriers.
     const BarrierBatch &finalBarriers() const;
     const ImageInfo &imageInfo(std::uint32_t index) const;
     const ImageInfo &imageInfo(ImageHandle handle) const { return imageInfo(handle.index); }
@@ -289,6 +350,7 @@ private:
     struct Resource {
         std::string name;
         bool imported = false;
+        Queue home = Queue::Graphics; ///< imports only
         std::uint8_t initial = 0; ///< usage value; Undefined means no meaningful contents
         std::uint8_t final = 0;
         std::uint32_t version = 0;
@@ -311,6 +373,7 @@ private:
         std::vector<Attachment> colors;
         std::optional<Attachment> depth;
         bool keep = false;
+        bool async = false;
         ExecuteFn execute;
         std::shared_ptr<void> data;
     };
@@ -326,7 +389,9 @@ private:
     std::vector<BufferResource> m_buffers;
     std::vector<Pass> m_passes;
     std::vector<CompiledPass> m_compiled;
+    std::vector<Submission> m_submissions;
     BarrierBatch m_finalBarriers;
+    bool m_asyncCompute = false;
     bool m_isCompiled = false;
 };
 

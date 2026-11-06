@@ -50,6 +50,22 @@ QueueFamilies pickQueueFamilies(VkPhysicalDevice physicalDevice, VkSurfaceKHR su
     return result;
 }
 
+// A family that computes but cannot draw: its queues run alongside the graphics queue on hardware with
+// separate compute engines. UINT32_MAX if there is none.
+std::uint32_t pickAsyncComputeFamily(VkPhysicalDevice physicalDevice) {
+    std::uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, families.data());
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const VkQueueFlags flags = families[i].queueFlags;
+        if ((flags & VK_QUEUE_COMPUTE_BIT) != 0 && (flags & VK_QUEUE_GRAPHICS_BIT) == 0 && families[i].queueCount > 0) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
 bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char *name) {
     std::uint32_t count = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr);
@@ -90,17 +106,22 @@ VmaAllocationCreateInfo allocationInfoFor(MemoryLocation memory) {
 } // namespace
 
 Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool objectNames,
-               bool meshShaders)
+               bool meshShaders, bool asyncCompute)
     : m_instance(instance), m_physicalDevice(physicalDevice), m_objectNames(objectNames) {
     vkGetPhysicalDeviceProperties(m_physicalDevice, &m_properties);
     const QueueFamilies families = pickQueueFamilies(m_physicalDevice, surface);
     m_graphicsFamily = families.graphics;
     m_presentFamily = surface != VK_NULL_HANDLE ? families.present : families.graphics;
+    if (asyncCompute) {
+        m_computeFamily = pickAsyncComputeFamily(m_physicalDevice);
+    }
 
     const float priority = 1.0f;
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
-    for (std::uint32_t family : {m_graphicsFamily, m_presentFamily}) {
-        if (!queueInfos.empty() && queueInfos.front().queueFamilyIndex == family) {
+    for (std::uint32_t family : {m_graphicsFamily, m_presentFamily, m_computeFamily}) {
+        const bool known = std::any_of(queueInfos.begin(), queueInfos.end(),
+                                       [&](const VkDeviceQueueCreateInfo &info) { return info.queueFamilyIndex == family; });
+        if (family == UINT32_MAX || known) {
             continue;
         }
         VkDeviceQueueCreateInfo info{};
@@ -133,6 +154,19 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // Submissions to the two queues wait for each other through timeline semaphores (required by 1.2).
+    features12.timelineSemaphore = VK_TRUE;
+    {
+        // Optional: resetting timestamp queries from the CPU, so passes on either queue can be timed.
+        VkPhysicalDeviceVulkan12Features supported12{};
+        supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        supported.pNext = &supported12;
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supported);
+        m_hostQueryReset = supported12.hostQueryReset == VK_TRUE;
+        features12.hostQueryReset = supported12.hostQueryReset;
+    }
     {
         VkPhysicalDeviceVulkan12Properties properties12{};
         properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
@@ -197,6 +231,23 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     volkLoadDeviceTable(&m_table, m_device);
     m_table.vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
     m_table.vkGetDeviceQueue(m_device, m_presentFamily, 0, &m_presentQueue);
+    if (m_computeFamily != UINT32_MAX) {
+        m_table.vkGetDeviceQueue(m_device, m_computeFamily, 0, &m_computeQueue);
+    }
+
+    VkSemaphoreTypeCreateInfo timelineType{};
+    timelineType.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphoreInfo.pNext = &timelineType;
+    for (QueueTimeline &timeline : m_timelines) {
+        if (m_table.vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &timeline.semaphore) != VK_SUCCESS) {
+            for (QueueTimeline &created : m_timelines) m_table.vkDestroySemaphore(m_device, created.semaphore, nullptr);
+            m_table.vkDestroyDevice(m_device, nullptr);
+            throw std::runtime_error("failed to create a timeline semaphore");
+        }
+    }
 
     // VMA is built without static or dynamic function loading, so it gets every entry point from here.
     VmaVulkanFunctions functions{};
@@ -237,18 +288,55 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     allocatorInfo.pVulkanFunctions = &functions;
     if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
+        for (QueueTimeline &timeline : m_timelines) m_table.vkDestroySemaphore(m_device, timeline.semaphore, nullptr);
         m_table.vkDestroyDevice(m_device, nullptr);
         throw std::runtime_error("failed to create the memory allocator");
+    }
+    setObjectName(VK_OBJECT_TYPE_SEMAPHORE, reinterpret_cast<std::uint64_t>(m_timelines[0].semaphore), "graphics timeline");
+    setObjectName(VK_OBJECT_TYPE_SEMAPHORE, reinterpret_cast<std::uint64_t>(m_timelines[1].semaphore),
+                  "async compute timeline");
+    if (m_computeQueue != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_QUEUE, reinterpret_cast<std::uint64_t>(m_computeQueue), "async compute");
     }
 }
 
 Device::~Device() {
     m_table.vkDeviceWaitIdle(m_device);
+    for (QueueTimeline &timeline : m_timelines) m_table.vkDestroySemaphore(m_device, timeline.semaphore, nullptr);
     vmaDestroyAllocator(m_allocator);
     m_table.vkDestroyDevice(m_device, nullptr);
 }
 
 void Device::waitIdle() { m_table.vkDeviceWaitIdle(m_device); }
+
+VkQueue Device::queue(Queue queue) const {
+    if (queue == Queue::AsyncCompute) {
+        if (m_computeQueue == VK_NULL_HANDLE) throw std::logic_error("the device has no async compute queue");
+        return m_computeQueue;
+    }
+    return m_graphicsQueue;
+}
+
+std::uint32_t Device::queueFamilyIndex(Queue queue) const {
+    return queue == Queue::AsyncCompute ? m_computeFamily : m_graphicsFamily;
+}
+
+std::uint64_t Device::signalValue(Queue queue) { return ++m_timelines[static_cast<std::size_t>(queue)].value; }
+
+void Device::waitTimeline(Queue queue, std::uint64_t value) const {
+    if (value == 0) {
+        return;
+    }
+    const VkSemaphore semaphore = timeline(queue);
+    VkSemaphoreWaitInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.semaphoreCount = 1;
+    info.pSemaphores = &semaphore;
+    info.pValues = &value;
+    if (m_table.vkWaitSemaphores(m_device, &info, UINT64_MAX) != VK_SUCCESS) {
+        throw std::runtime_error("waiting for a timeline semaphore failed");
+    }
+}
 
 void Device::setObjectName(VkObjectType type, std::uint64_t handle, const std::string &name) const {
     if (!m_objectNames || name.empty() || vkSetDebugUtilsObjectNameEXT == nullptr) {
@@ -274,7 +362,15 @@ std::unique_ptr<Buffer> Device::makeBuffer(const BufferCreateInfo &info) {
     if (info.deviceAddress) {
         bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // buffers are only used on the graphics queue
+    // With async compute, every buffer can be used on both queues: no queue family ownership transfers,
+    // which buffers lose nothing by.
+    const std::uint32_t sharedFamilies[2] = {m_graphicsFamily, m_computeFamily};
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (asyncCompute()) {
+        bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        bufferInfo.queueFamilyIndexCount = 2;
+        bufferInfo.pQueueFamilyIndices = sharedFamilies;
+    }
     if (bufferInfo.usage == 0) {
         throw std::logic_error("buffer '" + info.name + "' has no GPU usage");
     }
@@ -309,7 +405,14 @@ std::unique_ptr<Image> Device::makeImage(const ImageCreateInfo &info) {
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = toVkImageUsage(info.usage);
+    // Images stay exclusive unless they are used on both queues: concurrent sharing can cost compression.
+    const std::uint32_t sharedFamilies[2] = {m_graphicsFamily, m_computeFamily};
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (info.sharedQueues && asyncCompute()) {
+        imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        imageInfo.queueFamilyIndexCount = 2;
+        imageInfo.pQueueFamilyIndices = sharedFamilies;
+    }
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (imageInfo.usage == 0) {
         throw std::logic_error("image '" + info.name + "' has no GPU usage");

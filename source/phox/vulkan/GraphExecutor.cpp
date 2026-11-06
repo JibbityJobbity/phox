@@ -7,6 +7,7 @@
 #include "phox/vulkan/Image.hpp"
 #include "phox/vulkan/TransientPool.hpp"
 
+#include <optional>
 #include <stdexcept>
 
 namespace phox::vk {
@@ -112,6 +113,13 @@ Scope destinationScope(Scope scope, bool external, bool present) {
     return scope;
 }
 
+// The stages a semaphore wait blocks for a use at @p stages. Host reads and presentation are not queue
+// stages; they wait for everything.
+VkPipelineStageFlags2 waitStage(VkPipelineStageFlags2 stages) {
+    return stages == VK_PIPELINE_STAGE_2_NONE || stages == VK_PIPELINE_STAGE_2_HOST_BIT ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
+                                                                                       : stages;
+}
+
 VkAttachmentLoadOp toVk(LoadOp op) {
     switch (op) {
     case LoadOp::Load: return VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -156,7 +164,7 @@ FrameContext &PassContext::frame() const { return m_executor.m_frame; }
 GraphExecutor::GraphExecutor(const RenderGraph &graph, Device &device, TransientPool &pool, FrameContext &frame,
                              std::uint64_t frameNumber, VkCommandBuffer commandBuffer)
     : m_graph(graph), m_device(device), m_pool(pool), m_frame(frame), m_frameNumber(frameNumber),
-      m_commandBuffer(commandBuffer), m_context(*this) {
+      m_frameCommandBuffer(commandBuffer), m_commandBuffer(commandBuffer), m_context(*this) {
     m_frame.timer().reset(m_commandBuffer);
 }
 
@@ -201,6 +209,115 @@ void GraphExecutor::bindImage(ImageHandle handle, VkImage image, VkImageView vie
 
 void GraphExecutor::bindBuffer(BufferHandle handle, VkBuffer buffer) { bufferSlot(handle.index).buffer = buffer; }
 
+void GraphExecutor::beginSubmission(const Submission &submission, std::uint32_t index) {
+    if (index >= m_recorded.size()) m_recorded.resize(index + 1);
+    Recorded &recorded = m_recorded[index];
+    if (index == 0) {
+        recorded.cmd = m_frameCommandBuffer; // begun by the renderer, with the work before the graph in it
+        recorded.commands = true;
+    } else if (!submission.passes.empty() || !submission.finalBarriers.empty()) {
+        recorded.cmd = m_frame.extraCommandBuffer(submission.queue);
+        recorded.commands = true;
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (m_device.table().vkBeginCommandBuffer(recorded.cmd, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("failed to begin a command buffer");
+        }
+    }
+    m_commandBuffer = recorded.cmd;
+    m_queue = submission.queue;
+    m_submission = index;
+}
+
+void GraphExecutor::endSubmission(const Submission &, std::uint32_t) { m_commandBuffer = VK_NULL_HANDLE; }
+
+std::uint64_t GraphExecutor::submit(const FrameSubmit &extra) {
+    const std::vector<Submission> &submissions = m_graph.submissions();
+    const auto &table = m_device.table();
+    if (m_recorded.size() < submissions.size()) {
+        throw std::logic_error("GraphExecutor::submit: the graph has not been executed");
+    }
+
+    // Empty submissions are skipped unless one on the other queue waits for them.
+    std::vector<bool> needed(submissions.size());
+    std::size_t lastGraphics = 0;
+    for (std::size_t i = 0; i < submissions.size(); ++i) {
+        needed[i] = m_recorded[i].commands || submissions[i].signals;
+        if (needed[i] && submissions[i].queue == Queue::Graphics) lastGraphics = i;
+    }
+    std::optional<std::uint32_t> imageWait;
+    if (extra.waitSemaphore != VK_NULL_HANDLE) {
+        const auto first = m_graph.firstUse(extra.waitImage);
+        imageWait = first ? first->submission : 0u;
+    }
+
+    std::vector<std::uint64_t> values(submissions.size(), 0);
+    std::uint64_t computeValue = 0;
+    for (std::size_t i = 0; i < submissions.size(); ++i) {
+        if (!needed[i]) {
+            continue;
+        }
+        const Submission &submission = submissions[i];
+        const Recorded &recorded = m_recorded[i];
+        if (recorded.cmd != VK_NULL_HANDLE && table.vkEndCommandBuffer(recorded.cmd) != VK_SUCCESS) {
+            throw std::runtime_error("failed to end a command buffer");
+        }
+        values[i] = m_device.signalValue(submission.queue);
+
+        std::vector<VkSemaphoreSubmitInfo> waits;
+        if (submission.wait) {
+            const Queue other = submission.queue == Queue::Graphics ? Queue::AsyncCompute : Queue::Graphics;
+            VkSemaphoreSubmitInfo wait{};
+            wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            wait.semaphore = m_device.timeline(other);
+            wait.value = values.at(*submission.wait);
+            wait.stageMask = recorded.waitStages != VK_PIPELINE_STAGE_2_NONE ? recorded.waitStages
+                                                                              : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            waits.push_back(wait);
+        }
+        if (imageWait == i) {
+            VkSemaphoreSubmitInfo wait{};
+            wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            wait.semaphore = extra.waitSemaphore;
+            // Block only the stage that first touches the image, as reported by the graph.
+            wait.stageMask = firstUseStage(m_graph, extra.waitImage, m_device.meshShaders());
+            waits.push_back(wait);
+        }
+        std::vector<VkSemaphoreSubmitInfo> signals(1);
+        signals[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signals[0].semaphore = m_device.timeline(submission.queue);
+        signals[0].value = values[i];
+        signals[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const bool last = i == lastGraphics;
+        if (last && extra.signalSemaphore != VK_NULL_HANDLE) {
+            VkSemaphoreSubmitInfo signal{};
+            signal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            signal.semaphore = extra.signalSemaphore;
+            signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            signals.push_back(signal);
+        }
+
+        VkCommandBufferSubmitInfo commandInfo{};
+        commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandInfo.commandBuffer = recorded.cmd;
+        VkSubmitInfo2 info{};
+        info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        info.waitSemaphoreInfoCount = static_cast<std::uint32_t>(waits.size());
+        info.pWaitSemaphoreInfos = waits.data();
+        info.commandBufferInfoCount = recorded.cmd != VK_NULL_HANDLE ? 1 : 0;
+        info.pCommandBufferInfos = &commandInfo;
+        info.signalSemaphoreInfoCount = static_cast<std::uint32_t>(signals.size());
+        info.pSignalSemaphoreInfos = signals.data();
+        if (table.vkQueueSubmit2(m_device.queue(submission.queue), 1, &info, last ? extra.fence : VK_NULL_HANDLE) !=
+            VK_SUCCESS) {
+            throw std::runtime_error("failed to submit the frame");
+        }
+        if (submission.queue == Queue::AsyncCompute) computeValue = values[i];
+    }
+    return computeValue;
+}
+
 void GraphExecutor::acquire(const ImageInfo &info) {
     ImageCreateInfo createInfo;
     createInfo.extent = info.extent;
@@ -209,7 +326,7 @@ void GraphExecutor::acquire(const ImageInfo &info) {
     createInfo.arrayLayers = info.desc.arrayLayers;
     createInfo.usage = info.usage; // exactly the usages the compiled graph needs
     createInfo.name = info.name;
-    Image &image = m_pool.acquire(createInfo, m_frameNumber);
+    Image &image = m_pool.acquire(createInfo, m_frameNumber, info.queues);
     ImageSlot &slot = imageSlot(info.index);
     slot.image = image.handle();
     slot.view = image.view();
@@ -223,7 +340,7 @@ void GraphExecutor::acquire(const BufferInfo &info) {
     createInfo.usage = info.usage;
     createInfo.memory = MemoryLocation::DeviceLocal;
     createInfo.name = info.name;
-    Buffer &buffer = m_pool.acquire(createInfo, m_frameNumber);
+    Buffer &buffer = m_pool.acquire(createInfo, m_frameNumber, info.queues);
     BufferSlot &slot = bufferSlot(info.index);
     slot.buffer = buffer.handle();
     slot.pooled = &buffer;
@@ -247,15 +364,23 @@ void GraphExecutor::release(const BufferInfo &info) {
     }
 }
 
+// A crossQueue barrier comes after its submission's wait for the other queue: that wait, with the same
+// stages, orders it after the earlier use and makes its writes visible, so the barrier's first half is
+// only those stages, with nothing to make available.
 void GraphExecutor::barriers(const BarrierBatch &batch) {
     const bool meshShaders = m_device.meshShaders();
+    VkPipelineStageFlags2 &waitStages = m_recorded.at(m_submission).waitStages;
     std::vector<VkImageMemoryBarrier2> images;
     images.reserve(batch.images.size());
     for (const ImageBarrier &b : batch.images) {
         const ImageInfo &info = m_graph.imageInfo(b.image);
-        const Scope src = sourceScope(imageScope(b.from, b.fromPass, meshShaders), !b.fromPass);
+        Scope src = sourceScope(imageScope(b.from, b.fromPass, meshShaders), !b.fromPass);
         const Scope dst =
             destinationScope(imageScope(b.to, b.toPass, meshShaders), !b.toPass, b.to == ImageUsage::Present);
+        if (b.crossQueue) {
+            src = {waitStage(dst.stages), VK_ACCESS_2_NONE, src.layout};
+            waitStages |= src.stages;
+        }
         VkImageMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         barrier.srcStageMask = src.stages;
@@ -274,8 +399,12 @@ void GraphExecutor::barriers(const BarrierBatch &batch) {
     std::vector<VkBufferMemoryBarrier2> buffers;
     buffers.reserve(batch.buffers.size());
     for (const BufferBarrier &b : batch.buffers) {
-        const Scope src = sourceScope(bufferScope(b.from, b.fromPass, meshShaders), !b.fromPass);
+        Scope src = sourceScope(bufferScope(b.from, b.fromPass, meshShaders), !b.fromPass);
         const Scope dst = destinationScope(bufferScope(b.to, b.toPass, meshShaders), !b.toPass, false);
+        if (b.crossQueue) {
+            src = {waitStage(dst.stages), VK_ACCESS_2_NONE, VK_IMAGE_LAYOUT_UNDEFINED};
+            waitStages |= src.stages;
+        }
         VkBufferMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
         barrier.srcStageMask = src.stages;
@@ -306,7 +435,7 @@ void GraphExecutor::beginPass(const CompiledPass &pass) {
         label.pLabelName = pass.name.c_str();
         vkCmdBeginDebugUtilsLabelEXT(m_commandBuffer, &label);
     }
-    m_frame.timer().begin(m_commandBuffer, pass.name);
+    m_frame.timer().begin(m_commandBuffer, pass.name, m_queue);
     if (pass.type != PassType::Graphics) {
         return;
     }

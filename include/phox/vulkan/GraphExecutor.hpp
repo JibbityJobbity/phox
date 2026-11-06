@@ -39,11 +39,23 @@ private:
     GraphExecutor &m_executor;
 };
 
-/// Executes a RenderGraph into one command buffer: synchronization2 barriers batched per pass, dynamic
-/// rendering for graphics passes, transient images and buffers from a TransientPool, and a GPU timestamp
-/// pair around each pass (the frame's PassTimer). Created per frame; it owns nothing across frames.
+/// What submit() adds to the graph's own submissions: the swapchain's semaphores and the frame's fence.
+struct FrameSubmit {
+    VkSemaphore waitSemaphore = VK_NULL_HANDLE; ///< binary; waited for by the submission that first uses @p waitImage
+    ImageHandle waitImage;                      ///< e.g. the acquired swapchain image
+    VkSemaphore signalSemaphore = VK_NULL_HANDLE; ///< binary; signalled by the last graphics submission
+    VkFence fence = VK_NULL_HANDLE;               ///< signalled by the last graphics submission
+};
+
+/// Executes a RenderGraph: one command buffer per submission (the first graphics one is the frame's own,
+/// already begun, holding the work recorded before the graph), synchronization2 barriers batched per
+/// pass, dynamic rendering for graphics passes, transient images and buffers from a TransientPool, and a
+/// GPU timestamp pair around each pass (the frame's PassTimer). submit() then submits them in order, each
+/// signalling its queue's timeline semaphore and waiting on the other's where the graph says. Created
+/// per frame; it owns nothing across frames.
 class GraphExecutor final : public phox::GraphBackend {
 public:
+    /// @param commandBuffer  the frame's first graphics command buffer, begun
     GraphExecutor(const RenderGraph &graph, Device &device, TransientPool &pool, FrameContext &frame,
                   std::uint64_t frameNumber, VkCommandBuffer commandBuffer);
     /// Returns pooled resources still held, e.g. after an exception while recording.
@@ -56,7 +68,14 @@ public:
     void bindImage(ImageHandle handle, VkImage image, VkImageView view = VK_NULL_HANDLE);
     void bindBuffer(BufferHandle handle, VkBuffer buffer);
 
+    /// Ends the command buffers and submits the executed graph. Returns the async compute timeline value
+    /// of the frame's last compute submission (0 if none), which the frame must reach before it completes.
+    /// @throws std::runtime_error if a submission fails
+    std::uint64_t submit(const FrameSubmit &extra);
+
     // GraphBackend
+    void beginSubmission(const Submission &submission, std::uint32_t index) override;
+    void endSubmission(const Submission &submission, std::uint32_t index) override;
     void acquire(const ImageInfo &image) override;
     void acquire(const BufferInfo &buffer) override;
     void release(const ImageInfo &image) override;
@@ -85,12 +104,22 @@ private:
     BufferSlot &bufferSlot(std::uint32_t index);
     const BufferSlot &boundBuffer(std::uint32_t index) const;
 
+    struct Recorded {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        bool commands = false;                               ///< holds passes or barriers
+        VkPipelineStageFlags2 waitStages = VK_PIPELINE_STAGE_2_NONE; ///< what crossQueue barriers need waited for
+    };
+
     const RenderGraph &m_graph;
     Device &m_device;
     TransientPool &m_pool;
     FrameContext &m_frame;
     std::uint64_t m_frameNumber;
-    VkCommandBuffer m_commandBuffer;
+    VkCommandBuffer m_frameCommandBuffer;
+    VkCommandBuffer m_commandBuffer; ///< the current submission's
+    Queue m_queue = Queue::Graphics; ///< the current submission's
+    std::uint32_t m_submission = 0;
+    std::vector<Recorded> m_recorded; ///< per submission
     PassContext m_context;
     std::vector<ImageSlot> m_images;
     std::vector<BufferSlot> m_buffers;

@@ -2,6 +2,7 @@
 
 #include "phox/vulkan/Device.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace phox::vk {
@@ -11,10 +12,15 @@ PassTimer::PassTimer(Device &device) : m_device(device) {
     vkGetPhysicalDeviceQueueFamilyProperties(device.physicalDevice(), &count, nullptr);
     std::vector<VkQueueFamilyProperties> families(count);
     vkGetPhysicalDeviceQueueFamilyProperties(device.physicalDevice(), &count, families.data());
-    const std::uint32_t validBits = families.at(device.graphicsQueueFamilyIndex()).timestampValidBits;
+    std::uint32_t validBits = families.at(device.graphicsQueueFamilyIndex()).timestampValidBits;
     const float period = device.properties().limits.timestampPeriod;
     if (validBits == 0 || period <= 0.0f) {
         return; // no timestamps on this queue: timings stay empty
+    }
+    if (device.asyncCompute() && device.hostQueryReset()) {
+        const std::uint32_t computeBits = families.at(device.queueFamilyIndex(Queue::AsyncCompute)).timestampValidBits;
+        m_asyncTimestamps = computeBits > 0;
+        if (m_asyncTimestamps) validBits = std::min(validBits, computeBits);
     }
     m_validMask = validBits >= 64 ? ~0ull : (1ull << validBits) - 1;
     m_nanosecondsPerTick = period;
@@ -34,13 +40,19 @@ void PassTimer::reset(VkCommandBuffer cmd) {
     m_recorded.clear();
     m_open = false;
     m_pending = false;
-    if (m_pool != VK_NULL_HANDLE) {
+    if (m_pool == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_device.hostQueryReset()) {
+        m_device.table().vkResetQueryPool(m_device.handle(), m_pool, 0, 2 * kMaxPasses);
+    } else {
         m_device.table().vkCmdResetQueryPool(cmd, m_pool, 0, 2 * kMaxPasses);
     }
 }
 
-void PassTimer::begin(VkCommandBuffer cmd, const std::string &name) {
-    if (m_pool == VK_NULL_HANDLE || m_recorded.size() >= kMaxPasses) {
+void PassTimer::begin(VkCommandBuffer cmd, const std::string &name, Queue queue) {
+    if (m_pool == VK_NULL_HANDLE || m_recorded.size() >= kMaxPasses ||
+        (queue == Queue::AsyncCompute && !m_asyncTimestamps)) {
         return;
     }
     const auto query = static_cast<std::uint32_t>(2 * m_recorded.size());

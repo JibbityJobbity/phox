@@ -1,6 +1,7 @@
 #include "phox/RenderGraph.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
@@ -220,6 +221,13 @@ void PassBuilder::depthReadOnly(ImageHandle image) {
 
 void PassBuilder::keep() { m_keep = true; }
 
+void PassBuilder::async() {
+    if (m_type != PassType::Compute) {
+        throw std::logic_error("pass '" + std::string(m_passName) + "' is not a compute pass, so it cannot run on the async compute queue");
+    }
+    m_async = true;
+}
+
 // ---- RenderGraph: declaration ----------------------------------------------------------------------
 
 RenderGraph::Resource &RenderGraph::resource(bool image, std::uint32_t index) {
@@ -257,25 +265,28 @@ BufferHandle RenderGraph::createBuffer(std::string name, BufferDesc desc) {
     return {m_buffers.back().info.index, 0};
 }
 
-ImageHandle RenderGraph::importImage(std::string name, ImageDesc desc, ImageUsage initial, ImageUsage final) {
+ImageHandle RenderGraph::importImage(std::string name, ImageDesc desc, ImageUsage initial, ImageUsage final, Queue home) {
     if (initial == ImageUsage::Present) {
         throw std::logic_error("import '" + name + "': Present is only valid as a final state");
     }
     const ImageHandle handle = createImage(std::move(name), desc);
     ImageResource &res = m_images.back();
     res.imported = res.info.imported = true;
+    res.home = home;
     res.initial = static_cast<std::uint8_t>(initial);
     res.final = static_cast<std::uint8_t>(final);
     return handle;
 }
 
-BufferHandle RenderGraph::importBuffer(std::string name, BufferDesc desc, BufferUsage initial, BufferUsage final) {
+BufferHandle RenderGraph::importBuffer(std::string name, BufferDesc desc, BufferUsage initial, BufferUsage final,
+                                       Queue home) {
     if (initial == BufferUsage::HostRead || final == BufferUsage::HostWrite) {
         throw std::logic_error("import '" + name + "': HostWrite is only an initial state and HostRead only a final one");
     }
     const BufferHandle handle = createBuffer(std::move(name), desc);
     BufferResource &res = m_buffers.back();
     res.imported = res.info.imported = true;
+    res.home = home;
     res.initial = static_cast<std::uint8_t>(initial);
     res.final = static_cast<std::uint8_t>(final);
     return handle;
@@ -311,6 +322,7 @@ void RenderGraph::addPassImpl(std::string name, PassType type, const SetupFn &se
     pass.colors = std::move(builder.m_colors);
     pass.depth = builder.m_depth;
     pass.keep = builder.m_keep;
+    pass.async = builder.m_async;
     pass.execute = std::move(execute);
     pass.data = std::move(data);
     m_passes.push_back(std::move(pass));
@@ -336,11 +348,13 @@ void RenderGraph::compile() {
                                std::max(1u, static_cast<std::uint32_t>(std::lround(m_output.height * scale)))};
         }
         img.info.usage = 0;
+        img.info.queues = 0;
         img.firstUse = img.lastUse = -1;
         img.first.reset();
     }
     for (BufferResource &buf : m_buffers) {
         buf.info.usage = 0;
+        buf.info.queues = 0;
         buf.firstUse = buf.lastUse = -1;
     }
 
@@ -371,20 +385,72 @@ void RenderGraph::compile() {
         }
     }
 
-    // 3. Walk the live passes in order, tracking each resource's state to derive barriers, lifetimes and
-    //    the usages each resource needs. A barrier is needed when the usage changes or either side writes.
+    // 3. Walk the live passes in order, tracking each resource's state to derive barriers, lifetimes, the
+    //    usages each resource needs and the submissions. A barrier is needed when the usage changes or
+    //    either side writes, and whenever the previous use was on the other queue: the pass's submission
+    //    then waits for the submission that made it, even for two reads, so that every use stays ordered
+    //    after the one before it (and, through it, after all earlier ones).
     struct State {
         std::uint8_t usage = 0;
         std::optional<PassType> pass;
         bool written = false;
+        std::optional<Queue> queue; ///< of the previous use; empty: none (a transient's contents are discarded)
+        std::uint32_t submission = 0;
     };
+    const auto homeOf = [&](const Resource &res) { return m_asyncCompute ? res.home : Queue::Graphics; };
+    const auto slot = [](Queue queue) { return static_cast<std::size_t>(queue); };
+
+    m_submissions.clear();
+    std::array<std::optional<std::uint32_t>, 2> open; // per queue: where its next pass goes, if still open
+    std::array<std::uint32_t, 2> last{};               // per queue: its latest submission
+    const auto addSubmission = [&](Queue queue) {
+        m_submissions.push_back(Submission{queue, {}, std::nullopt, false, {}});
+        const auto index = static_cast<std::uint32_t>(m_submissions.size() - 1);
+        open[slot(queue)] = last[slot(queue)] = index;
+        return index;
+    };
+    std::array<std::uint32_t, 2> initial{};
+    initial[slot(Queue::Graphics)] = addSubmission(Queue::Graphics);
+    if (m_asyncCompute) {
+        initial[slot(Queue::AsyncCompute)] = addSubmission(Queue::AsyncCompute);
+    }
+    // The submission on @p queue the next work goes into, once submission @p wait on the other queue has
+    // completed. A submission's wait covers all of it, so one that already holds passes is not given a
+    // new wait; nor is one numbered before @p wait, which would be submitted before it.
+    const auto submissionAfter = [&](Queue queue, std::uint32_t wait) {
+        const Queue other = queue == Queue::Graphics ? Queue::AsyncCompute : Queue::Graphics;
+        std::optional<std::uint32_t> &current = open[slot(queue)];
+        const bool covered = current && m_submissions[*current].wait && *m_submissions[*current].wait >= wait;
+        if (!covered) {
+            if (!current || !m_submissions[*current].passes.empty() || *current < wait) {
+                addSubmission(queue);
+            }
+            m_submissions[*current].wait = wait;
+        }
+        m_submissions[wait].signals = true;
+        if (open[slot(other)] == wait) {
+            open[slot(other)].reset(); // later work there must not delay the signal, so it goes in a new one
+        }
+        return *current;
+    };
+
     std::vector<State> imageState(m_images.size());
     std::vector<State> bufferState(m_buffers.size());
     for (std::size_t i = 0; i < m_images.size(); ++i) {
-        imageState[i] = {m_images[i].initial, std::nullopt, m_images[i].hasContents(0)};
+        const ImageResource &img = m_images[i];
+        imageState[i] = {img.initial, std::nullopt, img.hasContents(0), std::nullopt, 0};
+        if (img.imported) {
+            imageState[i].queue = homeOf(img);
+            imageState[i].submission = initial[slot(homeOf(img))];
+        }
     }
     for (std::size_t i = 0; i < m_buffers.size(); ++i) {
-        bufferState[i] = {m_buffers[i].initial, std::nullopt, m_buffers[i].hasContents(0)};
+        const BufferResource &buf = m_buffers[i];
+        bufferState[i] = {buf.initial, std::nullopt, buf.hasContents(0), std::nullopt, 0};
+        if (buf.imported) {
+            bufferState[i].queue = homeOf(buf);
+            bufferState[i].submission = initial[slot(homeOf(buf))];
+        }
     }
 
     m_compiled.assign(passCount, CompiledPass{});
@@ -397,19 +463,43 @@ void RenderGraph::compile() {
         if (out.culled) {
             continue;
         }
+        const Queue queue = pass.async && m_asyncCompute ? Queue::AsyncCompute : Queue::Graphics;
+        std::optional<std::uint32_t> wait;
+        for (const PassBuilder::Access &access : pass.accesses) {
+            const State &state = access.image ? imageState[access.index] : bufferState[access.index];
+            if (state.queue && *state.queue != queue) {
+                wait = std::max(wait.value_or(0), state.submission);
+            }
+        }
+        std::uint32_t submission = 0;
+        if (wait) {
+            submission = submissionAfter(queue, *wait);
+        } else {
+            if (!open[slot(queue)]) {
+                addSubmission(queue);
+            }
+            submission = *open[slot(queue)];
+        }
+        m_submissions[submission].passes.push_back(static_cast<std::uint32_t>(p));
+        out.queue = queue;
+        out.submission = submission;
+
         const int index = static_cast<int>(p);
         for (const PassBuilder::Access &access : pass.accesses) {
             State &state = access.image ? imageState[access.index] : bufferState[access.index];
-            if (state.usage != access.usage || state.written || access.writes) {
+            const bool crossQueue = state.queue && *state.queue != queue;
+            if (crossQueue || state.usage != access.usage || state.written || access.writes) {
                 if (access.image) {
                     out.barriers.images.push_back({access.index, static_cast<ImageUsage>(state.usage),
-                                                   static_cast<ImageUsage>(access.usage), state.pass, pass.type});
+                                                   static_cast<ImageUsage>(access.usage), state.pass, pass.type,
+                                                   crossQueue});
                 } else {
                     out.barriers.buffers.push_back({access.index, static_cast<BufferUsage>(state.usage),
-                                                    static_cast<BufferUsage>(access.usage), state.pass, pass.type});
+                                                    static_cast<BufferUsage>(access.usage), state.pass, pass.type,
+                                                    crossQueue});
                 }
             }
-            state = {access.usage, pass.type, access.writes};
+            state = {access.usage, pass.type, access.writes, queue, submission};
 
             Resource &res = resource(access.image, access.index);
             if (res.firstUse < 0) {
@@ -422,11 +512,14 @@ void RenderGraph::compile() {
             if (access.image) {
                 ImageResource &img = m_images[access.index];
                 img.info.usage |= usageBit(static_cast<ImageUsage>(access.usage));
+                img.info.queues |= queueBit(queue);
                 if (!img.first) {
-                    img.first = FirstUse{static_cast<ImageUsage>(access.usage), pass.type};
+                    img.first = FirstUse{static_cast<ImageUsage>(access.usage), pass.type, submission};
                 }
             } else {
-                m_buffers[access.index].info.usage |= usageBit(static_cast<BufferUsage>(access.usage));
+                BufferResource &buf = m_buffers[access.index];
+                buf.info.usage |= usageBit(static_cast<BufferUsage>(access.usage));
+                buf.info.queues |= queueBit(queue);
             }
         }
 
@@ -455,20 +548,53 @@ void RenderGraph::compile() {
         }
     }
 
-    // 4. Imports leave in the state they asked for (Undefined: whatever state they are in).
+    // 4. Imports leave in the state they asked for (Undefined: whatever state they are in), on their home
+    //    queue. One last use on the other queue means a final submission on the home queue that waits for
+    //    it; the final barriers then go at the end of each queue's last submission.
+    for (const Queue home : {Queue::Graphics, Queue::AsyncCompute}) {
+        std::optional<std::uint32_t> wait;
+        const auto lastUseElsewhere = [&](const Resource &res, const State &state) {
+            if (res.imported && homeOf(res) == home && state.queue != home) {
+                wait = std::max(wait.value_or(0), state.submission);
+            }
+        };
+        for (std::size_t i = 0; i < m_images.size(); ++i) lastUseElsewhere(m_images[i], imageState[i]);
+        for (std::size_t i = 0; i < m_buffers.size(); ++i) lastUseElsewhere(m_buffers[i], bufferState[i]);
+        if (wait) {
+            submissionAfter(home, *wait);
+        }
+    }
     m_finalBarriers = {};
     for (std::size_t i = 0; i < m_images.size(); ++i) {
         const ImageResource &img = m_images[i];
-        if (img.imported && img.final != 0 && imageState[i].usage != img.final) {
-            m_finalBarriers.images.push_back({static_cast<std::uint32_t>(i), static_cast<ImageUsage>(imageState[i].usage),
-                                              static_cast<ImageUsage>(img.final), imageState[i].pass, std::nullopt});
+        const State &state = imageState[i];
+        if (!img.imported) {
+            continue;
+        }
+        const Queue home = homeOf(img);
+        const bool crossQueue = state.queue != home;
+        if (crossQueue || (img.final != 0 && state.usage != img.final)) {
+            const ImageBarrier barrier{static_cast<std::uint32_t>(i), static_cast<ImageUsage>(state.usage),
+                                       static_cast<ImageUsage>(img.final != 0 ? img.final : state.usage), state.pass,
+                                       std::nullopt, crossQueue};
+            m_submissions[last[slot(home)]].finalBarriers.images.push_back(barrier);
+            m_finalBarriers.images.push_back(barrier);
         }
     }
     for (std::size_t i = 0; i < m_buffers.size(); ++i) {
         const BufferResource &buf = m_buffers[i];
-        if (buf.imported && buf.final != 0 && bufferState[i].usage != buf.final) {
-            m_finalBarriers.buffers.push_back({static_cast<std::uint32_t>(i), static_cast<BufferUsage>(bufferState[i].usage),
-                                               static_cast<BufferUsage>(buf.final), bufferState[i].pass, std::nullopt});
+        const State &state = bufferState[i];
+        if (!buf.imported) {
+            continue;
+        }
+        const Queue home = homeOf(buf);
+        const bool crossQueue = state.queue != home;
+        if (crossQueue || (buf.final != 0 && state.usage != buf.final)) {
+            const BufferBarrier barrier{static_cast<std::uint32_t>(i), static_cast<BufferUsage>(state.usage),
+                                        static_cast<BufferUsage>(buf.final != 0 ? buf.final : state.usage),
+                                        state.pass, std::nullopt, crossQueue};
+            m_submissions[last[slot(home)]].finalBarriers.buffers.push_back(barrier);
+            m_finalBarriers.buffers.push_back(barrier);
         }
     }
 
@@ -479,26 +605,28 @@ void RenderGraph::execute(GraphBackend &backend) {
     if (!m_isCompiled) {
         compile();
     }
-    for (std::size_t p = 0; p < m_passes.size(); ++p) {
-        const CompiledPass &pass = m_compiled[p];
-        if (pass.culled) {
-            continue;
+    for (std::size_t s = 0; s < m_submissions.size(); ++s) {
+        const Submission &submission = m_submissions[s];
+        backend.beginSubmission(submission, static_cast<std::uint32_t>(s));
+        for (std::uint32_t p : submission.passes) {
+            const CompiledPass &pass = m_compiled[p];
+            for (std::uint32_t i : pass.acquireImages) backend.acquire(m_images[i].info);
+            for (std::uint32_t i : pass.acquireBuffers) backend.acquire(m_buffers[i].info);
+            if (!pass.barriers.empty()) {
+                backend.barriers(pass.barriers);
+            }
+            backend.beginPass(pass);
+            if (m_passes[p].execute) {
+                m_passes[p].execute(backend.passContext());
+            }
+            backend.endPass(pass);
+            for (std::uint32_t i : pass.releaseImages) backend.release(m_images[i].info);
+            for (std::uint32_t i : pass.releaseBuffers) backend.release(m_buffers[i].info);
         }
-        for (std::uint32_t i : pass.acquireImages) backend.acquire(m_images[i].info);
-        for (std::uint32_t i : pass.acquireBuffers) backend.acquire(m_buffers[i].info);
-        if (!pass.barriers.empty()) {
-            backend.barriers(pass.barriers);
+        if (!submission.finalBarriers.empty()) {
+            backend.barriers(submission.finalBarriers);
         }
-        backend.beginPass(pass);
-        if (m_passes[p].execute) {
-            m_passes[p].execute(backend.passContext());
-        }
-        backend.endPass(pass);
-        for (std::uint32_t i : pass.releaseImages) backend.release(m_images[i].info);
-        for (std::uint32_t i : pass.releaseBuffers) backend.release(m_buffers[i].info);
-    }
-    if (!m_finalBarriers.empty()) {
-        backend.barriers(m_finalBarriers);
+        backend.endSubmission(submission, static_cast<std::uint32_t>(s));
     }
 }
 
@@ -513,6 +641,11 @@ void RenderGraph::requireCompiled() const {
 const std::vector<CompiledPass> &RenderGraph::compiledPasses() const {
     requireCompiled();
     return m_compiled;
+}
+
+const std::vector<Submission> &RenderGraph::submissions() const {
+    requireCompiled();
+    return m_submissions;
 }
 
 const BarrierBatch &RenderGraph::finalBarriers() const {
@@ -564,7 +697,8 @@ std::string RenderGraph::toDot() const {
         const Pass &pass = m_passes[p];
         const bool culled = m_compiled[p].culled;
         dot << "  \"p" << p << "\" [shape=box, label=\"" << dotEscape(pass.name) << "\\n" << passTypeName(pass.type)
-            << (culled ? " (culled)" : "") << "\", "
+            << (!culled && m_compiled[p].queue == Queue::AsyncCompute ? " (async)" : "") << (culled ? " (culled)" : "")
+            << "\", "
             << (culled ? "style=\"rounded,dashed\", color=gray60, fontcolor=gray60"
                        : "style=\"rounded,filled\", fillcolor=\"#dbe8f7\"")
             << "];\n";

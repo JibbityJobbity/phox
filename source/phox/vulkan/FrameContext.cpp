@@ -8,7 +8,7 @@
 namespace phox::vk {
 
 FrameContext::FrameContext(Device &device, std::uint32_t index)
-    : m_device(device), m_arena(device), m_descriptors(device), m_timer(device) {
+    : m_device(device), m_index(index), m_arena(device), m_descriptors(device), m_timer(device) {
     const VkDevice dev = device.handle();
     const auto &table = device.table();
 
@@ -48,6 +48,39 @@ FrameContext::FrameContext(Device &device, std::uint32_t index)
     device.setObjectName(VK_OBJECT_TYPE_FENCE, reinterpret_cast<std::uint64_t>(m_fence), name);
     device.setObjectName(VK_OBJECT_TYPE_SEMAPHORE, reinterpret_cast<std::uint64_t>(m_imageAvailable),
                          name + " image available");
+
+    if (device.asyncCompute()) {
+        poolInfo.queueFamilyIndex = device.queueFamilyIndex(Queue::AsyncCompute);
+        if (table.vkCreateCommandPool(dev, &poolInfo, nullptr, &m_computePool) != VK_SUCCESS) {
+            table.vkDestroySemaphore(dev, m_imageAvailable, nullptr);
+            table.vkDestroyFence(dev, m_fence, nullptr);
+            table.vkDestroyCommandPool(dev, m_commandPool, nullptr);
+            throw std::runtime_error("failed to create frame " + std::to_string(index) + " compute command pool");
+        }
+    }
+}
+
+VkCommandBuffer FrameContext::extraCommandBuffer(Queue queue) {
+    Extra &extra = m_extra[static_cast<std::size_t>(queue)];
+    if (extra.used == extra.buffers.size()) {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = queue == Queue::AsyncCompute ? m_computePool : m_commandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        if (allocInfo.commandPool == VK_NULL_HANDLE) {
+            throw std::logic_error("the device has no async compute queue");
+        }
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        if (m_device.table().vkAllocateCommandBuffers(m_device.handle(), &allocInfo, &buffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate a command buffer");
+        }
+        m_device.setObjectName(VK_OBJECT_TYPE_COMMAND_BUFFER, reinterpret_cast<std::uint64_t>(buffer),
+                               "frame " + std::to_string(m_index) + (queue == Queue::AsyncCompute ? " compute " : " graphics ") +
+                                   std::to_string(extra.buffers.size() + 1));
+        extra.buffers.push_back(buffer);
+    }
+    return extra.buffers[extra.used++];
 }
 
 FrameContext::~FrameContext() {
@@ -57,6 +90,7 @@ FrameContext::~FrameContext() {
     table.vkDestroySemaphore(m_device.handle(), m_imageAvailable, nullptr);
     table.vkDestroyFence(m_device.handle(), m_fence, nullptr);
     table.vkDestroyCommandPool(m_device.handle(), m_commandPool, nullptr);
+    table.vkDestroyCommandPool(m_device.handle(), m_computePool, nullptr);
 }
 
 void FrameContext::begin() {
@@ -64,9 +98,15 @@ void FrameContext::begin() {
     if (table.vkWaitForFences(m_device.handle(), 1, &m_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
         throw std::runtime_error("waiting for a frame fence failed");
     }
+    m_device.waitTimeline(Queue::AsyncCompute, m_computeWait);
+    m_computeWait = 0;
     m_timer.collect();
     m_deferred.flush();
     table.vkResetCommandPool(m_device.handle(), m_commandPool, 0);
+    if (m_computePool != VK_NULL_HANDLE) {
+        table.vkResetCommandPool(m_device.handle(), m_computePool, 0);
+    }
+    for (Extra &extra : m_extra) extra.used = 0;
     m_arena.reset();
     m_descriptors.reset();
 }

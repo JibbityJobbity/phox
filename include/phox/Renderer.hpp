@@ -50,6 +50,9 @@ struct RendererConfig {
     float lodErrorPixels = 1.0f;
     /// Fill frameStatistics() every frame. Costs CPU time (the LOD selection is repeated on the CPU).
     bool collectStatistics = false;
+    /// Run render graph passes marked async() on a separate compute queue, where the device has one
+    /// (Vulkan: a compute-only queue family). Without one they run on the graphics queue.
+    bool asyncCompute = true;
 };
 
 /// What a frame drew, before culling (RendererConfig::collectStatistics).
@@ -79,6 +82,7 @@ struct RendererInfo {
     bool meshShaders = false;             ///< meshes are drawn as meshlets with task and mesh shaders
     bool occlusionCulling = false;        ///< meshlets are also culled against a depth pyramid
     bool meshLod = false;                 ///< meshlets are drawn at the level of detail the view needs
+    bool asyncCompute = false;            ///< async() passes run on a separate compute queue
 };
 
 class Renderer {

@@ -323,7 +323,7 @@ void Renderer::initialize(const RendererConfig &config) {
         for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
             m_frames[i] = std::make_unique<FrameContext>(*m_device, i);
         }
-        m_transients = std::make_unique<TransientPool>(*m_device);
+        m_transients = std::make_unique<TransientPool>(*m_device, kFramesInFlight);
         const bool meshShaders = createPipelines();
         m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders, m_config.meshLod, m_config.collectStatistics);
         m_textures = std::make_unique<TextureCache>(*m_device, *m_pipelines);
@@ -337,12 +337,13 @@ void Renderer::initialize(const RendererConfig &config) {
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
-        log::info("renderer initialized on {}{}, drawing with {}{}", m_deviceName, m_validation ? " (validation on)" : "",
+        log::info("renderer initialized on {}{}, drawing with {}{}{}", m_deviceName, m_validation ? " (validation on)" : "",
                   !meshShaders              ? "vertex shaders"
                   : m_visibility            ? "mesh shaders (frustum, cone and occlusion culling)"
                   : m_config.meshletCulling ? "mesh shaders (frustum and cone culling)"
                                             : "mesh shaders (no meshlet culling)",
-                  m_meshes->lod() ? fmt::format(", cluster LOD at {} px", m_config.lodErrorPixels) : std::string());
+                  m_meshes->lod() ? fmt::format(", cluster LOD at {} px", m_config.lodErrorPixels) : std::string(),
+                  m_device->asyncCompute() ? ", async compute queue" : "");
     } catch (const std::exception &e) {
         log::warn("Vulkan initialization failed, using the software fallback renderer: {}", e.what());
         releaseVulkan();
@@ -406,6 +407,7 @@ RendererInfo Renderer::info() const {
     result.meshShaders = !m_useFallback && m_meshes && m_meshes->meshlets();
     result.occlusionCulling = !m_useFallback && m_visibility != nullptr;
     result.meshLod = !m_useFallback && m_meshes && m_meshes->lod();
+    result.asyncCompute = !m_useFallback && m_device && m_device->asyncCompute();
     return result;
 }
 
@@ -511,6 +513,7 @@ void Renderer::render(const Scene &scene) {
     // With occlusion culling, "forward" is: (clear visibility ->) forward early -> depth pyramid ->
     // forward late, with the meshlet visibility bits imported from the previous frame.
     RenderGraph graph(extent);
+    graph.setAsyncCompute(m_device->asyncCompute());
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
@@ -553,40 +556,22 @@ void Renderer::render(const Scene &scene) {
         m_frameGraphDot = graph.toDot();
     }
     graph.execute(executor);
-
-    if (table.vkEndCommandBuffer(cmd) != VK_SUCCESS) {
-        throw std::runtime_error("failed to end the frame command buffer");
-    }
     frame.arena().flush();
 
-    VkCommandBufferSubmitInfo commandInfo{};
-    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    commandInfo.commandBuffer = cmd;
-    VkSemaphoreSubmitInfo waitInfo{};
-    VkSemaphoreSubmitInfo signalInfo{};
-    VkSubmitInfo2 submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    submitInfo.commandBufferInfoCount = 1;
-    submitInfo.pCommandBufferInfos = &commandInfo;
+    // One submission per queue switch in the graph (just one without async compute). The swapchain image
+    // is waited for where it is first used, and the last graphics submission signals for presentation.
+    FrameSubmit submit;
     if (windowed) {
-        // Block only the stage that first touches the swapchain image, as reported by the graph.
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-        waitInfo.semaphore = frame.imageAvailable();
-        waitInfo.stageMask = firstUseStage(graph, backbuffer, m_device->meshShaders());
-        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-        signalInfo.semaphore = m_renderFinished[imageIndex];
-        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        submitInfo.waitSemaphoreInfoCount = 1;
-        submitInfo.pWaitSemaphoreInfos = &waitInfo;
-        submitInfo.signalSemaphoreInfoCount = 1;
-        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+        submit.waitSemaphore = frame.imageAvailable();
+        submit.waitImage = backbuffer;
+        submit.signalSemaphore = m_renderFinished[imageIndex];
     }
     // Reset only now: had we returned early with the fence unsignalled, the next begin() would hang.
     const VkFence fence = frame.fence();
     table.vkResetFences(dev, 1, &fence);
-    if (table.vkQueueSubmit2(m_device->graphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS) {
-        throw std::runtime_error("failed to submit the frame");
-    }
+    submit.fence = fence;
+    const std::uint64_t computeValue = executor.submit(submit);
+    frame.setComputeWait(computeValue);
     ++m_frameNumber;
 
     if (windowed) {
@@ -600,6 +585,7 @@ void Renderer::render(const Scene &scene) {
     if (table.vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
         throw std::runtime_error("waiting for the headless frame failed");
     }
+    m_device->waitTimeline(Queue::AsyncCompute, computeValue);
     frame.timer().collect();
     m_gpuTimings = frame.timer().timings();
     m_readback->invalidate();
@@ -754,7 +740,8 @@ void Renderer::createSurface() {
 void Renderer::createDevice() {
     const VkPhysicalDevice physicalDevice = pickPhysicalDevice(m_instance, m_surface, m_config.preferredDevice);
     // Object names need VK_EXT_debug_utils, which is enabled alongside validation.
-    m_device = std::make_unique<Device>(m_instance, physicalDevice, m_surface, m_validation, m_config.meshShaders);
+    m_device = std::make_unique<Device>(m_instance, physicalDevice, m_surface, m_validation, m_config.meshShaders,
+                                        m_config.asyncCompute);
     m_deviceName = m_device->properties().deviceName;
 }
 
