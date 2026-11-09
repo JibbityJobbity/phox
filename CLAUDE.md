@@ -33,7 +33,11 @@ On macOS ctest also runs `golden_metal` (the same goldens through the Metal back
 - The instance enables `VK_KHR_portability_enumeration` when present, and the device enables
   `VK_KHR_portability_subset` when exposed (required by MoltenVK).
 - Device selection requires descriptor indexing (the bindless texture table: runtime arrays, partial binding,
-  update-after-bind, non-uniform indexing). lavapipe, desktop drivers and MoltenVK have it.
+  update-after-bind, non-uniform indexing). lavapipe, desktop drivers and MoltenVK have it. It also
+  requires `multiDrawIndirect` and `drawIndirectFirstInstance` (GPU-driven drawing); `drawIndirectCount` is
+  optional because MoltenVK lacks it. `PHOX_NO_DRAW_INDIRECT_COUNT=1` tests the path without it.
+- Shaders are checked by the validation layer's spirv-val: glslang emits an invalid `Aligned 0` for a
+  whole-struct store through a buffer reference, so store such structs field by field.
 - Goldens come from lavapipe: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD PHOX_UPDATE_GOLDEN=1
   ./build-test/PhoxGoldenTests` writes `<case>.ppm` from the vertex path and `<case>.lod.ppm` from the
   cluster LOD path (lavapipe has mesh shaders). Changes to `buildMeshletLod` change the `.lod.ppm` images. Shading changes (shaders/pbr.glsl) must be mirrored in core/Shading.cpp

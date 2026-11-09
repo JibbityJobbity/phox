@@ -27,6 +27,7 @@ UploadArena::Block UploadArena::makeBlock(VkDeviceSize size) {
                  usageBit(BufferUsage::TransferSrc);
     info.memory = MemoryLocation::Upload;
     info.name = "upload arena";
+    info.deviceAddress = true; // shaders read the frame's scene arrays through addresses
     Block block;
     block.buffer = m_device.makeBuffer(info);
     if (block.buffer->mapped() == nullptr) {
@@ -47,7 +48,8 @@ UploadArena::Allocation UploadArena::allocate(VkDeviceSize size, VkDeviceSize al
     Block &block = m_blocks.back();
     const VkDeviceSize offset = alignUp(block.used, alignment);
     block.used = offset + size;
-    return {block.buffer->handle(), offset, size, static_cast<std::uint8_t *>(block.buffer->mapped()) + offset};
+    return {block.buffer->handle(), offset, size, static_cast<std::uint8_t *>(block.buffer->mapped()) + offset,
+            block.buffer->deviceAddress() + offset};
 }
 
 UploadArena::Allocation UploadArena::upload(const void *data, VkDeviceSize size, VkDeviceSize alignment) {

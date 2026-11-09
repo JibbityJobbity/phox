@@ -18,7 +18,7 @@ class Device;
 class FrameContext;
 class MeshCache;
 class TextureCache;
-class MeshletVisibility;
+class GpuScene;
 class PipelineCache;
 class ShaderLibrary;
 class Swapchain;
@@ -83,7 +83,8 @@ private:
     std::unique_ptr<TransientPool> m_transients;
     std::unique_ptr<MeshCache> m_meshes;
     std::unique_ptr<TextureCache> m_textures;
-    std::unique_ptr<MeshletVisibility> m_visibility; ///< occlusion culling only
+    std::unique_ptr<GpuScene> m_scene;
+    bool m_occlusion = false; ///< two-phase occlusion culling
     std::unique_ptr<Buffer> m_readback; ///< headless only
 
     std::unique_ptr<ShaderLibrary> m_shaders;

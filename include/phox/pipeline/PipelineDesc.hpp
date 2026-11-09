@@ -50,14 +50,15 @@ struct PushConstantRange {
 };
 
 /// The descriptor set layouts the renderer defines. A pipeline lists the ones it uses, in set order.
-/// Those for task shaders exist only on devices with mesh shaders.
+/// Buffers the GPU-driven passes use are reached through device addresses instead.
 enum class SetLayout : std::uint8_t {
-    /// binding 0: the per-frame uniform buffer (camera, light), vertex, fragment, task and mesh stages;
-    /// binding 1: the frame's MaterialData array (a storage buffer), fragment stage
+    /// binding 0: the per-frame uniform buffer (camera, light), vertex, fragment, task, mesh and compute
+    /// stages; binding 1: the frame's MaterialData array (a storage buffer), fragment stage
     Frame,
     Texture, ///< binding 0: one texture with a linear clamp-to-edge sampler, fragment stage
-    MeshletVisibility, ///< binding 0: storage buffer of meshlet visibility bits, task stage
-    DepthPyramid,      ///< binding 0: the depth pyramid with a nearest clamp-to-edge sampler, task stage
+    /// binding 0: the depth pyramid with a nearest clamp-to-edge sampler, task (where the device has
+    /// mesh shaders) and compute stages
+    DepthPyramid,
     /// compute stage; binding 0: depth with a nearest clamp-to-edge sampler; 1: the source mip and 2: the
     /// destination mip of the depth pyramid, as storage images
     DepthPyramidBuild,
@@ -65,7 +66,7 @@ enum class SetLayout : std::uint8_t {
     /// Partially bound and updated while in use (the backend adds textures as frames need them).
     Bindless,
 };
-inline constexpr std::size_t kSetLayoutCount = 6;
+inline constexpr std::size_t kSetLayoutCount = 5;
 
 /// Everything that identifies a graphics pipeline, in backend-free terms. Equal descriptions (ignoring
 /// the name) produce the same pipeline, so a backend can cache pipelines by description.

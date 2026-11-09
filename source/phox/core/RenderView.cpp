@@ -23,7 +23,7 @@ bool outsideFrustum(const mat4 &mvp, const Bounds &bounds) {
            allOutside([](const vec4 &c) { return c.z < 0.0f; }) || allOutside([](const vec4 &c) { return c.z > c.w; });
 }
 
-RenderView extractView(const Scene &scene, Extent2D extent) {
+RenderView extractView(const Scene &scene, Extent2D extent, bool cull) {
     RenderView view;
     view.extent = extent;
     const Camera &camera = scene.camera();
@@ -41,25 +41,33 @@ RenderView extractView(const Scene &scene, Extent2D extent) {
     view.toneMapping = scene.toneMapping;
 
     const vec3 forward = camera.forward();
-    for (const Object &object : scene.objects()) {
+    const std::span<const Object> objects = scene.objects();
+    const std::span<const ObjectId> ids = scene.objectIds();
+    if (!cull) {
+        view.draws.reserve(objects.size());
+    }
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+        const Object &object = objects[i];
         const Mesh *mesh = object.mesh().get();
         if (mesh == nullptr || mesh->empty()) {
             continue;
         }
         const mat4 model = object.transform().matrix();
-        if (outsideFrustum(view.viewProj * model, mesh->bounds())) {
+        if (cull && outsideFrustum(view.viewProj * model, mesh->bounds())) {
             ++view.culled;
             continue;
         }
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
         const bool cullBackFaces = !object.material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
-        const DrawItem item{object.id(), mesh, &object.material(), model,
+        const DrawItem item{object.id(), ids[i].index, mesh, &object.material(), model,
                             glm::dot(center - camera.position, forward), cullBackFaces};
         (object.material().alphaMode == AlphaMode::Blend ? view.transparent : view.draws).push_back(item);
     }
     // Front to back, so depth testing rejects hidden fragments early. Stable: ties keep scene order.
-    std::stable_sort(view.draws.begin(), view.draws.end(),
-                     [](const DrawItem &a, const DrawItem &b) { return a.viewDepth < b.viewDepth; });
+    if (cull) {
+        std::stable_sort(view.draws.begin(), view.draws.end(),
+                         [](const DrawItem &a, const DrawItem &b) { return a.viewDepth < b.viewDepth; });
+    }
     // Back to front, so each blended item is composited over everything behind it.
     std::stable_sort(view.transparent.begin(), view.transparent.end(),
                      [](const DrawItem &a, const DrawItem &b) { return a.viewDepth > b.viewDepth; });

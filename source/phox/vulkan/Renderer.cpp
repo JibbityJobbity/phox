@@ -12,7 +12,7 @@
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/GraphExecutor.hpp"
 #include "phox/vulkan/MeshCache.hpp"
-#include "phox/vulkan/MeshletVisibility.hpp"
+#include "phox/vulkan/GpuScene.hpp"
 #include "phox/vulkan/PipelineCache.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 #include "phox/vulkan/ShaderLibrary.hpp"
@@ -25,6 +25,7 @@
 #include "phox/vulkan/passes/TonemapPass.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -148,8 +149,9 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
             continue;
         }
 
-        // Phox records with synchronization2 and dynamic rendering (core in Vulkan 1.3), and materials
-        // index one array of every texture (descriptor indexing, which nearly every 1.2 device has).
+        // Phox records with synchronization2 and dynamic rendering (core in Vulkan 1.3), materials index
+        // one array of every texture (descriptor indexing), and the GPU writes the draws (indirect count,
+        // multi-draw, firstInstance); nearly every 1.2 device has all of these.
         VkPhysicalDeviceProperties versionProps;
         vkGetPhysicalDeviceProperties(device, &versionProps);
         VkPhysicalDeviceVulkan13Features features13{};
@@ -162,7 +164,8 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
         features.pNext = &features12;
         vkGetPhysicalDeviceFeatures2(device, &features);
         if (versionProps.apiVersion < PHOX_VULKAN_API_VERSION || !features13.synchronization2 ||
-            !features13.dynamicRendering || !phox::vk::hasBindlessTextures(features12)) {
+            !features13.dynamicRendering || !phox::vk::hasBindlessTextures(features12) ||
+            !phox::vk::hasGpuDrivenDrawing(features.features)) {
             continue;
         }
 
@@ -198,20 +201,23 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, c
     if (best == VK_NULL_HANDLE) {
         throw std::runtime_error((preferred.empty() ? std::string("No suitable Vulkan device found")
                                                     : "No suitable Vulkan device matching '" + preferred + "'") +
-                                 " (Phox needs Vulkan 1.3 with synchronization2, dynamic rendering and descriptor indexing)");
+                                 " (Phox needs Vulkan 1.3 with synchronization2, dynamic rendering, descriptor indexing and indirect count)");
     }
     return best;
 }
 
-// Uploads the view's FrameUniforms and returns a set 0 descriptor set pointing at them.
-// What @p view draws: its items, their triangles, and the triangles of the meshlets cluster LOD picks for
-// them (the task shader's lodSelected, repeated on the CPU from the mesh cache's copies of the meshlets).
+// What @p view draws: the items in the frustum, their triangles, and the triangles of the meshlets cluster
+// LOD picks for them (the task shader's lodSelected, repeated on the CPU from the mesh cache's copies of
+// the meshlets). @p view is not culled (GPU-driven rendering culls on the GPU), so this tests the frustum.
 phox::FrameStatistics countStatistics(const phox::RenderView &view, const phox::vk::MeshCache &meshes,
                                       float lodErrorPixels) {
     phox::FrameStatistics statistics;
     const float pixelsPerUnit = std::abs(view.proj[1][1]) * 0.5f * static_cast<float>(view.extent.height);
     for (const auto *items : {&view.draws, &view.transparent}) {
         for (const phox::DrawItem &draw : *items) {
+            if (phox::outsideFrustum(view.viewProj * draw.model, draw.mesh->bounds())) {
+                continue;
+            }
             ++statistics.draws;
             statistics.triangles += draw.mesh->triangleCount();
             const phox::vk::MeshCache::GpuMesh &mesh = meshes.get(*draw.mesh);
@@ -230,10 +236,10 @@ phox::FrameStatistics countStatistics(const phox::RenderView &view, const phox::
     return statistics;
 }
 
-// Set 0 of the forward pipelines: the view's FrameUniforms and its material table, one entry per item
-// (view.draws, then view.transparent), with texture slots from @p textures.
+// Set 0 of the forward and cull pipelines: the view's FrameUniforms and the frame's material table
+// (GpuScene, one entry per instance slot).
 VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &frame, phox::vk::PipelineCache &pipelines,
-                              const phox::RenderView &view, const phox::vk::TextureCache &textures) {
+                              const phox::RenderView &view, const VkDescriptorBufferInfo &materials) {
     phox::vk::FrameUniforms uniforms;
     uniforms.view = view.view;
     uniforms.proj = view.proj;
@@ -247,34 +253,8 @@ VkDescriptorSet writeFrameSet(phox::vk::Device &device, phox::vk::FrameContext &
     std::copy(view.frustumPlanes.begin(), view.frustumPlanes.end(), uniforms.frustumPlanes);
     const phox::vk::UploadArena::Allocation data = frame.arena().uploadUniform(uniforms);
 
-    // At least one entry: a descriptor's range cannot be empty.
-    std::vector<phox::MaterialData> materials;
-    materials.reserve(std::max<std::size_t>(view.itemCount(), 1));
-    const auto slot = [&textures](const std::shared_ptr<const phox::Texture> &texture) {
-        return texture ? textures.slot(*texture) : phox::kNoTexture;
-    };
-    for (const auto *items : {&view.draws, &view.transparent}) {
-        for (const phox::DrawItem &draw : *items) {
-            const phox::Material &material = *draw.material;
-            phox::MaterialData entry = phox::materialData(material);
-            entry.baseColorTexture = slot(material.baseColorTexture);
-            entry.metallicRoughnessTexture = slot(material.metallicRoughnessTexture);
-            entry.normalTexture = slot(material.normalTexture);
-            entry.occlusionTexture = slot(material.occlusionTexture);
-            entry.emissiveTexture = slot(material.emissiveTexture);
-            materials.push_back(entry);
-        }
-    }
-    if (materials.empty()) {
-        materials.emplace_back();
-    }
-    const VkDeviceSize materialBytes = materials.size() * sizeof(phox::MaterialData);
-    const phox::vk::UploadArena::Allocation materialData = frame.arena().upload(
-        materials.data(), materialBytes, device.properties().limits.minStorageBufferOffsetAlignment);
-
     const VkDescriptorSet set = frame.descriptors().allocate(pipelines.setLayout(phox::SetLayout::Frame));
-    const VkDescriptorBufferInfo bufferInfos[2] = {{data.buffer, data.offset, sizeof(uniforms)},
-                                                   {materialData.buffer, materialData.offset, materialBytes}};
+    const VkDescriptorBufferInfo bufferInfos[2] = {{data.buffer, data.offset, sizeof(uniforms)}, materials};
     VkWriteDescriptorSet writes[2]{};
     for (std::uint32_t i = 0; i < 2; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -327,19 +307,22 @@ void Renderer::initialize(const RendererConfig &config) {
         const bool meshShaders = createPipelines();
         m_meshes = std::make_unique<MeshCache>(*m_device, meshShaders, m_config.meshLod, m_config.collectStatistics);
         m_textures = std::make_unique<TextureCache>(*m_device, *m_pipelines);
+        bool occlusion = false;
         if (meshShaders && m_config.meshletCulling && m_config.occlusionCulling) {
             if (m_depthFormat == Format::D32Float) {
-                m_visibility = std::make_unique<MeshletVisibility>(*m_device);
+                occlusion = true;
             } else {
                 log::warn("occlusion culling needs a D32 depth buffer; culling meshlets without it");
             }
         }
+        m_scene = std::make_unique<GpuScene>(*m_device, meshShaders, occlusion);
+        m_occlusion = occlusion;
         if (m_window != nullptr) {
             recreateSwapchain(); // stays empty while the window is minimised; render() retries
         }
         log::info("renderer initialized on {}{}, drawing with {}{}", m_deviceName, m_validation ? " (validation on)" : "",
                   !meshShaders              ? "vertex shaders"
-                  : m_visibility            ? "mesh shaders (frustum, cone and occlusion culling)"
+                  : m_occlusion             ? "mesh shaders (frustum, cone and occlusion culling)"
                   : m_config.meshletCulling ? "mesh shaders (frustum and cone culling)"
                                             : "mesh shaders (no meshlet culling)",
                   m_meshes->lod() ? fmt::format(", cluster LOD at {} px", m_config.lodErrorPixels) : std::string());
@@ -366,7 +349,7 @@ void Renderer::releaseVulkan() {
     for (auto &frame : m_frames) {
         frame.reset();
     }
-    m_visibility.reset();
+    m_scene.reset();
     m_textures.reset();
     m_meshes.reset();
     m_transients.reset();
@@ -404,7 +387,7 @@ RendererInfo Renderer::info() const {
     result.validationErrors = m_validationCounters.errors.load();
     result.validationWarnings = m_validationCounters.warnings.load();
     result.meshShaders = !m_useFallback && m_meshes && m_meshes->meshlets();
-    result.occlusionCulling = !m_useFallback && m_visibility != nullptr;
+    result.occlusionCulling = !m_useFallback && m_occlusion;
     result.meshLod = !m_useFallback && m_meshes && m_meshes->lod();
     return result;
 }
@@ -471,6 +454,8 @@ void Renderer::render(const Scene &scene) {
     // Wait until the GPU is done with the last frame that used this slot, then reuse its resources.
     FrameContext &frame = *m_frames[m_frameNumber % kFramesInFlight];
     frame.begin();
+    // The CPU's own work on the frame: from here (past the wait for the GPU) to the submit.
+    const auto cpuStart = std::chrono::steady_clock::now();
     if (!frame.timer().timings().empty()) {
         m_gpuTimings = frame.timer().timings();
     }
@@ -484,7 +469,8 @@ void Renderer::render(const Scene &scene) {
         return;
     }
 
-    const RenderView view = extractView(scene, extent);
+    // Every object, neither culled nor sorted (blended ones aside, back to front): the GPU culls.
+    const RenderView view = extractView(scene, extent, false);
     if (!windowed) {
         const std::uint64_t bytes = static_cast<std::uint64_t>(extent.width) * extent.height * 4;
         if (!m_readback || m_readback->size() != bytes) {
@@ -501,36 +487,39 @@ void Renderer::render(const Scene &scene) {
     if (table.vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
         throw std::runtime_error("failed to begin the frame command buffer");
     }
+    // Everything the scene uses is resident: what is drawn is decided on the GPU.
     m_meshes->prepare(view, frame, cmd, m_frameNumber);
     m_textures->prepare(view, frame, cmd, m_frameNumber);
-    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, *m_textures), m_textures->set()};
+    const GpuScene::Frame sceneFrame = m_scene->update(view, *m_meshes, *m_textures, frame);
+    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, sceneFrame.materials), m_textures->set()};
 
     // ---- Frame graph -------------------------------------------------------------------------
     //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
     //   forward -> hdr -> tonemap -> display -> readback -> host buffer [headless]
-    // With occlusion culling, "forward" is: (clear visibility ->) forward early -> depth pyramid ->
-    // forward late, with the meshlet visibility bits imported from the previous frame.
+    // "forward" is GPU-driven: clear counters -> cull -> (draw args ->) forward, or with occlusion
+    // culling: cull early -> draw args -> forward early -> depth pyramid -> cull late -> draw args ->
+    // forward late, with the instance history and meshlet visibility bits imported from the previous
+    // frame. Blended objects follow in "forward blend".
     RenderGraph graph(extent);
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
-    MeshletVisibility::Frame visibility;
-    MeshletOcclusion occlusion;
-    if (m_visibility) {
-        // Written by the late forward pass of the previous frame, unless it is new.
-        visibility = m_visibility->prepare(view, *m_meshes, frame);
-        occlusion.visibility = graph.importBuffer("meshlet visibility", BufferDesc{m_visibility->buffer().size()},
-                                                  visibility.clear ? BufferUsage::Undefined : BufferUsage::StorageWrite,
+    OcclusionState occlusion;
+    if (m_occlusion) {
+        // Written by the late passes of the previous frame, unless new or restarted (cleared first).
+        const BufferUsage initial = sceneFrame.clearState ? BufferUsage::Undefined : BufferUsage::StorageWrite;
+        Buffer &history = *m_scene->history();
+        Buffer &visibility = *m_scene->visibility();
+        occlusion.history = graph.importBuffer("instance visibility", BufferDesc{history.size(), true}, initial,
+                                               BufferUsage::StorageWrite);
+        occlusion.visibility = graph.importBuffer("meshlet visibility", BufferDesc{visibility.size(), true}, initial,
                                                   BufferUsage::StorageWrite);
-        occlusion.frame = &visibility;
-        executor.bindBuffer(occlusion.visibility, m_visibility->buffer().handle());
+        executor.bindBuffer(occlusion.history, history.handle(), history.deviceAddress());
+        executor.bindBuffer(occlusion.visibility, visibility.handle(), visibility.deviceAddress());
     }
     const ForwardPassOutput forward =
-        addForwardPass(graph, view, sets, hdr, depth, *m_meshes, *m_pipelines,
-                       MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_visibility ? &occlusion : nullptr);
-    if (m_config.collectStatistics) {
-        m_statistics = countStatistics(view, *m_meshes, m_config.lodErrorPixels);
-    }
+        addForwardPass(graph, view, sets, sceneFrame, hdr, depth, m_meshes->meshlets(), *m_pipelines,
+                       MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_occlusion ? &occlusion : nullptr);
 
     ImageHandle backbuffer;
     if (windowed) {
@@ -558,6 +547,12 @@ void Renderer::render(const Scene &scene) {
         throw std::runtime_error("failed to end the frame command buffer");
     }
     frame.arena().flush();
+    const double cpuMilliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuStart).count();
+    if (m_config.collectStatistics) {
+        m_statistics = countStatistics(view, *m_meshes, m_config.lodErrorPixels); // not part of the frame's cost
+    }
+    m_statistics.cpuMilliseconds = cpuMilliseconds;
 
     VkCommandBufferSubmitInfo commandInfo{};
     commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
@@ -717,6 +712,7 @@ bool Renderer::createPipelines() {
             m_pipelines->get(forwardPipelineDesc(kHdrFormat, m_depthFormat, cull, blend));
         }
     }
+    m_pipelines->get(cullPipelineDesc(CullVariant::Vertex));
     m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
     if (!m_device->meshShaders()) {
         return false;
@@ -732,6 +728,10 @@ bool Renderer::createPipelines() {
             m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull, MeshletPhase::Single, true));
         }
         m_pipelines->get(depthPyramidPipelineDesc());
+        for (CullVariant variant : {CullVariant::Meshlets, CullVariant::Early, CullVariant::Late}) {
+            m_pipelines->get(cullPipelineDesc(variant));
+        }
+        m_pipelines->get(drawArgsPipelineDesc());
     } catch (const std::exception &e) {
         log::warn("mesh shader pipelines failed, drawing with vertex shaders: {}", e.what());
         return false;

@@ -8,6 +8,7 @@
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/ShaderInterface.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <initializer_list>
 #include <stdexcept>
@@ -21,6 +22,75 @@ MeshCache::MeshCache(Device &device, bool meshlets, bool lod, bool keepMeshlets)
 
 MeshCache::~MeshCache() = default;
 
+VkBuffer MeshCache::indexPool() const { return m_indexPool ? m_indexPool->handle() : VK_NULL_HANDLE; }
+
+std::uint32_t MeshCache::allocateIndices(std::uint32_t count, FrameContext &frame, VkCommandBuffer cmd) {
+    // First fit among the ranges given back, else from the end of the pool.
+    for (auto it = m_freeIndices.begin(); it != m_freeIndices.end(); ++it) {
+        if (it->second >= count) {
+            const std::uint32_t first = it->first;
+            it->first += count;
+            it->second -= count;
+            if (it->second == 0) {
+                m_freeIndices.erase(it);
+            }
+            return first;
+        }
+    }
+    const std::uint64_t capacity = m_indexPool ? m_indexPool->size() / sizeof(std::uint32_t) : 0;
+    if (m_indexUsed + std::uint64_t{count} > capacity) {
+        std::uint64_t grown = std::max<std::uint64_t>(capacity * 2, 1u << 16);
+        while (grown < m_indexUsed + std::uint64_t{count}) grown *= 2;
+        auto pool = m_device.makeBuffer({grown * sizeof(std::uint32_t),
+                                         usageBit(BufferUsage::Index) | usageBit(BufferUsage::TransferDst) |
+                                             usageBit(BufferUsage::TransferSrc),
+                                         MemoryLocation::DeviceLocal, "index pool"});
+        if (m_indexPool && m_indexUsed > 0) {
+            // Copies into the old pool may already be recorded in this command buffer.
+            VkMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &barrier;
+            m_device.table().vkCmdPipelineBarrier2(cmd, &dependency);
+            const VkBufferCopy copy{0, 0, VkDeviceSize{m_indexUsed} * sizeof(std::uint32_t)};
+            m_device.table().vkCmdCopyBuffer(cmd, m_indexPool->handle(), pool->handle(), 1, &copy);
+        }
+        if (m_indexPool) {
+            std::shared_ptr<Buffer> old(std::move(m_indexPool));
+            frame.deferred().push([old]() mutable { old.reset(); });
+        }
+        m_indexPool = std::move(pool);
+        log::debug("mesh cache: index pool grown to {} indices", grown);
+    }
+    const std::uint32_t first = m_indexUsed;
+    m_indexUsed += count;
+    return first;
+}
+
+void MeshCache::releaseIndices(std::uint32_t first, std::uint32_t count) {
+    if (count == 0) {
+        return;
+    }
+    m_freeIndices.emplace_back(first, count);
+    // Merge neighbours, so the pool does not crumble into ranges too small to use.
+    std::sort(m_freeIndices.begin(), m_freeIndices.end());
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> merged;
+    for (const auto &range : m_freeIndices) {
+        if (!merged.empty() && merged.back().first + merged.back().second == range.first) {
+            merged.back().second += range.second;
+        } else {
+            merged.push_back(range);
+        }
+    }
+    m_freeIndices = std::move(merged);
+}
+
 void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber) {
     const auto &table = m_device.table();
     bool uploaded = false;
@@ -28,17 +98,27 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
     items.reserve(view.itemCount());
     for (const DrawItem &draw : view.draws) items.push_back(&draw);
     for (const DrawItem &draw : view.transparent) items.push_back(&draw);
+    const Mesh *previous = nullptr; // objects often come in runs that share a mesh
     for (const DrawItem *draw : items) {
         const Mesh &mesh = *draw->mesh;
+        if (&mesh == previous) {
+            continue;
+        }
+        previous = &mesh;
         GpuMesh &entry = m_meshes[mesh.id()];
         entry.lastUsed = frameNumber;
         if (entry.vertices && entry.version == mesh.version()) {
             continue;
         }
         if (entry.vertices) {
-            // An earlier frame may still be drawing from the old buffers.
+            // An earlier frame may still be drawing from the old buffers and index range.
             auto retired = std::make_shared<GpuMesh>(std::move(entry));
-            frame.deferred().push([retired]() mutable { retired.reset(); });
+            frame.deferred().push([this, retired, meshlets = m_meshlets]() mutable {
+                if (!meshlets) {
+                    releaseIndices(retired->firstIndex, retired->indexCount);
+                }
+                retired.reset();
+            });
             entry = GpuMesh{};
             entry.lastUsed = frameNumber;
         }
@@ -52,8 +132,9 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
         const auto upload = [&](std::initializer_list<Piece> pieces, BufferUsageMask usage, const char *what) {
             VkDeviceSize total = 0;
             for (const Piece &piece : pieces) total += piece.bytes;
+            // Shaders read every part through its address (GpuMesh), on either path.
             auto buffer = m_device.makeBuffer({total, usage | usageBit(BufferUsage::TransferDst),
-                                               MemoryLocation::DeviceLocal, name + " " + what, m_meshlets});
+                                               MemoryLocation::DeviceLocal, name + " " + what, true});
             VkDeviceSize offset = 0;
             for (const Piece &piece : pieces) {
                 const UploadArena::Allocation staging = frame.arena().upload(piece.data, piece.bytes);
@@ -75,11 +156,6 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
                 meshlet.vertexOffset += dataStart;
                 meshlet.triangleOffset += dataStart;
             }
-            const std::uint64_t groups = (meshlets.meshlets.size() + kMeshletTaskGroupSize - 1) / kMeshletTaskGroupSize;
-            if (groups > m_device.meshShaderProperties().maxTaskWorkGroupCount[0]) {
-                throw std::runtime_error(name + " has " + std::to_string(meshlets.meshlets.size()) +
-                                         " meshlets, more than one draw can launch");
-            }
             entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
                                     usageBit(BufferUsage::StorageRead), "vertices");
             entry.meshlets = upload({{meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size()},
@@ -95,11 +171,16 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
                        mesh.id(), mesh.version(), mesh.triangleCount(), meshlets.meshlets.size(), meshlets.levels,
                        meshlets.triangleCount(), buildMs);
         } else {
+            // The vertex shader fetches its vertex itself (forward.vert), as storage; indices go to the pool.
             entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
-                                    usageBit(BufferUsage::Vertex), "vertices");
-            entry.indices = upload({{indices.data(), sizeof(std::uint32_t) * indices.size()}},
-                                   usageBit(BufferUsage::Index), "indices");
+                                    usageBit(BufferUsage::StorageRead), "vertices");
             entry.indexCount = static_cast<std::uint32_t>(indices.size());
+            entry.firstIndex = allocateIndices(entry.indexCount, frame, cmd);
+            const UploadArena::Allocation staging =
+                frame.arena().upload(indices.data(), sizeof(std::uint32_t) * indices.size());
+            const VkBufferCopy copy{staging.offset, VkDeviceSize{entry.firstIndex} * sizeof(std::uint32_t),
+                                    sizeof(std::uint32_t) * indices.size()};
+            table.vkCmdCopyBuffer(cmd, staging.buffer, m_indexPool->handle(), 1, &copy);
             log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(),
                        mesh.triangleCount());
         }
@@ -117,8 +198,8 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
         barrier.dstStageMask = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
         barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     } else {
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
-        barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT;
     }
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -139,6 +220,9 @@ void MeshCache::collect(std::uint64_t frameNumber) {
     for (auto it = m_meshes.begin(); it != m_meshes.end();) {
         if (frameNumber > it->second.lastUsed + kEvictAfterFrames) {
             log::debug("mesh cache: evicted mesh {}", it->first);
+            if (!m_meshlets) {
+                releaseIndices(it->second.firstIndex, it->second.indexCount); // no frame this old is in flight
+            }
             it = m_meshes.erase(it);
         } else {
             ++it;

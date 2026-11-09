@@ -8,6 +8,7 @@
 #include "phox/vulkan/Image.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -60,6 +61,10 @@ bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char *name) {
 }
 
 } // namespace
+
+bool hasGpuDrivenDrawing(const VkPhysicalDeviceFeatures &features) {
+    return features.multiDrawIndirect && features.drawIndirectFirstInstance;
+}
 
 bool hasBindlessTextures(const VkPhysicalDeviceVulkan12Features &features) {
     return features.descriptorIndexing && features.runtimeDescriptorArray && features.descriptorBindingPartiallyBound &&
@@ -133,6 +138,18 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // Optional: the vertex path draws with a count the GPU wrote, or else every command of its buffer.
+    {
+        VkPhysicalDeviceVulkan12Features supported12{};
+        supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        supported.pNext = &supported12;
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supported);
+        const char *disable = std::getenv("PHOX_NO_DRAW_INDIRECT_COUNT");
+        m_drawIndirectCount = supported12.drawIndirectCount == VK_TRUE && !(disable != nullptr && std::strcmp(disable, "1") == 0);
+        features12.drawIndirectCount = m_drawIndirectCount ? VK_TRUE : VK_FALSE;
+    }
     {
         VkPhysicalDeviceVulkan12Properties properties12{};
         properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
@@ -156,6 +173,9 @@ Device::Device(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKH
     VkPhysicalDeviceFeatures2 features{};
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features.pNext = &features13;
+    features.features.multiDrawIndirect = VK_TRUE;
+    features.features.drawIndirectFirstInstance = VK_TRUE; // the vertex path's firstInstance picks the draw
+    // (hasGpuDrivenDrawing)
 
     // Optional: task and mesh shaders. Without them the forward pass draws with vertex shaders.
     VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures{};

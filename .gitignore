@@ -7,3 +7,4 @@
 ._*
 /compile_commands.json
 /.claude/worktrees
+/.claude/settings.local.json

@@ -25,6 +25,7 @@ struct SampleScene {
 /// "materials": the material model: metal and plastic spheres from smooth to rough, base colour, metallic-
 ///             roughness and normal textures, an alpha-masked screen, a blended glass sphere, emission.
 /// "field":    a benchmark: 576 dense tori (37.7 million triangles), many cut by the frustum.
+/// "crowd":    a benchmark: 32,768 small spinning cubes, for the cost of each object to the renderer.
 std::vector<std::string> sampleSceneNames();
 
 /// @throws std::invalid_argument for an unknown name

@@ -4,6 +4,7 @@
 #include "phox/GltfLoader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -163,6 +164,37 @@ std::shared_ptr<Texture> holesTexture(std::uint32_t size, std::uint32_t cells) {
     return std::make_shared<Texture>("holes", size, size, std::move(rgba), TextureEncoding::Srgb);
 }
 
+// A benchmark of object count rather than triangles: 32 x 32 x 32 small spinning cubes (32,768 objects,
+// 393k triangles), so the per-object work of a renderer shows.
+SampleScene crowd() {
+    SampleScene sample;
+    sample.name = "crowd";
+    Scene &scene = sample.scene;
+    auto cube = std::make_shared<Mesh>(Mesh::cube(0.3f));
+    constexpr int kSide = 32;
+    constexpr float kSpacing = 0.6f;
+    const std::array<Material, 4> paints{paint("red", 0.9f, 0.25f, 0.2f, false), paint("green", 0.3f, 0.75f, 0.35f, false),
+                                         paint("blue", 0.25f, 0.45f, 0.9f, false),
+                                         paint("yellow", 0.9f, 0.8f, 0.3f, false)};
+    for (int x = 0; x < kSide; ++x) {
+        for (int y = 0; y < kSide; ++y) {
+            for (int z = 0; z < kSide; ++z) {
+                const vec3 position = (vec3(x, y, z) - 0.5f * (kSide - 1)) * kSpacing;
+                scene.addObject("cube", cube, paints[static_cast<std::size_t>(x + y + z) % paints.size()], Transform{position});
+            }
+        }
+    }
+    scene.camera().position = {6.0f, 5.0f, 16.0f};
+    scene.camera().lookAt({0.0f, 0.0f, 0.0f});
+    sample.animate = [](Scene &s, float t) {
+        // Nothing is removed, so the objects stay in the order they were added.
+        for (std::size_t i = 0; i < s.objectCount(); ++i) {
+            s.objects()[i].transform().rotation = spin(1.3f * t + 0.11f * static_cast<float>(i), {1, 0.7f, 0.3f});
+        }
+    };
+    return sample;
+}
+
 // The material model: a row of gold spheres from smooth to rough, a row of red plastic ones, a textured
 // and normal-mapped sphere, a screen with holes (alpha mask), a glass sphere (alpha blend) and a glowing
 // cube, on a checkered floor.
@@ -235,7 +267,7 @@ SampleScene materials() {
 
 } // namespace
 
-std::vector<std::string> sampleSceneNames() { return {"triangle", "cubes", "tori", "materials", "field"}; }
+std::vector<std::string> sampleSceneNames() { return {"triangle", "cubes", "tori", "materials", "field", "crowd"}; }
 
 SampleScene makeSampleScene(const std::string &name) {
     SampleScene sample;
@@ -249,8 +281,10 @@ SampleScene makeSampleScene(const std::string &name) {
         sample = materials();
     } else if (name == "field") {
         sample = field();
+    } else if (name == "crowd") {
+        sample = crowd();
     } else {
-        throw std::invalid_argument("unknown sample scene '" + name + "' (try: triangle, cubes, tori, materials, field)");
+        throw std::invalid_argument("unknown sample scene '" + name + "' (try: triangle, cubes, tori, materials, field, crowd)");
     }
     sample.animate(sample.scene, 0.0f);
     return sample;

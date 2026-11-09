@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
     ("exposure", "scale scene colours by this before tone mapping", cxxopts::value<float>()->default_value("1"))
     ("lod", "with mesh shaders: cluster LOD (on or off)", cxxopts::value<std::string>()->default_value("on"))
     ("lod-error", "cluster LOD: the error, in pixels, the picture may show", cxxopts::value<float>()->default_value("1"))
-    ("stats", "print what each frame drew (triangles before and after cluster LOD)")
+    ("stats", "print what each frame drew (triangles before and after cluster LOD) and its CPU time")
     ("mesh-shaders", "draw with task and mesh shaders where available: on, off, noocclusion (frustum and cone "
                      "culling only) or nocull (no meshlet culling)", cxxopts::value<std::string>()->default_value("on"))
     ("dump-graph", "write the first frame's render graph (Graphviz DOT) to this file", cxxopts::value<std::string>())
@@ -231,6 +231,8 @@ int main(int argc, char **argv) {
       const bool animate = args.count("animate") > 0;
       sample.animate(sample.scene, time);
       const long frames = std::max(1L, args["frames"].as<long>());
+      double cpuMilliseconds = 0.0;
+      long cpuFrames = 0;
       for (long i = 0; i < frames; ++i) {
         if (animate) {
           sample.animate(sample.scene, time + static_cast<float>(i) / 60.0f);
@@ -238,6 +240,8 @@ int main(int argc, char **argv) {
         renderer->render(sample.scene);
         if (i >= kWarmupFrames || frames <= kWarmupFrames) {
           timings.add(renderer->gpuTimings());
+          cpuMilliseconds += renderer->frameStatistics().cpuMilliseconds;
+          ++cpuFrames;
         }
       }
       dumpGraph(*renderer);
@@ -250,6 +254,9 @@ int main(int argc, char **argv) {
                   << " triangles after cluster LOD (" << std::fixed << std::setprecision(1)
                   << (stats.triangles > 0 ? 100.0 * static_cast<double>(stats.lodTriangles) / static_cast<double>(stats.triangles) : 0.0)
                   << "%), before meshlet culling" << std::defaultfloat << std::endl;
+        std::cout << "CPU time per frame: " << std::setprecision(3)
+                  << cpuMilliseconds / static_cast<double>(std::max(cpuFrames, 1L)) << " ms (recording and submitting)"
+                  << std::endl;
       }
       const std::string output = args.count("output") ? args["output"].as<std::string>()
                                                       : "build/rendered_" + sample.name + ".ppm";

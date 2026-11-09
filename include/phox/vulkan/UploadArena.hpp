@@ -12,7 +12,8 @@ namespace phox::vk {
 class Buffer;
 class Device;
 
-/// Host-visible scratch memory for one frame: uniform data, vertex streams and staging for uploads.
+/// Host-visible scratch memory for one frame: uniform data, vertex streams, staging for uploads, and the
+/// scene arrays GPU-driven passes read through device addresses.
 /// Allocation is a pointer bump; everything is recycled at once by reset(), which may only be called
 /// once the GPU has finished the frame that used it.
 class UploadArena {
@@ -22,6 +23,7 @@ public:
         VkDeviceSize offset = 0;
         VkDeviceSize size = 0;
         void *data = nullptr;
+        VkDeviceAddress address = 0; ///< of the allocation's first byte
     };
 
     explicit UploadArena(Device &device, VkDeviceSize blockSize = 4u << 20);

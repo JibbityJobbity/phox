@@ -137,7 +137,7 @@ set(headers
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GraphExecutor.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Image.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshCache.hpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/MeshletVisibility.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/GpuScene.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PassTimer.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/PipelineCache.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/phox/vulkan/Renderer.hpp
@@ -185,7 +185,7 @@ set(sources
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GraphExecutor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Image.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshCache.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/MeshletVisibility.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/GpuScene.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PassTimer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/PipelineCache.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/source/phox/vulkan/Renderer.cpp
@@ -394,6 +394,8 @@ set(PHOX_SHADER_SPV)
 set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl
                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/forward_task.glsl
                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.glsl
+                         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/occlusion.glsl
+                         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.glsl
 )
 foreach(
   shader
@@ -406,6 +408,11 @@ foreach(
   fullscreen.vert
   tonemap.frag
   depthpyramid.comp
+  cull.comp
+  cull_early.comp
+  cull_late.comp
+  cull_vertex.comp
+  draw_args.comp
   # The RHI stack's forward technique (techniques/forward) and rhi_triangle test.
   basic.vert
   basic.frag

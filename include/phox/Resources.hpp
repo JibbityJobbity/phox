@@ -60,7 +60,7 @@ enum class BufferUsage : std::uint8_t {
     Uniform,
     StorageRead,
     StorageWrite, ///< written (and possibly read) by shaders
-    Indirect,
+    Indirect,     ///< indirect draw or dispatch arguments, which the pass's shaders may read too
     TransferSrc,
     TransferDst,
     HostRead,     ///< read by the CPU once the frame has completed (only as a final state)

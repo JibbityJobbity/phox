@@ -23,6 +23,11 @@ image, and falls back to a software rasterizer when there is no usable GPU.
   the same images come from the vertex pipeline. See [architecture sections 6.1 and
   6.2](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
   dynamic rendering.
+- **GPU-driven rendering**: the CPU writes the scene's instances, meshes and materials to the GPU unculled,
+  and compute passes cull objects against the frustum and the depth pyramid, then build the draw lists
+  that a handful of indirect draws consume. On a 32,768-object scene that cuts CPU time per frame from
+  12.5 ms to 2.4 ms and GPU time from 5.1 ms to 0.8 ms. See [architecture section
+  6.5](docs/architecture.md#65-gpu-driven-rendering).
 - **Cluster LOD** (as in Nanite): each mesh is built into a hierarchy of meshlets at successive levels of
   detail, simplified group by group with shared borders locked, and the task shader picks per part of the
   mesh the coarsest meshlets whose error stays under a pixel, without cracks. On the `field` benchmark that
@@ -50,7 +55,7 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
-| `--scene triangle\|cubes\|tori\|materials\|field` | the sample scene to show (`field` is a 37.7-million-triangle benchmark) |
+| `--scene triangle\|cubes\|tori\|materials\|field\|crowd` | the sample scene to show (`field` is a 37.7-million-triangle benchmark, `crowd` a 32,768-object one) |
 | `--mesh FILE` | show a glTF 2.0 (`.gltf`, `.glb`) or OBJ file on a turntable instead |
 | `--window`, `--frames N` | present to a window (for N frames) instead of rendering one image |
 | `--frames N` (headless) | render N frames of one pose (`--animate`: advancing 1/60 s each) and print the average GPU time per pass |

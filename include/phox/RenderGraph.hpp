@@ -55,6 +55,9 @@ struct ImageDesc {
 
 struct BufferDesc {
     std::uint64_t size = 0;
+    /// Shaders reach the buffer through its address (Vulkan: PassContext::bufferAddress) rather than a
+    /// descriptor. Barriers still come from the uses passes declare.
+    bool deviceAddress = false;
 };
 
 enum class PassType : std::uint8_t { Graphics, Compute, Transfer };

@@ -126,9 +126,11 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
         result.pImmutableSamplers = sampler;
         return result;
     };
-    VkShaderStageFlags frameStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkShaderStageFlags frameStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    VkShaderStageFlags pyramidStages = VK_SHADER_STAGE_COMPUTE_BIT;
     if (device.meshShaders()) {
         frameStages |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+        pyramidStages |= VK_SHADER_STAGE_TASK_BIT_EXT;
     }
     // Samplers are baked into the layouts, so a descriptor write only needs a view. Empty: the layout
     // needs mesh shaders and the device has none.
@@ -138,12 +140,8 @@ PipelineCache::PipelineCache(Device &device, ShaderLibrary &shaders) : m_device(
         binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)};
     layouts[static_cast<std::size_t>(SetLayout::Texture)] = {
         binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_linearClamp)};
-    if (device.meshShaders()) {
-        layouts[static_cast<std::size_t>(SetLayout::MeshletVisibility)] = {
-            binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_TASK_BIT_EXT)};
-        layouts[static_cast<std::size_t>(SetLayout::DepthPyramid)] = {
-            binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_TASK_BIT_EXT, &m_nearestClamp)};
-    }
+    layouts[static_cast<std::size_t>(SetLayout::DepthPyramid)] = {
+        binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pyramidStages, &m_nearestClamp)};
     layouts[static_cast<std::size_t>(SetLayout::DepthPyramidBuild)] = {
         binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_nearestClamp),
         binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT),

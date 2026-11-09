@@ -2,6 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_mesh_shader : require
 #extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 #define PHOX_MESHLET_DRAW
 #include "common.glsl"
 
@@ -22,8 +23,10 @@ layout(location = 3) out vec4 outTangent[];  // world space xyz, handedness w
 layout(location = 4) flat out uint outMaterial[];
 
 void main() {
-    Meshlet meshlet = draw.meshlets.meshlets[task.meshlets[gl_WorkGroupID.x]];
-    MeshletDataBuffer meshletData = MeshletDataBuffer(draw.meshlets);
+    GpuDraw draw = DrawBuffer(pass.draws).draws[task.draw];
+    Meshlet meshlet = MeshletBuffer(draw.primitives).meshlets[task.meshlets[gl_WorkGroupID.x]];
+    MeshletDataBuffer meshletData = MeshletDataBuffer(draw.primitives);
+    VertexBuffer vertices = VertexBuffer(draw.vertices);
     uint vertexOffset = meshlet.range.x;
     uint triangleOffset = meshlet.range.y;
     uint vertexCount = meshlet.range.z;
@@ -33,11 +36,11 @@ void main() {
     uint lane = gl_LocalInvocationIndex;
     if (lane < vertexCount) {
         uint base = meshletData.values[vertexOffset + lane] * kVertexFloats;
-        vec3 position = vec3(draw.vertices.values[base], draw.vertices.values[base + 1u], draw.vertices.values[base + 2u]);
-        vec3 normal = vec3(draw.vertices.values[base + 3u], draw.vertices.values[base + 4u], draw.vertices.values[base + 5u]);
-        vec2 texCoord = vec2(draw.vertices.values[base + 6u], draw.vertices.values[base + 7u]);
-        vec4 tangent = vec4(draw.vertices.values[base + 8u], draw.vertices.values[base + 9u],
-                            draw.vertices.values[base + 10u], draw.vertices.values[base + 11u]);
+        vec3 position = vec3(vertices.values[base], vertices.values[base + 1u], vertices.values[base + 2u]);
+        vec3 normal = vec3(vertices.values[base + 3u], vertices.values[base + 4u], vertices.values[base + 5u]);
+        vec2 texCoord = vec2(vertices.values[base + 6u], vertices.values[base + 7u]);
+        vec4 tangent = vec4(vertices.values[base + 8u], vertices.values[base + 9u],
+                            vertices.values[base + 10u], vertices.values[base + 11u]);
         // Same expressions as forward.vert, so both paths produce the same vertices.
         vec4 world = draw.model * vec4(position, 1.0);
         outPosition[lane] = world.xyz;

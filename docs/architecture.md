@@ -151,13 +151,14 @@ frames are destroyed.
 frame = frames[n % 2]; frame.begin()                 wait its fence; reset pool, arena, descriptors; run deferred deletions
 transients.collect(n); meshes.collect(n)
 acquire(swapchain, frame.imageAvailable)             out of date: recreate, skip the frame
-view = extractView(scene, extent)                    core, no Vulkan
-frameSet = FrameUniforms for the view, in the arena
+view = extractView(scene, extent, false)             core, no Vulkan; every object, unculled (6.5)
 meshes.prepare(view, frame, cmd)                     copies recorded before the graph, one barrier
-visibility.prepare(view, meshes, frame)              occlusion culling: words of meshlet visibility bits per draw
+gpuScene.update(view, meshes, textures, frame)       instance, mesh and material arrays in the arena (6.5)
+frameSet = FrameUniforms and the material table
 graph: forward -> hdr -> tonemap -> backbuffer       (windowed: the swapchain image is a colour attachment)
        forward -> hdr -> tonemap -> display -> readback -> imported HostRead buffer   (headless)
-       with occlusion culling, forward is (clear visibility ->) forward early -> depth pyramid -> forward late
+       forward is clear draw counters -> cull -> draw args -> forward, or with occlusion culling
+       cull early -> draw args early -> forward early -> depth pyramid -> cull late -> ... -> forward late
 compile; execute
 submit2: wait imageAvailable at firstUseStage(backbuffer); signal renderFinished[image]; fence
 present                                              suboptimal or out of date: recreate
@@ -179,24 +180,28 @@ previous one.
 - `vk::PipelineCache` creates dynamic-rendering pipelines, and compute pipelines (a description with only
   `computeShader`), on first request and caches pipeline layouts. It owns the fixed set layouts: `Frame` (the
   per-frame uniform buffer and the frame's material table), `Texture` (a combined image sampler with an
-  immutable linear clamp sampler, so a descriptor write needs only a view), `MeshletVisibility` and
-  `DepthPyramid` (task stage; only on devices with mesh shaders), `DepthPyramidBuild` (compute) and
+  immutable linear clamp sampler, so a descriptor write needs only a view), `DepthPyramid` (task and compute
+  stages, for the late task shader and the late cull pass), `DepthPyramidBuild` (compute) and
   `Bindless` (the texture table, 6.3). The renderer builds its pipelines during initialization, so broken
   shaders select the software fallback instead of failing the first frame.
 - `shaders/common.glsl`, mirrored by `include/phox/ShaderInterface.hpp` (shared with the Metal backend) and, for
   the meshlet path, `include/phox/vulkan/ShaderInterface.hpp`:
   - set 0, binding 0 `FrameUniforms` (352 bytes): view, proj, viewProj, camera position, light direction with
     the ambient term in w, light colour, resolution, and the six world-space frustum planes for meshlet
-    culling. Visible to the task and mesh stages too when the device has them;
-  - set 0, binding 1: the frame's `MaterialData` array (80 bytes each, std430), one entry per drawn item;
+    culling. Visible to the compute, task and mesh stages too;
+  - set 0, binding 1: the frame's `MaterialData` array (80 bytes each, std430), one entry per instance slot
+    (6.5);
   - set 1 (`SetLayout::Bindless`): the texture table (6.3);
-  - push constants `DrawPushConstants {mat4 model; uint material}` (80 bytes, vertex stage);
-  - on the meshlet path, `MeshletDrawPushConstants` (128 bytes, task and mesh): the model matrix, the camera in
-    object space, the device addresses of the mesh's vertices and of its meshlets (followed by their data),
-    the meshlet count, the culling flags, the draw's first word of visibility bits (6.2), the material
-    index and the cluster LOD threshold (6.4). Code defining `PHOX_MESHLET_DRAW` gets this block, `PHOX_VERTEX_DRAW` the other. The vertex and
-    mesh shaders pass the material index on as a flat varying, so `forward.frag` has no push constants and
-    serves both paths.
+  - the GPU-driven scene's structures (`GpuInstance`, `GpuMesh`, `GpuDraw`, `DrawCounters`, 6.5), reached
+    through device addresses kept as `uvec2` (`GL_EXT_buffer_reference_uvec2`) so the C++ mirrors are plain
+    integers;
+  - push constants per pass, not per draw: `VertexDrawPushConstants` (the draw list's address; the vertex
+    shader reads its `GpuDraw` at `gl_InstanceIndex`), `MeshletDrawPushConstants` (task and mesh: the draw
+    list, work items, counters and visibility bits, the bucket, culling flags and the cluster LOD threshold,
+    6.4), `CullPushConstants` and `ArgsPushConstants` for the compute passes. Code defines
+    `PHOX_VERTEX_DRAW`, `PHOX_MESHLET_DRAW`, `PHOX_CULL_PASS` or `PHOX_ARGS_PASS` to get its block. The
+    vertex and mesh shaders pass the material index on as a flat varying, so `forward.frag` has no push
+    constants and serves both paths.
 - `vk::DescriptorAllocator` is per frame: pools reset together and grow when one runs out.
 
 The abstract `phox::Device` creates buffers and images but not pipelines, which the plan had it do: creating a
@@ -210,26 +215,29 @@ pipeline needs the shader library and set layouts, which belong with the cache.
   `loadGltf()` whole glTF scenes (6.3).
 - `Object`: name, `shared_ptr<const Mesh>`, `Material` (6.3), `Transform` (scale, rotate, translate).
   Materials are double-sided by default; single-sided ones have their back faces culled. Each
-  object also has a never-reused `id()` that renderers key per-object state on (meshlet visibility); copies
-  get a new one, moves keep it.
+  object also has a never-reused `id()` that tells apart the objects a slot of per-object state has held
+  (6.5); copies get a new one, moves keep it.
 - `Scene`: objects, named by `ObjectId {index, generation}` handles that go stale on removal (a slot table over
   a dense object array, so view extraction iterates contiguously; names are only for `find` and debugging),
   `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
   clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES).
-- `extractView(scene, extent)` computes the matrices and frustum planes from the target's aspect ratio, culls
-  objects whose bounds lie outside a frustum plane, and sorts the rest: opaque and alpha-masked items front
-  to back (`draws`), blended ones back to front (`transparent`). A draw culls back faces when its material
-  is single-sided and its transform does not mirror the mesh (`DrawItem::cullBackFaces`).
+- `extractView(scene, extent, cull = true)` computes the matrices and frustum planes from the target's
+  aspect ratio, culls objects whose bounds lie outside a frustum plane, and sorts the rest: opaque and
+  alpha-masked items front to back (`draws`), blended ones back to front (`transparent`). A draw culls back
+  faces when its material is single-sided and its transform does not mirror the mesh
+  (`DrawItem::cullBackFaces`). With `cull` false (the Vulkan renderer, 6.5) every object is listed and
+  `draws` keep scene order; `DrawItem::sceneIndex` is the object's dense, stable index in the scene.
 - `SampleScenes` gives the app and the tests the same scenes with deterministic `animate(scene, t)`.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 
-- `addForwardPass(graph, view, sets, color, depth, meshes, pipelines, meshletSettings, occlusion)`: clears,
-  then draws each item with per-draw push constants, shaded by its material (6.3) and lit two-sided by the
-  directional light: indexed draws, or one `vkCmdDrawMeshTasksEXT` per item when the mesh cache holds
-  meshlets (6.1). Two pipelines per path, culling none or back faces, share a layout, so the descriptor sets
-  are bound once. With `occlusion` it adds the passes of 6.2 instead of one. Blended items follow in
-  "forward blend": alpha blending, depth tested read-only, no occlusion culling.
+- `addForwardPass(graph, scene, sets, color, depth, pipelines, meshletSettings, occlusion)`: culls the
+  `GpuScene` on the GPU and draws what survives with indirect draws (6.5), shaded by its material (6.3) and
+  lit two-sided by the directional light: indexed draws, or task shader dispatches over meshlets when the
+  mesh cache holds them (6.1). Two pipelines per path, culling none or back faces, share a layout, so the
+  descriptor sets are bound once; each draws one bucket of the cull pass's output. With `occlusion` it adds
+  the passes of 6.2. Blended items follow in "forward blend": alpha blending, depth tested read-only, no
+  occlusion culling.
 - `addDepthPyramidPass(graph, depth, pipelines)`: builds the depth pyramid of 6.2 and returns it.
 - `addTonemapPass(graph, hdr, target, mapping, pipelines)`: a full-screen triangle reading the HDR image with
   `texelFetch`, then applying the sRGB transfer function unless the target's format does; it writes every
@@ -249,9 +257,10 @@ with `RendererConfig::meshShaders` off, it uses the vertex pipeline. Both paths 
   meshlet's vertex indices followed by its triangles, packed one per `uint` as three 8-bit local indices, so
   no 8-bit storage feature is needed.
 - **Buffers**: the meshlet path reads the vertex buffer and the meshlet buffer (meshlets, then their data)
-  through buffer device addresses (Vulkan 1.3 guarantees `bufferDeviceAddress`) in push constants: no
-  descriptor writes per draw.
-- **`forward.task`**: 32 meshlets per workgroup, one per invocation. A meshlet is dropped if its bounding
+  through buffer device addresses (Vulkan 1.3 guarantees `bufferDeviceAddress`) taken from the draw's
+  `GpuDraw` (6.5): no descriptor writes per draw.
+- **`forward.task`**: 32 meshlets per workgroup, one per invocation; a workgroup runs one work item
+  (a draw and a group of 32 of its meshlets) from the cull pass's list. A meshlet is dropped if its bounding
   sphere (moved into world space, radius scaled by the transform's largest axis) is outside a frustum plane,
   or, for back-face-culled draws, if its normal cone faces away from the camera. The cone test runs in object
   space against the camera transformed by the inverse model matrix: facing is affine-invariant for
@@ -292,18 +301,22 @@ This is exact, not approximate: a meshlet with a visible pixel is nearer there t
 drew, so it passes the late test against a pyramid that holds the farthest of those depths. Spheres reaching
 the near plane are kept. The goldens are rendered with it, and must match the other paths.
 
-- **Visibility bits** (`vk::MeshletVisibility`): one bit per meshlet, in whole 32-bit words per draw, so each
-  task shader workgroup reads and writes its own word without atomics. Draws are keyed by `Object::id()`,
-  which is stable across frames (draw items are re-sorted every frame). Ranges come from a bump allocator;
-  when it is full, the store starts over with every bit cleared (a "clear visibility" transfer pass),
-  growing to twice what the frame needs. The bits are a hint, so starting over only costs one frame of
-  culling. The buffer is imported into each frame's graph (StorageWrite to StorageWrite; Undefined when
-  cleared), read by the early pass and written by the late one.
+- **Objects too** (6.5): the same two phases run per object before the meshlets. "cull early" keeps the
+  objects visible at the end of the last frame (a history word per instance slot); "cull late" keeps those,
+  plus every object in the frustum whose bounding sphere is not hidden behind the pyramid, and rewrites the
+  history. An object hidden as a whole costs one sphere test, not a test per meshlet.
+- **Visibility bits** (kept by `vk::GpuScene`): one bit per meshlet, in whole 32-bit words per instance
+  slot, so each task shader workgroup reads and writes its own word without atomics. Ranges come from a bump
+  allocator; a slot keeps its range while it holds the same object and mesh. When the allocator is full,
+  the store starts over with every bit cleared, growing to twice what the frame needs. The bits and the
+  history are hints, so starting over only costs one frame of culling. Both buffers are imported into each
+  frame's graph (Undefined when cleared, by a "clear draw counters" transfer pass), read by the early passes
+  and written by the late ones.
 - **Task shaders**: `forward_task.glsl` built three ways (`forward.task`, `forward_early.task`,
   `forward_late.task`), so each pipeline declares only the sets it uses: after set 1 (the texture table,
-  6.3) the late one adds set 2 (visibility) and set 3 (the pyramid with a nearest sampler), the early one set 2.
-- **Push constants**: to make room for the draw's visibility offset in 128 bytes, a mesh's meshlets and their
-  data share one buffer, and the meshlets' offsets count from its start.
+  6.3) the late one adds set 2 (the pyramid with a nearest sampler). The visibility bits come by address.
+- **Meshlet buffers**: a mesh's meshlets and their data share one buffer, and the meshlets' offsets count
+  from its start, so a `GpuMesh` needs one address for both.
 
 On the RTX 3080 (`field`, 1080p, 200 frames of one pose): forward early 0.56 ms, depth pyramid 0.05 ms,
 forward late 0.03 ms, 0.64 ms in all, against 0.87 ms with frustum and cone culling only and 1.12 to 1.17 ms
@@ -417,11 +430,83 @@ What Nanite does beyond this, and where it would go here:
 - **Hierarchical culling.** The task shader tests every meshlet of every level, about twice level 0's
   count. A bounding volume hierarchy over groups, traversed in a persistent compute pass, would skip whole
   subtrees that are too fine or too coarse (meshoptimizer's clusterlod example builds one).
-- **GPU-driven instances.** Objects are still culled and drawn one by one from the CPU (see 11).
+- **GPU-driven instances.** Done (6.5): objects are culled on the GPU too, and drawn by indirect calls.
 - **Visibility buffer and software rasterization.** Small triangles cost the hardware rasterizer whole 2 x 2
   quads; Nanite rasterizes them in compute with 64-bit atomics into a visibility buffer and shades each pixel
   once afterwards.
 - **Streaming.** Every level stays resident; pages of groups could be loaded on demand instead.
+
+### 6.5 GPU-driven rendering
+
+The Vulkan renderer leaves every decision about what to draw to the GPU: which objects are in the view,
+which are hidden, and how many draws that makes. The CPU's work per frame no longer depends on what is
+visible, and the draw calls it records are a fixed handful whatever the scene.
+
+**The CPU side** (`vk::GpuScene::update`). The view is extracted without culling, so it lists every object
+in scene order. Each opaque or masked object gets an instance slot, its scene index
+(`DrawItem::sceneIndex`): dense, and stable while the object exists. Into the frame's upload arena, through
+the arena's device addresses, go three arrays:
+
+- `GpuInstance` per slot (80 bytes): the model matrix, the mesh's index in this frame's mesh array, whether
+  to cull back faces, and the slot's first word of meshlet visibility bits (6.2);
+- `GpuMesh` per distinct mesh (48 bytes): the bounding sphere, the vertex and meshlet addresses, and, on the
+  vertex path, where its indices start in the mesh cache's shared index pool (7);
+- `MaterialData` per slot, bound as set 0's material table.
+
+It also sizes the GPU's output (`drawCapacity`, `workCapacity`) for the case where everything survives, so
+the passes never overflow. Blended objects are the exception: they must be drawn back to front, so the CPU
+writes their draws itself, from the view's sorted transparent list, in runs that share a pipeline; their
+slots hold `kNoMesh` and the cull pass skips them.
+
+**The GPU side** (`addForwardPass`):
+
+1. **clear draw counters** (transfer): zeroes each draw list's `DrawCounters`, and the history and
+   visibility bits when they are new.
+2. **cull** (`cull.glsl`, compute, one invocation per slot): tests the object's bounding sphere against the
+   frustum (and, with occlusion culling, the history or the depth pyramid, 6.2); for each object it keeps it
+   appends a `GpuDraw` (model matrix, camera in object space, mesh addresses, material, flags) and its work,
+   using atomics. Work goes to bucket 1 for single-sided objects, bucket 0 for the rest, one per pipeline.
+   On the meshlet path the work is one item per 32 meshlets (`(draw, group)`); on the vertex path, an
+   indexed indirect command whose `firstInstance` is the draw.
+3. **draw args** (meshlet path only): turns each bucket's work count into a task shader dispatch, in rows
+   of at most `maxTaskWorkGroupCount[0]` (the task shader skips the excess).
+4. **forward**: per bucket, `vkCmdDrawMeshTasksIndirectEXT`, or `vkCmdDrawIndexedIndirectCount` with the
+   count the cull pass wrote (see below for devices without it). The vertex shader reads its `GpuDraw` at `gl_InstanceIndex` and pulls its
+   vertex from the mesh's address; the task shader reads the draw from its work item.
+
+With occlusion culling this runs twice, early and late (6.2), with the depth pyramid between. Draw lists
+are graph buffers with `BufferDesc::deviceAddress`, so their barriers come from the uses each pass declares
+(`Indirect` for the arguments, which the task shader also reads), and the transient pool recycles them.
+
+Append order depends on scheduling, so draws come out in a different order from run to run; depth testing
+makes the image the same. Every path still matches the goldens, and the scene test checks that a renderer
+reused across scene changes (objects removed, added and changing mesh in the same slot) draws exactly what
+a fresh one does. The device must support `multiDrawIndirect` and `drawIndirectFirstInstance`.
+`drawIndirectCount` is optional: MoltenVK lacks it (Metal has no count buffers), so there the vertex path
+clears its command buffer before culling and draws all of it, in calls of at most `maxDrawIndirectCount`;
+unused commands draw nothing. `PHOX_NO_DRAW_INDIRECT_COUNT=1` forces that path, and the suites pass with it.
+
+`RendererConfig::collectStatistics` counts what was drawn with a CPU frustum test of its own, outside the
+frame's measured CPU time: the GPU's counts are not read back.
+
+Measured on the RTX 3080 at 1080p, 60 animated frames, against the per-object renderer it replaced. `crowd`
+is 32,768 small spinning cubes (393k triangles), for the cost of each object; `field` is the 576-torus
+benchmark (234 in view, 15.3 million triangles):
+
+| Scene, path | CPU per frame, before / after | GPU per frame, before / after |
+|---|---|---|
+| crowd, mesh shaders + occlusion | 12.5 ms / 2.4 ms | 5.10 ms / 0.80 ms |
+| crowd, mesh shaders | 9.1 ms / 2.2 ms | 2.36 ms / 0.67 ms |
+| crowd, vertex shaders | 9.6 ms / 2.3 ms | 0.85 ms / 0.72 ms |
+| field, mesh shaders + occlusion | 2.4 ms / 0.13 ms | 0.53 ms / 0.57 ms |
+| field, mesh shaders | 2.3 ms / 0.10 ms | 0.42 ms / 0.44 ms |
+| field, vertex shaders | 0.41 ms / 0.12 ms | 1.64 ms / 1.68 ms |
+
+GPU times include a 0.31 ms headless readback. With many small objects, a task shader dispatch per object
+left most of each 32-wide workgroup idle; one dispatch over packed work items fixes that, and the CPU no
+longer records a draw per object. With a few large objects the GPU cost is about even: the cull and args
+passes add some microseconds. The CPU's remaining 70 ns per object goes to extracting the view, writing the
+arrays and checking mesh and texture residency, every frame (see 11).
 
 ## 7. Upload and caches
 
@@ -430,7 +515,9 @@ What Nanite does beyond this, and where it would go here:
 - `MeshCache::prepare(view, frame, cmd)` uploads meshes that are new or whose version changed: staging through
   the arena, `vkCmdCopyBuffer` into device-local buffers, then one barrier from TRANSFER to VERTEX_INPUT |
   INDEX_INPUT, or to the task and mesh shaders' storage reads for meshlets. The vertex path uploads indices in
-  vertex cache order; the meshlet path uploads meshlets instead (6.1). Replaced buffers go to the frame's
+  vertex cache order, into one index pool shared by every mesh (free ranges are reused; the pool grows by a
+  recorded copy), so a single indirect call can draw any of them; the meshlet path uploads meshlets instead
+  (6.1). Vertex buffers are storage buffers read by address (vertex pulling, 6.5). Replaced buffers go to the frame's
   deletion queue; meshes not drawn for 120 frames are evicted.
 - `TextureCache::prepare(view, frame, cmd)` does the same for textures (6.3), which never change.
 - `vk::Device::makeBuffer` / `makeImage` are the only callers of VMA (memory: DeviceLocal, Upload, Readback).
@@ -476,15 +563,16 @@ include/phox/                 CpuImage, Log, Math, Color, Resources, RenderGraph
 include/phox/pipeline/        PipelineDesc, Pipeline, Shader
 include/phox/vulkan/          Renderer, Device, Buffer, Image, Swapchain, FrameContext, UploadArena,
                               DescriptorAllocator, TransientPool, GraphExecutor, PipelineCache, ShaderLibrary,
-                              ShaderInterface, MeshCache, TextureCache, MeshletVisibility, PassTimer, Conversions,
+                              ShaderInterface, MeshCache, TextureCache, GpuScene, PassTimer, Conversions,
                               VulkanCommon
 include/phox/vulkan/passes/   ForwardPass, DepthPyramidPass, TonemapPass, ReadbackPass
 include/phox/metal/           Renderer, Device, Buffer, Image, TransientPool, GraphExecutor, PipelineCache,
                               ShaderLibrary, ShaderInterface, MeshCache, TextureCache, Conversions, MetalCommon
 include/phox/metal/passes/    ForwardPass, TonemapPass, ReadbackPass
 shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
-                              forward_early.task and forward_late.task, depthpyramid.comp, fullscreen.vert,
-                              tonemap.frag
+                              forward_early.task and forward_late.task, cull.glsl with cull.comp, cull_early.comp,
+                              cull_late.comp and cull_vertex.comp, occlusion.glsl, draw_args.comp,
+                              depthpyramid.comp, fullscreen.vert, tonemap.frag
 shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
 test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori, materials; each also .lod.ppm
@@ -492,16 +580,17 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
 
 ## 11. Next, and where each thing plugs in
 
-- **Object-level occlusion culling on the GPU.** Objects are culled against the frustum on the CPU, and every
-  meshlet of a surviving object is tested on the GPU. A compute pass over objects, writing indirect mesh task
-  draws, would cull whole hidden objects against the pyramid first.
+- **A persistent GPU scene.** The CPU rewrites every instance, mesh and material every frame (6.5), about
+  70 ns per object. Keeping them in device-local buffers and uploading only what changed (dirty transforms
+  through a scatter pass) would make a static scene nearly free, and an animated one cost what moves.
+- **GPU-sorted transparency.** Blended objects are still sorted and drawn from the CPU; sorting on the GPU,
+  or order-independent transparency, would bring them into the cull passes.
 - **Image-based lighting.** An HDR environment map, prefiltered for specular and convolved for diffuse, with
   a BRDF lookup table, replaces the ambient term in `shadePbr`; smooth metals currently reflect nothing.
 - **Shadows.** Cascaded shadow maps for the directional light: a depth pass per cascade before "forward",
   sampled with PCF in `forward.frag`.
-- **Instancing.** A draw per object pushes 128 bytes; many instances of one mesh would rather read transforms
-  from a buffer. With the remaining Nanite pieces (6.4): hierarchical cluster culling, a visibility buffer
-  with software rasterization of small triangles, and streaming.
+- **The remaining Nanite pieces (6.4)**: hierarchical cluster culling, a visibility buffer with software
+  rasterization of small triangles, and streaming.
 
 - **Installable package.** Install the compiled shaders with a runtime lookup (an environment override or a
   path relative to the library), and export or bundle volk and VMA.

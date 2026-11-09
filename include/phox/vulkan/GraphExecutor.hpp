@@ -29,6 +29,8 @@ public:
     VkImageView mipView(ImageHandle handle, std::uint32_t level) const;
     Extent2D extent(ImageHandle handle) const;
     VkBuffer buffer(BufferHandle handle) const;
+    /// The device address of a buffer created with BufferDesc::deviceAddress (or imported with one).
+    VkDeviceAddress bufferAddress(BufferHandle handle) const;
     Device &device() const;
     /// Per-frame memory (UploadArena), descriptor sets and deferred deletion.
     FrameContext &frame() const;
@@ -54,7 +56,7 @@ public:
     /// Supplies the Vulkan objects behind an imported image. @p view is needed only if a pass binds the
     /// image as an attachment or asks for its view.
     void bindImage(ImageHandle handle, VkImage image, VkImageView view = VK_NULL_HANDLE);
-    void bindBuffer(BufferHandle handle, VkBuffer buffer);
+    void bindBuffer(BufferHandle handle, VkBuffer buffer, VkDeviceAddress address = 0);
 
     // GraphBackend
     void acquire(const ImageInfo &image) override;
@@ -77,6 +79,7 @@ private:
     };
     struct BufferSlot {
         VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceAddress address = 0;
         Buffer *pooled = nullptr;
     };
 

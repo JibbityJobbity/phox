@@ -1,0 +1,5 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// The instance cull pass; see cull.glsl.
+#define PHOX_CULL_VERTEX
+#include "cull.glsl"

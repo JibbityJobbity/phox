@@ -52,12 +52,15 @@ struct RendererConfig {
     bool collectStatistics = false;
 };
 
-/// What a frame drew, before culling (RendererConfig::collectStatistics).
+/// What a frame drew, before culling (RendererConfig::collectStatistics), and what it cost the CPU.
 struct FrameStatistics {
     std::uint64_t draws = 0;     ///< objects drawn, after frustum culling
     std::uint64_t triangles = 0; ///< in their meshes at full detail
     /// in the meshlets cluster LOD selected for them (before meshlet culling); equals triangles without LOD
     std::uint64_t lodTriangles = 0;
+    /// CPU time spent on the frame (Vulkan: from the end of the wait for its frame slot to the submit),
+    /// filled in whether or not statistics are collected.
+    double cpuMilliseconds = 0.0;
 };
 
 /// GPU time of one render graph pass.

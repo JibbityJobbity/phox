@@ -19,6 +19,10 @@ class Image;
 /// non-uniformly.
 bool hasBindlessTextures(const VkPhysicalDeviceVulkan12Features &features);
 
+/// Whether a device has what GPU-driven drawing needs (all of which is enabled on the Device): several
+/// indirect draws per call, with nonzero firstInstance. Indirect counts are optional (Device::drawIndirectCount).
+bool hasGpuDrivenDrawing(const VkPhysicalDeviceFeatures &features);
+
 /// The most textures the texture table (SetLayout::Bindless) holds, whatever the device allows.
 inline constexpr std::uint32_t kMaxBindlessTextures = 4096;
 
@@ -51,6 +55,9 @@ public:
     /// VK_EXT_mesh_shader is enabled with task and mesh shaders. Its limits are in meshShaderProperties().
     bool meshShaders() const { return m_meshShaders; }
     const VkPhysicalDeviceMeshShaderPropertiesEXT &meshShaderProperties() const { return m_meshShaderProperties; }
+    /// drawIndirectCount is enabled: indirect draws can take their count from a buffer. MoltenVK lacks it
+    /// (Metal has no count buffers); PHOX_NO_DRAW_INDIRECT_COUNT=1 turns it off to test that case.
+    bool drawIndirectCount() const { return m_drawIndirectCount; }
     /// Size of the texture table: kMaxBindlessTextures, or less if the device allows fewer.
     std::uint32_t bindlessTextureCount() const { return m_bindlessTextureCount; }
 
@@ -79,6 +86,7 @@ private:
     std::uint32_t m_presentFamily = UINT32_MAX;
     bool m_objectNames = false;
     bool m_meshShaders = false;
+    bool m_drawIndirectCount = false;
 };
 
 } // namespace phox::vk

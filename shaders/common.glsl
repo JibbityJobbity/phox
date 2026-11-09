@@ -57,11 +57,13 @@ layout(set = 0, binding = 1, std430) readonly buffer Materials {
 layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 #endif
-#ifdef PHOX_MESHLET_DRAW
+#if defined(PHOX_MESHLET_DRAW) || defined(PHOX_VERTEX_DRAW) || defined(PHOX_CULL_PASS) || defined(PHOX_ARGS_PASS)
 
-// Needs GL_EXT_buffer_reference, enabled by the including shader.
+// The GPU-driven scene (include/phox/vulkan/ShaderInterface.hpp). Buffers are reached through device
+// addresses kept as uvec2, turned into references with GL_EXT_buffer_reference_uvec2: needs that and
+// GL_EXT_buffer_reference, enabled by the including shader.
 
-// Meshlets per task shader workgroup: one invocation tests one meshlet.
+// Meshlets per task shader workgroup, and so per work item: one invocation tests one meshlet.
 #define PHOX_TASK_GROUP_SIZE 32
 
 // phox::Meshlet.
@@ -80,6 +82,43 @@ struct Meshlet {
 
 const float kLodNoParent = 3.0e38;
 
+// One scene object, an entry of the frame's instance array (index: the object's slot). phox::vk::GpuInstance.
+struct GpuInstance {
+    mat4 model;
+    uint mesh;             // index into the mesh array; kNoMesh: an empty slot, or drawn by the CPU (blended)
+    uint flags;            // kInstanceCullBackFaces
+    uint visibilityOffset; // first word of the slot's meshlet visibility bits
+    uint padding;
+};
+
+// One mesh of the frame. phox::vk::GpuMesh.
+struct GpuMesh {
+    vec4 sphere;       // object space: xyz centre, w radius, enclosing the mesh
+    uvec2 vertices;    // address of its phox::Vertex array
+    uvec2 meshlets;    // meshlet path: its Meshlet array, followed by their data
+    uint meshletCount; // of every LOD level
+    uint indexCount;   // vertex path
+    uint firstIndex;   // vertex path: where its indices start in the index pool (bound as the index buffer)
+    uint padding;
+};
+
+// One instance the cull pass decided to draw. phox::vk::GpuDraw.
+struct GpuDraw {
+    mat4 model;
+    vec4 cameraPosition;   // xyz: the camera in the instance's object space
+    uvec2 vertices;
+    uvec2 primitives;      // meshlet path: GpuMesh::meshlets; unused on the vertex path
+    uint count;            // meshlets, or indices
+    uint material;         // index into `materials` (the object's slot)
+    uint visibilityOffset; // first word of meshlet visibility bits
+    uint flags;            // kDrawConeCulling | kDrawEarly
+};
+
+const uint kNoMesh = 0xFFFFFFFFu;
+const uint kInstanceCullBackFaces = 1u;
+const uint kDrawConeCulling = 1u; // single-sided: meshlets facing away may be skipped
+const uint kDrawEarly = 2u;       // occlusion culling: the early pass drew this instance's visible meshlets
+
 // phox::Vertex, read as floats: position (0-2), normal (3-5), texcoord (6-7), tangent (8-11).
 const uint kVertexFloats = 12u;
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer { float values[]; };
@@ -87,34 +126,88 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Ver
 // 8-bit local indices), which is read through a MeshletDataBuffer of the same address.
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletBuffer { Meshlet meshlets[]; };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletDataBuffer { uint values[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer { GpuInstance instances[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshBuffer { GpuMesh meshes[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer DrawBuffer { GpuDraw draws[]; };
+// Meshlet path: (draw, group of PHOX_TASK_GROUP_SIZE meshlets) per task shader workgroup.
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer WorkBuffer { uvec2 items[]; };
+// Vertex path: a VkDrawIndexedIndirectCommand per draw, firstInstance = the draw.
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer CommandBuffer { DrawCommand commands[]; };
+// phox::vk::DrawCounters: what one cull pass produced, per bucket (0: both faces drawn, 1: back faces
+// culled), and the indirect arguments the args pass makes of it.
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer CounterBuffer {
+    uint drawCount;
+    uint workCount[2]; // work items (meshlet path) or DrawCommands (vertex path)
+    uint padding;
+    uvec4 args[2];     // VkDrawMeshTasksIndirectCommandEXT per bucket (xyz)
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer VisibilityBuffer { uint words[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer HistoryBuffer { uint visible[]; };
+
+#endif
+
+#ifdef PHOX_MESHLET_DRAW
+
+// Per indirect draw (task and mesh stages): which list of work items to run.
+layout(push_constant) uniform MeshletDrawPushConstants {
+    uvec2 draws;      // DrawBuffer
+    uvec2 work;       // WorkBuffer: bucket b's items start at b * workCapacity
+    uvec2 counters;   // CounterBuffer
+    uvec2 visibility; // VisibilityBuffer (occlusion culling)
+    uint bucket;
+    uint workCapacity;
+    uint flags;         // kMeshletFrustumCulling | kMeshletConeCulling
+    float lodThreshold; // cluster LOD: the error, in pixels, a meshlet may show
+} pass;
 
 const uint kMeshletFrustumCulling = 1u;
 const uint kMeshletConeCulling = 2u;
 
-layout(push_constant) uniform MeshletDrawPushConstants {
-    mat4 model;
-    vec4 cameraPosition; // xyz: the camera in the mesh's object space
-    VertexBuffer vertices;
-    MeshletBuffer meshlets;
-    uint meshletCount;
-    uint flags;            // kMeshletFrustumCulling | kMeshletConeCulling
-    uint visibilityOffset; // two-phase occlusion culling: the draw's first word of meshlet visibility bits
-    uint material;         // index into `materials`
-    float lodThreshold;    // cluster LOD: the error, in pixels, a meshlet may show
-} draw;
-
-// From the task shader to the mesh shader: the meshlets that survived culling, one mesh shader
-// workgroup each.
+// From the task shader to the mesh shader: the draw, and the meshlets that survived culling, one mesh
+// shader workgroup each.
 struct MeshletTask {
+    uint draw;
     uint meshlets[PHOX_TASK_GROUP_SIZE];
 };
 
 #elif defined(PHOX_VERTEX_DRAW)
 
-// Per draw (vertex stage).
-layout(push_constant) uniform DrawPushConstants {
-    mat4 model;
-    uint material; // index into `materials`
-} draw;
+// Per indirect draw (vertex stage). gl_InstanceIndex is the draw (VkDrawIndirectCommand::firstInstance).
+layout(push_constant) uniform VertexDrawPushConstants {
+    uvec2 draws; // DrawBuffer
+} pass;
+
+#elif defined(PHOX_CULL_PASS)
+
+// The instance cull pass (cull.comp).
+layout(push_constant) uniform CullPushConstants {
+    uvec2 instances; // InstanceBuffer
+    uvec2 meshes;    // MeshBuffer
+    uvec2 draws;     // DrawBuffer, appended to
+    uvec2 work;      // WorkBuffer (meshlet path) or CommandBuffer (vertex path), appended to per bucket
+    uvec2 counters;  // CounterBuffer
+    uvec2 history;   // HistoryBuffer: whether each slot was visible at the end of the previous frame
+    uint instanceCount;
+    uint workCapacity; // entries per bucket
+    uint flags;        // kCullFrustum
+    uint padding;
+} pass;
+
+const uint kCullFrustum = 1u;
+
+#elif defined(PHOX_ARGS_PASS)
+
+layout(push_constant) uniform ArgsPushConstants {
+    uvec2 counters;     // CounterBuffer
+    uint maxGroupsX;    // the device's largest task shader dispatch in x
+    uint padding;
+} pass;
 
 #endif

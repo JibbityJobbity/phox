@@ -284,7 +284,12 @@ vec3 applyToneMapping(const vec3 &color, const ToneMapping &mapping) {
 }
 
 mat4 Transform::matrix() const {
-    return glm::translate(mat4(1.0f), position) * glm::mat4_cast(rotation) * glm::scale(mat4(1.0f), scale);
+    // translate * rotate * scale, composed directly: the rotation's columns scaled, then the translation.
+    // The same values as multiplying the three matrices (whose other entries are exact zeros and ones),
+    // without the work.
+    const mat3 rotate = glm::mat3_cast(rotation);
+    return mat4(vec4(rotate[0] * scale.x, 0.0f), vec4(rotate[1] * scale.y, 0.0f), vec4(rotate[2] * scale.z, 0.0f),
+                vec4(position, 1.0f));
 }
 
 Transform Transform::fromMatrix(const mat4 &m) {

@@ -83,7 +83,10 @@ Scope bufferScope(BufferUsage usage, std::optional<PassType> pass, bool meshShad
     case BufferUsage::StorageWrite:
         return {shaderStages(pass, meshShaders),
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
-    case BufferUsage::Indirect: return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
+    // GPU-driven passes also read their argument buffers from shaders (counts, to bound work lists).
+    case BufferUsage::Indirect:
+        return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | shaderStages(pass, meshShaders),
+                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
     case BufferUsage::TransferSrc: return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
     case BufferUsage::TransferDst: return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
     case BufferUsage::HostRead: return {VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT};
@@ -148,6 +151,13 @@ VkImageView PassContext::mipView(ImageHandle handle, std::uint32_t level) const 
 }
 Extent2D PassContext::extent(ImageHandle handle) const { return m_executor.m_graph.imageInfo(handle).extent; }
 VkBuffer PassContext::buffer(BufferHandle handle) const { return m_executor.boundBuffer(handle.index).buffer; }
+VkDeviceAddress PassContext::bufferAddress(BufferHandle handle) const {
+    const VkDeviceAddress address = m_executor.boundBuffer(handle.index).address;
+    if (address == 0) {
+        throw std::logic_error("buffer " + std::to_string(handle.index) + " has no device address");
+    }
+    return address;
+}
 Device &PassContext::device() const { return m_executor.m_device; }
 FrameContext &PassContext::frame() const { return m_executor.m_frame; }
 
@@ -199,7 +209,11 @@ void GraphExecutor::bindImage(ImageHandle handle, VkImage image, VkImageView vie
     slot.view = view;
 }
 
-void GraphExecutor::bindBuffer(BufferHandle handle, VkBuffer buffer) { bufferSlot(handle.index).buffer = buffer; }
+void GraphExecutor::bindBuffer(BufferHandle handle, VkBuffer buffer, VkDeviceAddress address) {
+    BufferSlot &slot = bufferSlot(handle.index);
+    slot.buffer = buffer;
+    slot.address = address;
+}
 
 void GraphExecutor::acquire(const ImageInfo &info) {
     ImageCreateInfo createInfo;
@@ -223,9 +237,11 @@ void GraphExecutor::acquire(const BufferInfo &info) {
     createInfo.usage = info.usage;
     createInfo.memory = MemoryLocation::DeviceLocal;
     createInfo.name = info.name;
+    createInfo.deviceAddress = info.desc.deviceAddress;
     Buffer &buffer = m_pool.acquire(createInfo, m_frameNumber);
     BufferSlot &slot = bufferSlot(info.index);
     slot.buffer = buffer.handle();
+    slot.address = buffer.deviceAddress();
     slot.pooled = &buffer;
 }
 
