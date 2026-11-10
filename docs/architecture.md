@@ -151,13 +151,14 @@ frames are destroyed.
 frame = frames[n % 2]; frame.begin()                 wait its fence; reset pool, arena, descriptors; run deferred deletions
 transients.collect(n); meshes.collect(n)
 acquire(swapchain, frame.imageAvailable)             out of date: recreate, skip the frame
-view = extractView(scene, extent, false)             core, no Vulkan; every object, unculled (6.5)
-meshes.prepare(view, frame, cmd)                     copies recorded before the graph, one barrier
-gpuScene.update(view, meshes, textures, frame)       instance, mesh and material arrays in the arena (6.5)
-frameSet = FrameUniforms and the material table
+view = extractCamera(scene, extent)                  core, no Vulkan: the camera, no objects
+gpuScene.update(scene, view, meshes, textures, ...)  what changed (6.5); mesh and texture uploads recorded
+                                                     before the graph, one barrier each
+frameSet = FrameUniforms and the scene's material table
 graph: forward -> hdr -> tonemap -> backbuffer       (windowed: the swapchain image is a colour attachment)
        forward -> hdr -> tonemap -> display -> readback -> imported HostRead buffer   (headless)
-       forward is clear draw counters -> cull -> draw args -> forward, or with occlusion culling
+       forward is (clear instances ->) scene update -> clear draw counters -> cull -> draw args -> forward,
+       or with occlusion culling
        cull early -> draw args early -> forward early -> depth pyramid -> cull late -> ... -> forward late
 compile; execute
 submit2: wait imageAvailable at firstUseStage(backbuffer); signal renderFinished[image]; fence
@@ -216,17 +217,20 @@ pipeline needs the shader library and set layouts, which belong with the cache.
 - `Object`: name, `shared_ptr<const Mesh>`, `Material` (6.3), `Transform` (scale, rotate, translate).
   Materials are double-sided by default; single-sided ones have their back faces culled. Each
   object also has a never-reused `id()` that tells apart the objects a slot of per-object state has held
-  (6.5); copies get a new one, moves keep it.
+  (6.5); copies get a new one, moves keep it. Its non-const accessors bump a transform or material revision
+  and log the object in its scene's change log (6.5).
 - `Scene`: objects, named by `ObjectId {index, generation}` handles that go stale on removal (a slot table over
   a dense object array, so view extraction iterates contiguously; names are only for `find` and debugging),
   `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
-  clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES).
+  clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES). `changes(cursor)` reads its change
+  log (6.5); the log is on the heap, so moving a scene keeps it, and a copy gets a log of its own.
 - `extractView(scene, extent, cull = true)` computes the matrices and frustum planes from the target's
   aspect ratio, culls objects whose bounds lie outside a frustum plane, and sorts the rest: opaque and
   alpha-masked items front to back (`draws`), blended ones back to front (`transparent`). A draw culls back
   faces when its material is single-sided and its transform does not mirror the mesh
-  (`DrawItem::cullBackFaces`). With `cull` false (the Vulkan renderer, 6.5) every object is listed and
-  `draws` keep scene order; `DrawItem::sceneIndex` is the object's dense, stable index in the scene.
+  (`DrawItem::cullBackFaces`). With `cull` false every object is listed and `draws` keep scene order.
+  `extractCamera(scene, extent)` fills in only the camera, light and settings, for renderers that keep the
+  objects themselves (the Vulkan renderer, 6.5).
 - `SampleScenes` gives the app and the tests the same scenes with deterministic `animate(scene, t)`.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
@@ -442,26 +446,43 @@ The Vulkan renderer leaves every decision about what to draw to the GPU: which o
 which are hidden, and how many draws that makes. The CPU's work per frame no longer depends on what is
 visible, and the draw calls it records are a fixed handful whatever the scene.
 
-**The CPU side** (`vk::GpuScene::update`). The view is extracted without culling, so it lists every object
-in scene order. Each opaque or masked object gets an instance slot, its scene index
-(`DrawItem::sceneIndex`): dense, and stable while the object exists. Into the frame's upload arena, through
-the arena's device addresses, go three arrays:
+**The scene stays on the GPU** (`vk::GpuScene`). Each object has an instance slot, its
+`ObjectId::index`: stable while the object exists. Two device-local arrays hold, per slot:
 
-- `GpuInstance` per slot (80 bytes): the model matrix, the mesh's index in this frame's mesh array, whether
-  to cull back faces, and the slot's first word of meshlet visibility bits (6.2);
-- `GpuMesh` per distinct mesh (48 bytes): the bounding sphere, the vertex and meshlet addresses, and, on the
-  vertex path, where its indices start in the mesh cache's shared index pool (7);
-- `MaterialData` per slot, bound as set 0's material table.
+- `GpuInstance` (80 bytes): the model matrix, the mesh's index in the mesh table, whether to cull back
+  faces, and the slot's first word of meshlet visibility bits (6.2);
+- `MaterialData` (80 bytes), bound as set 0's material table.
 
-It also sizes the GPU's output (`drawCapacity`, `workCapacity`) for the case where everything survives, so
-the passes never overflow. Blended objects are the exception: they must be drawn back to front, so the CPU
-writes their draws itself, from the view's sorted transparent list, in runs that share a pipeline; their
-slots hold `kNoMesh` and the cull pass skips them.
+Only the mesh table is written every frame, into the upload arena: a `GpuMesh` per distinct mesh (48 bytes:
+the bounding sphere, the vertex and meshlet addresses, and on the vertex path, where its indices start in
+the mesh cache's shared index pool, 7).
+
+**Finding what changed** (`GpuScene::update`). The renderer only extracts the camera (`extractCamera`). An
+object's non-const `transform()`, `material()` and `setMesh()` bump its transform or material revision and
+log its index in the scene's change log; `addObject` and `removeObject` log too. `Scene::changes(cursor)`
+returns the indices logged since the renderer's cursor, each once until read, so `update()` visits only
+those objects, and for each compares the revisions to see whether its instance, its material or both need
+rewriting. When the scene cannot say (the first frame, another scene, or a log that started over because
+it outgrew the scene with nobody reading), `update()` checks every object instead. Each distinct mesh's
+version is checked every frame, so geometry changed in place reaches every object using it. The changed
+records go into the upload arena as `InstanceUpdate`s and `MaterialUpdate`s (96 bytes each), and the
+"scene update" compute pass scatters them into the arrays.
+
+`GpuScene` holds a reference to every mesh and texture in use and asks the caches to keep them resident
+(`MeshCache::require`, `TextureCache::require`, then `flush`, which records the uploads). It also keeps
+the GPU's output sized (`drawCapacity`, `workCapacity`) for the case where everything survives, so the
+passes never overflow, updating the totals as objects change. Blended objects are the exception: they
+must be drawn back to front, so every frame the CPU sorts them by distance and writes their draws itself,
+in runs that share a pipeline; their instances hold `kNoMesh` and the cull pass skips them.
+
+The contract for applications: change objects through those accessors before each `render()`, and do not
+keep the references they return across frames, since a write through an old reference is not seen.
 
 **The GPU side** (`addForwardPass`):
 
-1. **clear draw counters** (transfer): zeroes each draw list's `DrawCounters`, and the history and
-   visibility bits when they are new.
+1. **clear instances** (transfer, when the array is new) fills it with `kNoMesh`; **scene update**
+   (compute) writes the changed instances and materials. **clear draw counters** (transfer) zeroes each
+   draw list's `DrawCounters`, and the history and visibility bits when they are new.
 2. **cull** (`cull.glsl`, compute, one invocation per slot): tests the object's bounding sphere against the
    frustum (and, with occlusion culling, the history or the depth pyramid, 6.2); for each object it keeps it
    appends a `GpuDraw` (model matrix, camera in object space, mesh addresses, material, flags) and its work,
@@ -471,17 +492,22 @@ slots hold `kNoMesh` and the cull pass skips them.
 3. **draw args** (meshlet path only): turns each bucket's work count into a task shader dispatch, in rows
    of at most `maxTaskWorkGroupCount[0]` (the task shader skips the excess).
 4. **forward**: per bucket, `vkCmdDrawMeshTasksIndirectEXT`, or `vkCmdDrawIndexedIndirectCount` with the
-   count the cull pass wrote (see below for devices without it). The vertex shader reads its `GpuDraw` at `gl_InstanceIndex` and pulls its
-   vertex from the mesh's address; the task shader reads the draw from its work item.
+   count the cull pass wrote (see below for devices without it). The vertex shader reads its `GpuDraw` at
+   `gl_InstanceIndex` and pulls its vertex from the mesh's address; the task shader reads the draw from its
+   work item.
 
 With occlusion culling this runs twice, early and late (6.2), with the depth pyramid between. Draw lists
 are graph buffers with `BufferDesc::deviceAddress`, so their barriers come from the uses each pass declares
 (`Indirect` for the arguments, which the task shader also reads), and the transient pool recycles them.
+The instance and material arrays are imported each frame (StorageRead to StorageRead; Undefined when new),
+read by the cull passes and by the forward passes' fragment shaders.
 
 Append order depends on scheduling, so draws come out in a different order from run to run; depth testing
 makes the image the same. Every path still matches the goldens, and the scene test checks that a renderer
-reused across scene changes (objects removed, added and changing mesh in the same slot) draws exactly what
-a fresh one does. The device must support `multiDrawIndirect` and `drawIndirectFirstInstance`.
+reused across scene changes draws exactly what a fresh one does: objects removed, added and changing mesh
+in the same slot; materials recoloured, made translucent and opaque again; objects moved; a shared mesh
+given new geometry; and 20,000 objects arriving at once, which regrows every buffer and starts the
+visibility bits over mid-session. It also tests the change log on its own. The device must support `multiDrawIndirect` and `drawIndirectFirstInstance`.
 `drawIndirectCount` is optional: MoltenVK lacks it (Metal has no count buffers), so there the vertex path
 clears its command buffer before culling and draws all of it, in calls of at most `maxDrawIndirectCount`;
 unused commands draw nothing. `PHOX_NO_DRAW_INDIRECT_COUNT=1` forces that path, and the suites pass with it.
@@ -489,37 +515,40 @@ unused commands draw nothing. `PHOX_NO_DRAW_INDIRECT_COUNT=1` forces that path, 
 `RendererConfig::collectStatistics` counts what was drawn with a CPU frustum test of its own, outside the
 frame's measured CPU time: the GPU's counts are not read back.
 
-Measured on the RTX 3080 at 1080p, 60 animated frames, against the per-object renderer it replaced. `crowd`
-is 32,768 small spinning cubes (393k triangles), for the cost of each object; `field` is the 576-torus
-benchmark (234 in view, 15.3 million triangles):
+Measured on the RTX 3080 at 1080p over 60 frames, against the per-object renderer it replaced (whose CPU
+cost did not depend on motion). `crowd` is 32,768 small spinning cubes (393k triangles), for the cost of
+each object; `field` is the 576-torus benchmark (234 in view, 15.3 million triangles). "Still" repeats one
+pose; "moving" animates every object every frame, the worst case for the CPU:
 
-| Scene, path | CPU per frame, before / after | GPU per frame, before / after |
-|---|---|---|
-| crowd, mesh shaders + occlusion | 12.5 ms / 2.4 ms | 5.10 ms / 0.80 ms |
-| crowd, mesh shaders | 9.1 ms / 2.2 ms | 2.36 ms / 0.67 ms |
-| crowd, vertex shaders | 9.6 ms / 2.3 ms | 0.85 ms / 0.72 ms |
-| field, mesh shaders + occlusion | 2.4 ms / 0.13 ms | 0.53 ms / 0.57 ms |
-| field, mesh shaders | 2.3 ms / 0.10 ms | 0.42 ms / 0.44 ms |
-| field, vertex shaders | 0.41 ms / 0.12 ms | 1.64 ms / 1.68 ms |
+| Scene, path | CPU per frame, before | after, still | after, moving | GPU per frame, before / after |
+|---|---|---|---|---|
+| crowd, mesh shaders + occlusion | 12.5 ms | 0.16 ms | 1.56 ms | 5.10 ms / 0.81 ms |
+| crowd, mesh shaders | 9.1 ms | 0.11 ms | 1.51 ms | 2.36 ms / 0.68 ms |
+| crowd, vertex shaders | 9.6 ms | 0.10 ms | 1.51 ms | 0.85 ms / 0.73 ms |
+| field, mesh shaders + occlusion | 2.4 ms | 0.11 ms | 0.14 ms | 0.53 ms / 0.57 ms |
+| field, mesh shaders | 2.3 ms | 0.08 ms | 0.10 ms | 0.42 ms / 0.44 ms |
+| field, vertex shaders | 0.41 ms | 0.08 ms | 0.13 ms | 1.64 ms / 1.67 ms |
 
 GPU times include a 0.31 ms headless readback. With many small objects, a task shader dispatch per object
 left most of each 32-wide workgroup idle; one dispatch over packed work items fixes that, and the CPU no
 longer records a draw per object. With a few large objects the GPU cost is about even: the cull and args
-passes add some microseconds. The CPU's remaining 70 ns per object goes to extracting the view, writing the
-arrays and checking mesh and texture residency, every frame (see 11).
+passes add some microseconds. A still scene's CPU time is the frame's fixed cost (building, compiling and
+recording the graph). A moving object costs about 45 ns: its matrix, and its update record.
 
 ## 7. Upload and caches
 
 - `UploadArena`: one host-visible, persistently mapped buffer per frame context, bump-allocated and reset at
   frame start. A frame that overflows gets extra blocks, merged into one larger block next time.
-- `MeshCache::prepare(view, frame, cmd)` uploads meshes that are new or whose version changed: staging through
+- `MeshCache::require(mesh)` marks a mesh used this frame and queues it if it is new or its version changed;
+  `flush(frame, cmd)` uploads what was queued: staging through
   the arena, `vkCmdCopyBuffer` into device-local buffers, then one barrier from TRANSFER to VERTEX_INPUT |
   INDEX_INPUT, or to the task and mesh shaders' storage reads for meshlets. The vertex path uploads indices in
   vertex cache order, into one index pool shared by every mesh (free ranges are reused; the pool grows by a
   recorded copy), so a single indirect call can draw any of them; the meshlet path uploads meshlets instead
   (6.1). Vertex buffers are storage buffers read by address (vertex pulling, 6.5). Replaced buffers go to the frame's
   deletion queue; meshes not drawn for 120 frames are evicted.
-- `TextureCache::prepare(view, frame, cmd)` does the same for textures (6.3), which never change.
+- `TextureCache::require(texture)` / `flush(frame, cmd)` do the same for textures (6.3), which never
+  change; `require` hands out the texture's table slot straight away.
 - `vk::Device::makeBuffer` / `makeImage` are the only callers of VMA (memory: DeviceLocal, Upload, Readback).
 
 ## 8. Fallback, logging and testing
@@ -571,7 +600,7 @@ include/phox/metal/           Renderer, Device, Buffer, Image, TransientPool, Gr
 include/phox/metal/passes/    ForwardPass, TonemapPass, ReadbackPass
 shaders/                      common.glsl, pbr.glsl, forward.vert/.frag/.mesh, forward_task.glsl with forward.task,
                               forward_early.task and forward_late.task, cull.glsl with cull.comp, cull_early.comp,
-                              cull_late.comp and cull_vertex.comp, occlusion.glsl, draw_args.comp,
+                              cull_late.comp and cull_vertex.comp, occlusion.glsl, draw_args.comp, scene_update.comp,
                               depthpyramid.comp, fullscreen.vert, tonemap.frag
 shaders/metal/                common.h, pbr.h, forward.metal, fullscreen.metal, tonemap.metal
 test/source/                  render_graph_test, render_view_test, scene_test, golden_test
@@ -580,9 +609,9 @@ test/golden/                  triangle, triangle_turned, cubes, cubes_aces, tori
 
 ## 11. Next, and where each thing plugs in
 
-- **A persistent GPU scene.** The CPU rewrites every instance, mesh and material every frame (6.5), about
-  70 ns per object. Keeping them in device-local buffers and uploading only what changed (dirty transforms
-  through a scatter pass) would make a static scene nearly free, and an animated one cost what moves.
+- **Animation on the GPU.** A moving object still costs the CPU its matrix and an update record (6.5),
+  about 45 ns. Transforms driven by the GPU (a compute pass evaluating animation, or physics) would write
+  the instance array directly.
 - **GPU-sorted transparency.** Blended objects are still sorted and drawn from the CPU; sorting on the GPU,
   or order-independent transparency, would bring them into the cull passes.
 - **Image-based lighting.** An HDR environment map, prefiltered for specular and convolved for diffuse, with

@@ -2,7 +2,6 @@
 
 #include "phox/Log.hpp"
 #include "phox/Meshlets.hpp"
-#include "phox/RenderView.hpp"
 #include "phox/vulkan/Buffer.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
@@ -91,25 +90,92 @@ void MeshCache::releaseIndices(std::uint32_t first, std::uint32_t count) {
     m_freeIndices = std::move(merged);
 }
 
-void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber) {
+void MeshCache::upload(const Mesh &mesh, GpuMesh &entry, FrameContext &frame, VkCommandBuffer cmd) {
     const auto &table = m_device.table();
-    bool uploaded = false;
-    std::vector<const DrawItem *> items;
-    items.reserve(view.itemCount());
-    for (const DrawItem &draw : view.draws) items.push_back(&draw);
-    for (const DrawItem &draw : view.transparent) items.push_back(&draw);
-    const Mesh *previous = nullptr; // objects often come in runs that share a mesh
-    for (const DrawItem *draw : items) {
-        const Mesh &mesh = *draw->mesh;
-        if (&mesh == previous) {
-            continue;
+    const std::string name = "mesh " + std::to_string(mesh.id());
+    // One buffer per part, filled from a list of pieces copied one after another.
+    struct Piece {
+        const void *data;
+        VkDeviceSize bytes;
+    };
+    const auto upload = [&](std::initializer_list<Piece> pieces, BufferUsageMask usage, const char *what) {
+        VkDeviceSize total = 0;
+        for (const Piece &piece : pieces) total += piece.bytes;
+        // Shaders read every part through its address (GpuMesh), on either path.
+        auto buffer = m_device.makeBuffer({total, usage | usageBit(BufferUsage::TransferDst),
+                                           MemoryLocation::DeviceLocal, name + " " + what, true});
+        VkDeviceSize offset = 0;
+        for (const Piece &piece : pieces) {
+            const UploadArena::Allocation staging = frame.arena().upload(piece.data, piece.bytes);
+            const VkBufferCopy copy{staging.offset, offset, piece.bytes};
+            table.vkCmdCopyBuffer(cmd, staging.buffer, buffer->handle(), 1, &copy);
+            offset += piece.bytes;
         }
-        previous = &mesh;
-        GpuMesh &entry = m_meshes[mesh.id()];
-        entry.lastUsed = frameNumber;
-        if (entry.vertices && entry.version == mesh.version()) {
-            continue;
+        return buffer;
+    };
+    const std::vector<std::uint32_t> indices = optimizeIndexOrder(mesh);
+    if (m_meshlets) {
+        const auto start = std::chrono::steady_clock::now();
+        MeshletMesh meshlets = m_lod ? buildMeshletLod(mesh, indices) : buildMeshlets(mesh, indices);
+        const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        // The data follows the meshlets in the buffer: make its offsets count from the buffer's start.
+        const auto dataStart =
+            static_cast<std::uint32_t>(meshlets.meshlets.size() * sizeof(Meshlet) / sizeof(std::uint32_t));
+        for (Meshlet &meshlet : meshlets.meshlets) {
+            meshlet.vertexOffset += dataStart;
+            meshlet.triangleOffset += dataStart;
         }
+        entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
+                                usageBit(BufferUsage::StorageRead), "vertices");
+        entry.meshlets = upload({{meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size()},
+                                 {meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size()}},
+                                usageBit(BufferUsage::StorageRead), "meshlets");
+        entry.meshletCount = static_cast<std::uint32_t>(meshlets.meshlets.size());
+        entry.lodLevels = meshlets.levels;
+        if (m_keepMeshlets) {
+            entry.meshletInfo = meshlets.meshlets;
+        }
+        log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets, {} LOD level(s), {} triangles "
+                   "in all; built in {:.1f} ms)",
+                   mesh.id(), mesh.version(), mesh.triangleCount(), meshlets.meshlets.size(), meshlets.levels,
+                   meshlets.triangleCount(), buildMs);
+    } else {
+        // The vertex shader fetches its vertex itself (forward.vert), as storage; indices go to the pool.
+        entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
+                                usageBit(BufferUsage::StorageRead), "vertices");
+        entry.indexCount = static_cast<std::uint32_t>(indices.size());
+        entry.firstIndex = allocateIndices(entry.indexCount, frame, cmd);
+        const UploadArena::Allocation staging =
+            frame.arena().upload(indices.data(), sizeof(std::uint32_t) * indices.size());
+        const VkBufferCopy copy{staging.offset, VkDeviceSize{entry.firstIndex} * sizeof(std::uint32_t),
+                                sizeof(std::uint32_t) * indices.size()};
+        table.vkCmdCopyBuffer(cmd, staging.buffer, m_indexPool->handle(), 1, &copy);
+        log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(),
+                   mesh.triangleCount());
+    }
+}
+
+void MeshCache::require(const Mesh &mesh, std::uint64_t frameNumber) {
+    if (mesh.empty()) {
+        return;
+    }
+    const auto [it, inserted] = m_meshes.try_emplace(mesh.id());
+    GpuMesh &entry = it->second;
+    entry.lastUsed = frameNumber;
+    if (!inserted && entry.version == mesh.version()) {
+        return; // resident, or already queued (the version is set when queued)
+    }
+    entry.version = mesh.version();
+    m_pending.push_back(&mesh);
+}
+
+void MeshCache::flush(FrameContext &frame, VkCommandBuffer cmd) {
+    if (m_pending.empty()) {
+        return;
+    }
+    const auto &table = m_device.table();
+    for (const Mesh *mesh : m_pending) {
+        GpuMesh &entry = m_meshes.at(mesh->id());
         if (entry.vertices) {
             // An earlier frame may still be drawing from the old buffers and index range.
             auto retired = std::make_shared<GpuMesh>(std::move(entry));
@@ -120,76 +186,12 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
                 retired.reset();
             });
             entry = GpuMesh{};
-            entry.lastUsed = frameNumber;
+            entry.lastUsed = retired->lastUsed;
         }
-
-        const std::string name = "mesh " + std::to_string(mesh.id());
-        // One buffer per part, filled from a list of pieces copied one after another.
-        struct Piece {
-            const void *data;
-            VkDeviceSize bytes;
-        };
-        const auto upload = [&](std::initializer_list<Piece> pieces, BufferUsageMask usage, const char *what) {
-            VkDeviceSize total = 0;
-            for (const Piece &piece : pieces) total += piece.bytes;
-            // Shaders read every part through its address (GpuMesh), on either path.
-            auto buffer = m_device.makeBuffer({total, usage | usageBit(BufferUsage::TransferDst),
-                                               MemoryLocation::DeviceLocal, name + " " + what, true});
-            VkDeviceSize offset = 0;
-            for (const Piece &piece : pieces) {
-                const UploadArena::Allocation staging = frame.arena().upload(piece.data, piece.bytes);
-                const VkBufferCopy copy{staging.offset, offset, piece.bytes};
-                table.vkCmdCopyBuffer(cmd, staging.buffer, buffer->handle(), 1, &copy);
-                offset += piece.bytes;
-            }
-            return buffer;
-        };
-        const std::vector<std::uint32_t> indices = optimizeIndexOrder(mesh);
-        if (m_meshlets) {
-            const auto start = std::chrono::steady_clock::now();
-            MeshletMesh meshlets = m_lod ? buildMeshletLod(mesh, indices) : buildMeshlets(mesh, indices);
-            const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            // The data follows the meshlets in the buffer: make its offsets count from the buffer's start.
-            const auto dataStart =
-                static_cast<std::uint32_t>(meshlets.meshlets.size() * sizeof(Meshlet) / sizeof(std::uint32_t));
-            for (Meshlet &meshlet : meshlets.meshlets) {
-                meshlet.vertexOffset += dataStart;
-                meshlet.triangleOffset += dataStart;
-            }
-            entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
-                                    usageBit(BufferUsage::StorageRead), "vertices");
-            entry.meshlets = upload({{meshlets.meshlets.data(), sizeof(Meshlet) * meshlets.meshlets.size()},
-                                     {meshlets.data.data(), sizeof(std::uint32_t) * meshlets.data.size()}},
-                                    usageBit(BufferUsage::StorageRead), "meshlets");
-            entry.meshletCount = static_cast<std::uint32_t>(meshlets.meshlets.size());
-            entry.lodLevels = meshlets.levels;
-            if (m_keepMeshlets) {
-                entry.meshletInfo = meshlets.meshlets;
-            }
-            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles in {} meshlets, {} LOD level(s), {} triangles "
-                       "in all; built in {:.1f} ms)",
-                       mesh.id(), mesh.version(), mesh.triangleCount(), meshlets.meshlets.size(), meshlets.levels,
-                       meshlets.triangleCount(), buildMs);
-        } else {
-            // The vertex shader fetches its vertex itself (forward.vert), as storage; indices go to the pool.
-            entry.vertices = upload({{mesh.vertices().data(), sizeof(Vertex) * mesh.vertices().size()}},
-                                    usageBit(BufferUsage::StorageRead), "vertices");
-            entry.indexCount = static_cast<std::uint32_t>(indices.size());
-            entry.firstIndex = allocateIndices(entry.indexCount, frame, cmd);
-            const UploadArena::Allocation staging =
-                frame.arena().upload(indices.data(), sizeof(std::uint32_t) * indices.size());
-            const VkBufferCopy copy{staging.offset, VkDeviceSize{entry.firstIndex} * sizeof(std::uint32_t),
-                                    sizeof(std::uint32_t) * indices.size()};
-            table.vkCmdCopyBuffer(cmd, staging.buffer, m_indexPool->handle(), 1, &copy);
-            log::debug("mesh cache: uploaded mesh {} v{} ({} triangles)", mesh.id(), mesh.version(),
-                       mesh.triangleCount());
-        }
-        entry.version = mesh.version();
-        uploaded = true;
+        entry.version = mesh->version();
+        upload(*mesh, entry, frame, cmd);
     }
-    if (!uploaded) {
-        return;
-    }
+    m_pending.clear();
     VkMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
@@ -211,7 +213,7 @@ void MeshCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBu
 const MeshCache::GpuMesh &MeshCache::get(const Mesh &mesh) const {
     const auto it = m_meshes.find(mesh.id());
     if (it == m_meshes.end() || !it->second.vertices) {
-        throw std::logic_error("mesh " + std::to_string(mesh.id()) + " was not uploaded by MeshCache::prepare");
+        throw std::logic_error("mesh " + std::to_string(mesh.id()) + " was not uploaded by MeshCache::flush");
     }
     return it->second;
 }

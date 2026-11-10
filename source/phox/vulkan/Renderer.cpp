@@ -469,8 +469,8 @@ void Renderer::render(const Scene &scene) {
         return;
     }
 
-    // Every object, neither culled nor sorted (blended ones aside, back to front): the GPU culls.
-    const RenderView view = extractView(scene, extent, false);
+    // The camera only: GpuScene keeps the objects, and the GPU culls them.
+    const RenderView view = extractCamera(scene, extent);
     if (!windowed) {
         const std::uint64_t bytes = static_cast<std::uint64_t>(extent.width) * extent.height * 4;
         if (!m_readback || m_readback->size() != bytes) {
@@ -487,11 +487,12 @@ void Renderer::render(const Scene &scene) {
     if (table.vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
         throw std::runtime_error("failed to begin the frame command buffer");
     }
-    // Everything the scene uses is resident: what is drawn is decided on the GPU.
-    m_meshes->prepare(view, frame, cmd, m_frameNumber);
-    m_textures->prepare(view, frame, cmd, m_frameNumber);
-    const GpuScene::Frame sceneFrame = m_scene->update(view, *m_meshes, *m_textures, frame);
-    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, sceneFrame.materials), m_textures->set()};
+    // The GPU's copy of the scene is brought up to date, and everything it uses is resident: what is
+    // drawn is decided on the GPU.
+    const GpuScene::Frame sceneFrame =
+        m_scene->update(scene, view, *m_meshes, *m_textures, frame, cmd, m_frameNumber);
+    const VkDescriptorBufferInfo materials{m_scene->materials().handle(), 0, VK_WHOLE_SIZE};
+    const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, materials), m_textures->set()};
 
     // ---- Frame graph -------------------------------------------------------------------------
     //   forward -> hdr -> tonemap -> backbuffer                        [windowed]
@@ -504,6 +505,16 @@ void Renderer::render(const Scene &scene) {
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     const ImageHandle hdr = graph.createImage("hdr", ImageDesc{RelativeExtent{1.0f}, kHdrFormat});
     const ImageHandle depth = graph.createImage("depth", ImageDesc{RelativeExtent{1.0f}, m_depthFormat});
+    // Read every frame and written where objects changed ("scene update").
+    const BufferUsage sceneInitial = sceneFrame.clearInstances ? BufferUsage::Undefined : BufferUsage::StorageRead;
+    Buffer &instances = m_scene->instances();
+    Buffer &materialBuffer = m_scene->materials();
+    const SceneBuffers sceneBuffers{graph.importBuffer("scene instances", BufferDesc{instances.size(), true},
+                                                       sceneInitial, BufferUsage::StorageRead),
+                                    graph.importBuffer("scene materials", BufferDesc{materialBuffer.size(), true},
+                                                       sceneInitial, BufferUsage::StorageRead)};
+    executor.bindBuffer(sceneBuffers.instances, instances.handle(), instances.deviceAddress());
+    executor.bindBuffer(sceneBuffers.materials, materialBuffer.handle(), materialBuffer.deviceAddress());
     OcclusionState occlusion;
     if (m_occlusion) {
         // Written by the late passes of the previous frame, unless new or restarted (cleared first).
@@ -518,7 +529,7 @@ void Renderer::render(const Scene &scene) {
         executor.bindBuffer(occlusion.visibility, visibility.handle(), visibility.deviceAddress());
     }
     const ForwardPassOutput forward =
-        addForwardPass(graph, view, sets, sceneFrame, hdr, depth, m_meshes->meshlets(), *m_pipelines,
+        addForwardPass(graph, view, sets, sceneFrame, sceneBuffers, hdr, depth, m_meshes->meshlets(), *m_pipelines,
                        MeshletSettings{m_config.meshletCulling, m_config.lodErrorPixels}, m_occlusion ? &occlusion : nullptr);
 
     ImageHandle backbuffer;
@@ -550,7 +561,8 @@ void Renderer::render(const Scene &scene) {
     const double cpuMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuStart).count();
     if (m_config.collectStatistics) {
-        m_statistics = countStatistics(view, *m_meshes, m_config.lodErrorPixels); // not part of the frame's cost
+        // Not part of the frame's cost: the renderer itself never lists the objects.
+        m_statistics = countStatistics(extractView(scene, extent, false), *m_meshes, m_config.lodErrorPixels);
     }
     m_statistics.cpuMilliseconds = cpuMilliseconds;
 
@@ -602,7 +614,8 @@ void Renderer::render(const Scene &scene) {
     m_lastFrame.width = extent.width;
     m_lastFrame.height = extent.height;
     m_lastFrame.rgba.assign(pixels, pixels + m_readback->size());
-    log::debug("rendered {} draw(s), {} culled", view.draws.size(), view.culled);
+    log::debug("rendered {} object(s): {} instance and {} material update(s)", scene.objectCount(),
+               sceneFrame.instanceUpdateCount, sceneFrame.materialUpdateCount);
 }
 
 void Renderer::renderFallback(const Scene &scene) {
@@ -713,6 +726,7 @@ bool Renderer::createPipelines() {
         }
     }
     m_pipelines->get(cullPipelineDesc(CullVariant::Vertex));
+    m_pipelines->get(sceneUpdatePipelineDesc());
     m_pipelines->get(tonemapPipelineDesc(kHeadlessFormat));
     if (!m_device->meshShaders()) {
         return false;

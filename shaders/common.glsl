@@ -1,13 +1,13 @@
 // Interface shared by Phox's scene shaders. Mirrors include/phox/ShaderInterface.hpp (and shaders/metal/common.h)
 // and, for the meshlet path, include/phox/vulkan/ShaderInterface.hpp.
 //
-// Shaders of the meshlet path (forward.task, forward.mesh) define PHOX_MESHLET_DRAW before including
-// this file and get MeshletDrawPushConstants; forward.vert defines PHOX_VERTEX_DRAW and gets
-// DrawPushConstants. Both carry the draw's material index, which the vertex and mesh shaders pass to
-// forward.frag, so one fragment shader (without push constants) serves both paths.
+// Each shader defines which push constants it gets before including this file: PHOX_MESHLET_DRAW (the
+// task and mesh shaders), PHOX_VERTEX_DRAW (forward.vert), PHOX_CULL_PASS (cull.glsl), PHOX_ARGS_PASS
+// (draw_args.comp) or PHOX_SCENE_UPDATE_PASS (scene_update.comp). The vertex and mesh shaders pass the
+// draw's material index to forward.frag, so one fragment shader (without push constants) serves both paths.
 //
 // Sets: 0 SetLayout::Frame, 1 SetLayout::Bindless (fragment shaders that define PHOX_MATERIALS), then for
-// the meshlet path 2 SetLayout::MeshletVisibility and 3 SetLayout::DepthPyramid (forward_task.glsl).
+// the late occlusion passes 2 (the task shader) or 1 (the cull pass) SetLayout::DepthPyramid.
 
 // Set 0 (SetLayout::Frame): per-frame data.
 layout(set = 0, binding = 0) uniform FrameUniforms {
@@ -47,7 +47,7 @@ const uint kNoTexture = 0xFFFFFFFFu;
 const uint kMaterialAlphaMask = 1u;
 const uint kMaterialAlphaBlend = 2u;
 
-// Set 0, binding 1: one entry per draw of the frame.
+// Set 0, binding 1: the scene's materials, one entry per instance slot (GpuScene), kept across frames.
 layout(set = 0, binding = 1, std430) readonly buffer Materials {
     MaterialData materials[];
 };
@@ -57,7 +57,8 @@ layout(set = 0, binding = 1, std430) readonly buffer Materials {
 layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 #endif
-#if defined(PHOX_MESHLET_DRAW) || defined(PHOX_VERTEX_DRAW) || defined(PHOX_CULL_PASS) || defined(PHOX_ARGS_PASS)
+#if defined(PHOX_MESHLET_DRAW) || defined(PHOX_VERTEX_DRAW) || defined(PHOX_CULL_PASS) || defined(PHOX_ARGS_PASS) || \
+    defined(PHOX_SCENE_UPDATE_PASS)
 
 // The GPU-driven scene (include/phox/vulkan/ShaderInterface.hpp). Buffers are reached through device
 // addresses kept as uvec2, turned into references with GL_EXT_buffer_reference_uvec2: needs that and
@@ -82,7 +83,8 @@ struct Meshlet {
 
 const float kLodNoParent = 3.0e38;
 
-// One scene object, an entry of the frame's instance array (index: the object's slot). phox::vk::GpuInstance.
+// One scene object, an entry of the instance array (index: the object's slot), kept on the GPU across
+// frames. phox::vk::GpuInstance.
 struct GpuInstance {
     mat4 model;
     uint mesh;             // index into the mesh array; kNoMesh: an empty slot, or drawn by the CPU (blended)
@@ -208,6 +210,33 @@ layout(push_constant) uniform ArgsPushConstants {
     uvec2 counters;     // CounterBuffer
     uint maxGroupsX;    // the device's largest task shader dispatch in x
     uint padding;
+} pass;
+
+#elif defined(PHOX_SCENE_UPDATE_PASS)
+
+// The scene update pass (scene_update.comp): changed slots' records, scattered into the scene's arrays.
+struct InstanceUpdate { // phox::vk::InstanceUpdate
+    GpuInstance instance;
+    uint slot;
+    uint padding0, padding1, padding2;
+};
+struct MaterialUpdate { // phox::vk::MaterialUpdate; the MaterialData as raw words
+    uvec4 material[5];
+    uint slot;
+    uint padding0, padding1, padding2;
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceUpdateBuffer { InstanceUpdate items[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MaterialUpdateBuffer { MaterialUpdate items[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer InstanceTarget { GpuInstance instances[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer MaterialTarget { uvec4 words[]; };
+
+layout(push_constant) uniform SceneUpdatePushConstants {
+    uvec2 instanceUpdates; // InstanceUpdateBuffer
+    uvec2 materialUpdates; // MaterialUpdateBuffer
+    uvec2 instances;       // InstanceTarget: the scene's GpuInstance array
+    uvec2 materials;       // MaterialTarget: the scene's MaterialData array, five words each
+    uint instanceUpdateCount;
+    uint materialUpdateCount;
 } pass;
 
 #endif

@@ -24,6 +24,11 @@ std::uint64_t nextObjectId() {
     return counter.fetch_add(1);
 }
 
+std::uint64_t nextChangeLogId() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1);
+}
+
 Bounds computeBounds(const std::vector<Vertex> &vertices) {
     if (vertices.empty()) {
         return {};
@@ -322,9 +327,85 @@ Object &Object::operator=(const Object &other) {
         m_name = other.m_name;
         m_mesh = other.m_mesh;
         m_material = other.m_material;
-        m_transform = other.m_transform; // keeps its own id
+        m_transform = other.m_transform; // keeps its own id, and its place in a scene
+        ++m_transformRevision;
+        ++m_materialRevision;
+        logChange();
     }
     return *this;
+}
+
+SceneChangeLog::SceneChangeLog() : m_id(nextChangeLogId()) {}
+
+void SceneChangeLog::record(std::uint32_t index, std::uint64_t &loggedAt) {
+    if (loggedAt > m_read) {
+        return; // its entry has not been read yet
+    }
+    if (m_entries.size() >= m_limit) {
+        // Start over: readers behind this point look at every object instead (Scene::changes).
+        m_first += m_entries.size();
+        m_entries.clear();
+        m_read = m_first;
+    }
+    m_entries.push_back(index);
+    loggedAt = m_first + m_entries.size();
+}
+
+Scene::Scene() : m_log(std::make_unique<SceneChangeLog>()) {}
+
+Scene::Scene(const Scene &other)
+    : clearColor(other.clearColor), toneMapping(other.toneMapping), m_objects(other.m_objects), m_ids(other.m_ids),
+      m_slots(other.m_slots), m_freeSlots(other.m_freeSlots), m_log(std::make_unique<SceneChangeLog>()),
+      m_camera(other.m_camera), m_light(other.m_light) {
+    for (std::size_t i = 0; i < m_objects.size(); ++i) {
+        m_objects[i].m_log = m_log.get();
+        m_objects[i].m_index = m_ids[i].index;
+    }
+    m_log->m_limit = 2 * m_objects.size() + 1024;
+}
+
+Scene &Scene::operator=(const Scene &other) {
+    if (this != &other) {
+        *this = Scene(other);
+    }
+    return *this;
+}
+
+Scene::~Scene() = default;
+
+SceneChangeLog &Scene::log() {
+    if (!m_log) {
+        m_log = std::make_unique<SceneChangeLog>(); // moved from, then reused
+    }
+    return *m_log;
+}
+
+std::optional<std::span<const std::uint32_t>> Scene::changes(ChangeCursor &cursor) const {
+    if (!m_log) {
+        cursor = {};
+        return std::nullopt;
+    }
+    SceneChangeLog &log = *m_log;
+    const std::uint64_t end = log.m_first + log.m_entries.size();
+    const bool known = cursor.log == log.m_id && cursor.position >= log.m_first && cursor.position <= end;
+    const std::uint64_t from = cursor.position;
+    cursor = {log.m_id, end};
+    log.m_read = std::max(log.m_read, end);
+    if (!known) {
+        return std::nullopt;
+    }
+    return std::span<const std::uint32_t>(log.m_entries).subspan(static_cast<std::size_t>(from - log.m_first));
+}
+
+const Object *Scene::objectAt(std::uint32_t index) const {
+    if (index >= m_slots.size()) {
+        return nullptr;
+    }
+    const Slot &slot = m_slots[index];
+    if (slot.dense >= m_ids.size() || m_ids[slot.dense] != ObjectId{index, slot.generation}) {
+        return nullptr; // free: its generation has moved on
+    }
+    return &m_objects[slot.dense];
 }
 
 ObjectId Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform) {
@@ -339,10 +420,15 @@ ObjectId Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Ma
         index = static_cast<std::uint32_t>(m_slots.size());
         m_slots.emplace_back();
     }
-    m_objects.emplace_back(std::move(name), std::move(mesh), std::move(material), transform);
+    Object &object = m_objects.emplace_back(std::move(name), std::move(mesh), std::move(material), transform);
     const ObjectId id{index, m_slots[index].generation};
     m_ids.push_back(id);
     m_slots[index].dense = static_cast<std::uint32_t>(m_objects.size() - 1);
+    SceneChangeLog &changes = log();
+    changes.m_limit = 2 * m_objects.size() + 1024;
+    object.m_log = &changes;
+    object.m_index = index;
+    object.logChange();
     return id;
 }
 
@@ -359,6 +445,8 @@ bool Scene::removeObject(ObjectId id) {
         m_ids[dense] = m_ids[last];
         m_slots[m_ids[dense].index].dense = dense;
     }
+    std::uint64_t loggedAt = 0; // the object is gone: log its index regardless
+    log().record(id.index, loggedAt);
     m_objects.pop_back();
     m_ids.pop_back();
     // A slot whose generation would wrap is retired rather than reused, so no id ever becomes valid again.

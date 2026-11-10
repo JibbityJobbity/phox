@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -122,6 +123,25 @@ struct Material {
     }
 };
 
+/// A Scene's record of which objects changed, by ObjectId::index: Scene::changes() reads it. Objects
+/// append themselves through their non-const accessors, at most once until a reader has read past them.
+class SceneChangeLog {
+public:
+    SceneChangeLog();
+    /// Logs object slot @p index, unless it is logged and unread. @p loggedAt is the object's own record
+    /// of where (one past its last entry; 0: never).
+    void record(std::uint32_t index, std::uint64_t &loggedAt);
+    std::uint64_t id() const { return m_id; }
+
+private:
+    friend class Scene;
+    std::uint64_t m_id;                  ///< never reused, so a reader can tell logs apart
+    std::vector<std::uint32_t> m_entries;
+    std::uint64_t m_first = 0;           ///< the position of m_entries[0]
+    std::uint64_t m_read = 0;            ///< the furthest position a reader has read to
+    std::size_t m_limit = 1024;          ///< past this many entries the log starts over (Scene sets it)
+};
+
 /// Scale, then rotate, then translate.
 struct Transform {
     vec3 position{0.0f};
@@ -135,6 +155,13 @@ struct Transform {
 
 /// A mesh placed in a scene with a material. Each object has an id that is never reused, so renderers
 /// can keep per-object state across frames (e.g. which meshlets were visible). Copies get a new id.
+///
+/// Renderers also keep copies of what they drew (the Vulkan renderer keeps every object on the GPU), and
+/// find what changed through two revisions: the non-const transform() and setMesh() bump
+/// transformRevision(), the non-const material() bumps materialRevision(). An object in a Scene also
+/// logs itself in the scene's change log (Scene::changes). So change an object through those accessors
+/// before each render(), and do not keep the references they return across frames: a write through an
+/// old reference is not seen. Mesh geometry is versioned by the Mesh itself.
 class Object {
 public:
     Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
@@ -148,14 +175,45 @@ public:
     std::uint64_t id() const { return m_id; }
     const std::string &name() const { return m_name; }
     const std::shared_ptr<const Mesh> &mesh() const { return m_mesh; }
-    void setMesh(std::shared_ptr<const Mesh> mesh) { m_mesh = std::move(mesh); }
-    Material &material() { return m_material; }
+    void setMesh(std::shared_ptr<const Mesh> mesh) {
+        m_mesh = std::move(mesh);
+        ++m_transformRevision;
+        logChange();
+    }
+    /// For changing the material: bumps materialRevision().
+    Material &material() {
+        ++m_materialRevision;
+        logChange();
+        return m_material;
+    }
     const Material &material() const { return m_material; }
-    Transform &transform() { return m_transform; }
+    /// For changing the transform: bumps transformRevision().
+    Transform &transform() {
+        ++m_transformRevision;
+        logChange();
+        return m_transform;
+    }
     const Transform &transform() const { return m_transform; }
+    /// Changes whenever the transform or mesh may have.
+    std::uint64_t transformRevision() const { return m_transformRevision; }
+    /// Changes whenever the material may have.
+    std::uint64_t materialRevision() const { return m_materialRevision; }
 
 private:
+    friend class Scene;
+    void logChange() {
+        if (m_log != nullptr) {
+            m_log->record(m_index, m_loggedAt);
+        }
+    }
+
     std::uint64_t m_id;
+    std::uint64_t m_transformRevision = 1;
+    std::uint64_t m_materialRevision = 1;
+    // In a Scene: its change log, the object's ObjectId::index, and where it last logged itself.
+    SceneChangeLog *m_log = nullptr;
+    std::uint32_t m_index = 0;
+    std::uint64_t m_loggedAt = 0;
     std::string m_name;
     std::shared_ptr<const Mesh> m_mesh;
     Material m_material;
@@ -204,6 +262,20 @@ struct ObjectId {
 /// valid until the next addObject() or removeObject().
 class Scene {
 public:
+    /// Where a reader of changes() has got to.
+    struct ChangeCursor {
+        std::uint64_t log = 0; ///< SceneChangeLog::id of the scene read; 0: none yet
+        std::uint64_t position = 0;
+    };
+
+    Scene();
+    /// A copy keeps the ObjectIds; its objects are copies, so they get new Object::ids.
+    Scene(const Scene &other);
+    Scene &operator=(const Scene &other);
+    Scene(Scene &&) noexcept = default;
+    Scene &operator=(Scene &&) noexcept = default;
+    ~Scene();
+
     ObjectId addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
     /// Removes the object; the order of the remaining objects may change. Returns false if @p id is stale.
     bool removeObject(ObjectId id);
@@ -219,6 +291,17 @@ public:
     /// The first object called @p name, or an invalid id. A linear search, for tools and tests; keep the
     /// id that addObject() returns instead.
     ObjectId find(std::string_view name) const;
+
+    /// The object whose ObjectId::index is @p index, or nullptr if there is none.
+    const Object *objectAt(std::uint32_t index) const;
+
+    /// The ObjectId::index of every object added, removed or changed through its non-const accessors
+    /// (see Object) since @p cursor last read this scene, and moves @p cursor to now. Indices may repeat,
+    /// and an index may name an object since removed (objectAt() is null) or replaced. Empty (nullopt)
+    /// when the scene cannot tell: @p cursor has not read this scene, or the entries it needs were dropped
+    /// (the log starts over once it outgrows the scene); then look at every object. For renderers that
+    /// keep copies of the objects; not thread-safe.
+    std::optional<std::span<const std::uint32_t>> changes(ChangeCursor &cursor) const;
 
     /// Every object, in no particular order. objectIds()[i] is the id of objects()[i].
     std::span<Object> objects() { return m_objects; }
@@ -240,11 +323,13 @@ private:
         std::uint32_t generation = 0; ///< bumped on removal, so ids into the old object go stale
     };
     const Object *lookup(ObjectId id) const;
+    SceneChangeLog &log();
 
     std::vector<Object> m_objects;
     std::vector<ObjectId> m_ids; ///< parallel to m_objects
     std::vector<Slot> m_slots;   ///< indexed by ObjectId::index
     std::vector<std::uint32_t> m_freeSlots;
+    std::unique_ptr<SceneChangeLog> m_log; ///< on the heap, so objects' pointers survive moving the scene
     Camera m_camera;
     DirectionalLight m_light;
 };

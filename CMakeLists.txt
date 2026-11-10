@@ -413,6 +413,7 @@ foreach(
   cull_late.comp
   cull_vertex.comp
   draw_args.comp
+  scene_update.comp
   # The RHI stack's forward technique (techniques/forward) and rhi_triangle test.
   basic.vert
   basic.frag

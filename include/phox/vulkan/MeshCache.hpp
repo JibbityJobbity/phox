@@ -12,7 +12,6 @@
 
 namespace phox {
 class Mesh;
-struct RenderView;
 } // namespace phox
 
 namespace phox::vk {
@@ -58,13 +57,14 @@ public:
     MeshCache(const MeshCache &) = delete;
     MeshCache &operator=(const MeshCache &) = delete;
 
-    /// Uploads the meshes @p view draws that are new or changed: copies from the frame's upload arena are
-    /// recorded into @p cmd, followed by one barrier that makes them visible to vertex input (or to task
-    /// and mesh shaders). Call it before the frame graph executes. Replaced buffers are destroyed once the
-    /// GPU is done with them.
-    /// @throws std::runtime_error if a mesh has more meshlets than one draw can launch
-    void prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber);
-    /// @throws std::logic_error if prepare() has not uploaded @p mesh
+    /// Marks @p mesh as used this frame (so it is not evicted), and queues an upload for flush() if it is
+    /// new or its version changed. Empty meshes are never uploaded. @p mesh must live until flush().
+    void require(const Mesh &mesh, std::uint64_t frameNumber);
+    /// Uploads what require() queued: copies from the frame's upload arena are recorded into @p cmd,
+    /// followed by one barrier that makes them visible to the shaders that read meshes. Call it before the
+    /// frame graph executes. Replaced buffers are destroyed once the GPU is done with them.
+    void flush(FrameContext &frame, VkCommandBuffer cmd);
+    /// @throws std::logic_error if flush() has not uploaded @p mesh
     const GpuMesh &get(const Mesh &mesh) const;
     /// Destroys meshes no frame has drawn for kEvictAfterFrames. Call after the frame's fence wait.
     void collect(std::uint64_t frameNumber);
@@ -77,6 +77,7 @@ public:
     VkBuffer indexPool() const;
 
 private:
+    void upload(const Mesh &mesh, GpuMesh &entry, FrameContext &frame, VkCommandBuffer cmd);
     // Vertex path: a range of @p count indices in the pool, grown (by a copy recorded into @p cmd) if needed.
     std::uint32_t allocateIndices(std::uint32_t count, FrameContext &frame, VkCommandBuffer cmd);
     void releaseIndices(std::uint32_t first, std::uint32_t count);
@@ -89,6 +90,7 @@ private:
     bool m_lod;
     bool m_keepMeshlets;
     std::unordered_map<std::uint64_t, GpuMesh> m_meshes;
+    std::vector<const Mesh *> m_pending; ///< queued by require(), uploaded by flush()
 };
 
 } // namespace phox::vk

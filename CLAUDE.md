@@ -36,6 +36,9 @@ On macOS ctest also runs `golden_metal` (the same goldens through the Metal back
   update-after-bind, non-uniform indexing). lavapipe, desktop drivers and MoltenVK have it. It also
   requires `multiDrawIndirect` and `drawIndirectFirstInstance` (GPU-driven drawing); `drawIndirectCount` is
   optional because MoltenVK lacks it. `PHOX_NO_DRAW_INDIRECT_COUNT=1` tests the path without it.
+- The Vulkan renderer keeps the scene on the GPU and uploads what changed: objects must be changed through
+  their non-const accessors (which log them, `Scene::changes`), not through references kept across frames.
+  The scene test compares a reused renderer against a fresh one after each kind of change.
 - Shaders are checked by the validation layer's spirv-val: glslang emits an invalid `Aligned 0` for a
   whole-struct store through a buffer reference, so store such structs field by field.
 - Goldens come from lavapipe: `VK_DRIVER_FILES=$PHOX_LAVAPIPE_ICD PHOX_UPDATE_GOLDEN=1

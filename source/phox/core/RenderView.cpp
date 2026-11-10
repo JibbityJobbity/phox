@@ -23,7 +23,7 @@ bool outsideFrustum(const mat4 &mvp, const Bounds &bounds) {
            allOutside([](const vec4 &c) { return c.z < 0.0f; }) || allOutside([](const vec4 &c) { return c.z > c.w; });
 }
 
-RenderView extractView(const Scene &scene, Extent2D extent, bool cull) {
+RenderView extractCamera(const Scene &scene, Extent2D extent) {
     RenderView view;
     view.extent = extent;
     const Camera &camera = scene.camera();
@@ -39,15 +39,18 @@ RenderView extractView(const Scene &scene, Extent2D extent, bool cull) {
     view.ambient = light.ambient;
     view.clearColor = scene.clearColor;
     view.toneMapping = scene.toneMapping;
+    return view;
+}
 
+RenderView extractView(const Scene &scene, Extent2D extent, bool cull) {
+    RenderView view = extractCamera(scene, extent);
+    const Camera &camera = scene.camera();
     const vec3 forward = camera.forward();
     const std::span<const Object> objects = scene.objects();
-    const std::span<const ObjectId> ids = scene.objectIds();
     if (!cull) {
         view.draws.reserve(objects.size());
     }
-    for (std::size_t i = 0; i < objects.size(); ++i) {
-        const Object &object = objects[i];
+    for (const Object &object : objects) {
         const Mesh *mesh = object.mesh().get();
         if (mesh == nullptr || mesh->empty()) {
             continue;
@@ -59,7 +62,7 @@ RenderView extractView(const Scene &scene, Extent2D extent, bool cull) {
         }
         const vec3 center = vec3(model * vec4(mesh->bounds().center(), 1.0f));
         const bool cullBackFaces = !object.material().doubleSided && glm::determinant(mat3(model)) > 0.0f;
-        const DrawItem item{object.id(), ids[i].index, mesh, &object.material(), model,
+        const DrawItem item{object.id(), mesh, &object.material(), model,
                             glm::dot(center - camera.position, forward), cullBackFaces};
         (object.material().alphaMode == AlphaMode::Blend ? view.transparent : view.draws).push_back(item);
     }

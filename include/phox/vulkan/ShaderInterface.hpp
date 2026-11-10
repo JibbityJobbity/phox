@@ -7,7 +7,7 @@
 
 /// The shader data blocks shared by every backend (phox/ShaderInterface.hpp), and those of the Vulkan
 /// backend's GPU-driven forward pass. In GLSL they are declared in shaders/common.glsl: FrameUniforms is
-/// set 0, binding 0 (SetLayout::Frame), and the frame's MaterialData array binding 1.
+/// set 0, binding 0 (SetLayout::Frame), and the scene's MaterialData array binding 1.
 namespace phox::vk {
 
 using phox::FrameUniforms;
@@ -21,7 +21,8 @@ inline constexpr std::uint32_t kNoMesh = 0xFFFFFFFFu;
 /// GpuInstance::flags: single-sided and not mirrored, drawn by the pipeline that culls back faces.
 inline constexpr std::uint32_t kInstanceCullBackFaces = 1u << 0;
 
-/// One scene object: an entry of the frame's instance array, indexed by the object's slot (GpuScene).
+/// One scene object: an entry of the instance array, indexed by the object's slot, which GpuScene keeps on
+/// the GPU across frames.
 struct GpuInstance {
     mat4 model{1.0f};
     /// Index into the frame's GpuMesh array. kNoMesh: an empty slot, or an object the CPU draws (blended).
@@ -55,7 +56,7 @@ struct GpuDraw {
     std::uint64_t vertices = 0;
     std::uint64_t primitives = 0;     ///< meshlet path: GpuMesh::meshlets; unused on the vertex path
     std::uint32_t count = 0;          ///< meshlets, or indices
-    std::uint32_t material = 0;       ///< index into the frame's MaterialData array (the object's slot)
+    std::uint32_t material = 0;       ///< index into the scene's MaterialData array (the object's slot)
     std::uint32_t visibilityOffset = 0;
     std::uint32_t flags = 0;          ///< kDrawConeCulling | kDrawEarly
 };
@@ -93,6 +94,33 @@ struct CullPushConstants {
     std::uint32_t padding = 0;
 };
 static_assert(sizeof(CullPushConstants) == 64, "must match CullPushConstants in shaders/common.glsl");
+
+/// A changed instance for the scene update pass (shaders/scene_update.comp) to write to its slot.
+struct InstanceUpdate {
+    GpuInstance instance;
+    std::uint32_t slot = 0;
+    std::uint32_t padding[3]{};
+};
+static_assert(sizeof(InstanceUpdate) == 96, "must match InstanceUpdate in shaders/common.glsl");
+
+/// A changed material for the scene update pass to write to its slot.
+struct MaterialUpdate {
+    MaterialData material;
+    std::uint32_t slot = 0;
+    std::uint32_t padding[3]{};
+};
+static_assert(sizeof(MaterialUpdate) == 96, "must match MaterialUpdate in shaders/common.glsl");
+
+/// Push constants of the scene update pass, compute stage.
+struct SceneUpdatePushConstants {
+    std::uint64_t instanceUpdates = 0; ///< InstanceUpdate[]
+    std::uint64_t materialUpdates = 0; ///< MaterialUpdate[]
+    std::uint64_t instances = 0;       ///< the scene's GpuInstance array
+    std::uint64_t materials = 0;       ///< the scene's MaterialData array
+    std::uint32_t instanceUpdateCount = 0;
+    std::uint32_t materialUpdateCount = 0;
+};
+static_assert(sizeof(SceneUpdatePushConstants) == 40, "must match SceneUpdatePushConstants in shaders/common.glsl");
 
 /// Push constants of the draw arguments pass (shaders/draw_args.comp), compute stage.
 struct ArgsPushConstants {

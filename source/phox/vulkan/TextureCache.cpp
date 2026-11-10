@@ -1,7 +1,7 @@
 #include "phox/vulkan/TextureCache.hpp"
 
 #include "phox/Log.hpp"
-#include "phox/RenderView.hpp"
+#include "phox/Texture.hpp"
 #include "phox/vulkan/Device.hpp"
 #include "phox/vulkan/FrameContext.hpp"
 #include "phox/vulkan/Image.hpp"
@@ -104,36 +104,33 @@ VkSampler TextureCache::sampler(const SamplerDesc &desc) {
     return sampler;
 }
 
-void TextureCache::prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber) {
-    std::vector<std::pair<const Texture *, Entry *>> uploads;
-    const auto use = [&](const DrawItem &draw) {
-        for (const Texture *texture : draw.material->textures()) {
-            if (texture == nullptr) {
-                continue;
-            }
-            const auto [it, inserted] = m_textures.try_emplace(texture->id());
-            it->second.lastUsed = frameNumber;
-            if (!inserted) {
-                continue;
-            }
-            if (m_freeSlots.empty() && m_nextSlot == m_capacity) {
-                m_textures.erase(it);
-                throw std::runtime_error("the texture table is full (" + std::to_string(m_capacity) + " textures)");
-            }
-            if (!m_freeSlots.empty()) {
-                it->second.slot = m_freeSlots.back();
-                m_freeSlots.pop_back();
-            } else {
-                it->second.slot = m_nextSlot++;
-            }
-            uploads.emplace_back(texture, &it->second);
-        }
-    };
-    for (const DrawItem &draw : view.draws) use(draw);
-    for (const DrawItem &draw : view.transparent) use(draw);
-    if (uploads.empty()) {
+std::uint32_t TextureCache::require(const Texture &texture, std::uint64_t frameNumber) {
+    const auto [it, inserted] = m_textures.try_emplace(texture.id());
+    it->second.lastUsed = frameNumber;
+    if (!inserted) {
+        return it->second.slot;
+    }
+    if (m_freeSlots.empty() && m_nextSlot == m_capacity) {
+        m_textures.erase(it);
+        throw std::runtime_error("the texture table is full (" + std::to_string(m_capacity) + " textures)");
+    }
+    if (!m_freeSlots.empty()) {
+        it->second.slot = m_freeSlots.back();
+        m_freeSlots.pop_back();
+    } else {
+        it->second.slot = m_nextSlot++;
+    }
+    m_pending.emplace_back(&texture, texture.id());
+    return it->second.slot;
+}
+
+void TextureCache::flush(FrameContext &frame, VkCommandBuffer cmd) {
+    if (m_pending.empty()) {
         return;
     }
+    std::vector<std::pair<const Texture *, Entry *>> uploads;
+    for (const auto &[texture, id] : m_pending) uploads.emplace_back(texture, &m_textures.at(id));
+    m_pending.clear();
 
     std::vector<VkImageMemoryBarrier2> toTransfer;
     for (auto &[texture, entry] : uploads) {
@@ -197,7 +194,7 @@ void TextureCache::prepare(const RenderView &view, FrameContext &frame, VkComman
 std::uint32_t TextureCache::slot(const Texture &texture) const {
     const auto it = m_textures.find(texture.id());
     if (it == m_textures.end() || !it->second.image) {
-        throw std::logic_error("texture " + std::to_string(texture.id()) + " was not uploaded by TextureCache::prepare");
+        throw std::logic_error("texture " + std::to_string(texture.id()) + " was not uploaded by TextureCache::flush");
     }
     return it->second.slot;
 }

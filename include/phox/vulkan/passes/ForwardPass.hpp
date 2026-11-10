@@ -42,6 +42,7 @@ PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cul
                                         MeshletPhase phase = MeshletPhase::Single, bool blend = false);
 PipelineDesc cullPipelineDesc(CullVariant variant);
 PipelineDesc drawArgsPipelineDesc();
+PipelineDesc sceneUpdatePipelineDesc();
 
 /// The descriptor sets every forward pipeline binds first.
 struct ForwardSets {
@@ -57,6 +58,14 @@ struct MeshletSettings {
     float lodErrorPixels = 1.0f;
 };
 
+/// GpuScene's instance and material buffers, imported into the graph with their device addresses bound
+/// (initial usage Undefined when GpuScene::Frame::clearInstances, else StorageRead). The material
+/// buffer is also set 0's material table (ForwardSets::frame).
+struct SceneBuffers {
+    BufferHandle instances;
+    BufferHandle materials;
+};
+
 /// Two-phase occlusion culling (the meshlet path only): GpuScene's state buffers, imported into the
 /// graph with their device addresses bound (initial usage Undefined when GpuScene::Frame::clearState).
 struct OcclusionState {
@@ -67,6 +76,8 @@ struct OcclusionState {
 /// The GPU-driven forward pass. Clears @p color to the view's background and @p depth to the far plane,
 /// then draws @p scene, every object of the view, with no draw recorded per object:
 ///
+/// - "clear instances" (when new) and "scene update": write what changed since the last frame into
+///   @p buffers;
 /// - "cull": a compute pass over every instance slot tests the frustum and appends what survives to a
 ///   draw list, with work per bucket (pipeline);
 /// - "draw args" (meshlet path): turns the counts into indirect task shader dispatch arguments;
@@ -81,7 +92,8 @@ struct OcclusionState {
 ///
 /// Then "forward blend" draws the scene's blended objects over the result, in the order GpuScene wrote them.
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
-                                 const GpuScene::Frame &scene, ImageHandle color, ImageHandle depth, bool meshlets,
+                                 const GpuScene::Frame &scene, SceneBuffers buffers, ImageHandle color,
+                                 ImageHandle depth, bool meshlets,
                                  PipelineCache &pipelines, const MeshletSettings &settings = {},
                                  const OcclusionState *occlusion = nullptr);
 

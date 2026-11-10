@@ -100,20 +100,66 @@ void addClearPass(RenderGraph &graph, const std::vector<DrawList *> &lists, Occl
         });
 }
 
+// Writes what changed in the scene into @p buffers: first filling a new instance buffer with kNoMesh, so
+// slots never written are skipped, then scattering the frame's updates.
+void addSceneUpdatePasses(RenderGraph &graph, const GpuScene::Frame &scene, SceneBuffers &buffers,
+                          PipelineCache &pipelines) {
+    if (scene.clearInstances) {
+        buffers.instances = graph.addPass<BufferHandle>(
+            "clear instances", PassType::Transfer,
+            [&](PassBuilder &builder, BufferHandle &out) {
+                out = builder.write(buffers.instances, BufferUsage::TransferDst);
+            },
+            [](const BufferHandle &instances, phox::PassContext &context) {
+                auto &ctx = PassContext::from(context);
+                ctx.device().table().vkCmdFillBuffer(ctx.cmd(), ctx.buffer(instances), 0, VK_WHOLE_SIZE, 0xFFFFFFFFu);
+            });
+    }
+    if (scene.instanceUpdateCount == 0 && scene.materialUpdateCount == 0) {
+        return;
+    }
+    const Pipeline &pipeline = pipelines.get(sceneUpdatePipelineDesc());
+    const SceneBuffers &out = graph.addPass<SceneBuffers>(
+        "scene update", PassType::Compute,
+        [&](PassBuilder &builder, SceneBuffers &data) {
+            data.instances = builder.write(buffers.instances, BufferUsage::StorageWrite);
+            data.materials = builder.write(buffers.materials, BufferUsage::StorageWrite);
+        },
+        [&scene, &pipeline](const SceneBuffers &data, phox::PassContext &context) {
+            auto &ctx = PassContext::from(context);
+            const auto &table = ctx.device().table();
+            table.vkCmdBindPipeline(ctx.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle());
+            SceneUpdatePushConstants constants;
+            constants.instanceUpdates = scene.instanceUpdates;
+            constants.materialUpdates = scene.materialUpdates;
+            constants.instances = ctx.bufferAddress(data.instances);
+            constants.materials = ctx.bufferAddress(data.materials);
+            constants.instanceUpdateCount = scene.instanceUpdateCount;
+            constants.materialUpdateCount = scene.materialUpdateCount;
+            table.vkCmdPushConstants(ctx.cmd(), pipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
+                                     &constants);
+            const std::uint32_t count = std::max(scene.instanceUpdateCount, scene.materialUpdateCount);
+            table.vkCmdDispatch(ctx.cmd(), (count + 63) / 64, 1, 1);
+        });
+    buffers = out;
+}
+
 // The instance cull pass: appends what @p variant keeps to @p list.
 void addCullPass(RenderGraph &graph, const std::string &name, CullVariant variant, const GpuScene::Frame &scene,
-                 const ForwardSets &sets, bool frustumCulling, DrawList &list, BufferHandle *history,
-                 ImageHandle pyramid, PipelineCache &pipelines) {
+                 BufferHandle instances, const ForwardSets &sets, bool frustumCulling, DrawList &list,
+                 BufferHandle *history, ImageHandle pyramid, PipelineCache &pipelines) {
     const Pipeline &pipeline = pipelines.get(cullPipelineDesc(variant));
     const bool usesHistory = variant == CullVariant::Early || variant == CullVariant::Late;
     struct Data {
         DrawList list;
+        BufferHandle instances;
         BufferHandle history;
         ImageHandle pyramid;
     };
     const Data &data = graph.addPass<Data>(
         name, PassType::Compute,
         [&](PassBuilder &builder, Data &out) {
+            out.instances = builder.read(instances, BufferUsage::StorageRead);
             out.list.draws = builder.write(list.draws, BufferUsage::StorageWrite);
             out.list.work = builder.write(list.work, BufferUsage::StorageWrite);
             out.list.counters = builder.write(list.counters, BufferUsage::StorageWrite);
@@ -136,7 +182,7 @@ void addCullPass(RenderGraph &graph, const std::string &name, CullVariant varian
                 bindSets(ctx, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout(), {frameSet});
             }
             CullPushConstants constants;
-            constants.instances = scene.instances;
+            constants.instances = ctx.bufferAddress(in.instances);
             constants.meshes = scene.meshes;
             constants.draws = ctx.bufferAddress(in.list.draws);
             constants.work = ctx.bufferAddress(in.list.work);
@@ -297,8 +343,17 @@ PipelineDesc drawArgsPipelineDesc() {
     return desc;
 }
 
+PipelineDesc sceneUpdatePipelineDesc() {
+    PipelineDesc desc;
+    desc.name = "scene update";
+    desc.computeShader = "scene_update.comp";
+    desc.pushConstants = {{kComputeStage, 0, sizeof(SceneUpdatePushConstants)}};
+    return desc;
+}
+
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
-                                 const GpuScene::Frame &scene, ImageHandle color, ImageHandle depth, bool meshlets,
+                                 const GpuScene::Frame &scene, SceneBuffers buffers, ImageHandle color,
+                                 ImageHandle depth, bool meshlets,
                                  PipelineCache &pipelines, const MeshletSettings &settings,
                                  const OcclusionState *occlusion) {
     const Format colorFormat = graph.imageInfo(color).desc.format;
@@ -331,6 +386,7 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
                 data.out.depth = builder.depthAttachment(depthIn, first ? LoadOp::Clear : LoadOp::Load,
                                                          keepDepth ? StoreOp::Store : StoreOp::DontCare, 1.0f);
                 data.list.counters = builder.read(list.counters, BufferUsage::Indirect);
+                builder.read(buffers.materials, BufferUsage::StorageRead); // set 0's material table
                 data.list.draws = builder.read(list.draws, BufferUsage::StorageRead);
                 // Work items are read by the task shader; draw commands by the draw itself.
                 data.list.work = builder.read(list.work, meshlets ? BufferUsage::StorageRead : BufferUsage::Indirect);
@@ -362,6 +418,7 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
             });
     };
 
+    addSceneUpdatePasses(graph, scene, buffers, pipelines);
     ForwardPassOutput result;
     if (meshlets && occlusion != nullptr) {
         // ---- Two-phase occlusion culling ------------------------------------------------------------
@@ -369,8 +426,8 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
         DrawList early = createDrawList(graph, "early", scene, true);
         DrawList late = createDrawList(graph, "late", scene, true);
         addClearPass(graph, {&early, &late}, scene.clearState ? &state : nullptr);
-        addCullPass(graph, "cull early", CullVariant::Early, scene, sets, settings.culling, early, &state.history, {},
-                    pipelines);
+        addCullPass(graph, "cull early", CullVariant::Early, scene, buffers.instances, sets, settings.culling, early,
+                    &state.history, {}, pipelines);
         addDrawArgsPass(graph, "draw args early", early, pipelines);
         const ForwardData &first =
             addDrawPass("forward early", early, meshletPipelinePair(pipelines, colorFormat, depthFormat, MeshletPhase::Early),
@@ -378,8 +435,8 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
         const ForwardPassOutput earlyOut = first.out;
         const BufferHandle visibility = first.visibility;
         const ImageHandle pyramid = addDepthPyramidPass(graph, earlyOut.depth, pipelines);
-        addCullPass(graph, "cull late", CullVariant::Late, scene, sets, settings.culling, late, &state.history, pyramid,
-                    pipelines);
+        addCullPass(graph, "cull late", CullVariant::Late, scene, buffers.instances, sets, settings.culling, late,
+                    &state.history, pyramid, pipelines);
         addDrawArgsPass(graph, "draw args late", late, pipelines);
         result = addDrawPass("forward late", late, meshletPipelinePair(pipelines, colorFormat, depthFormat, MeshletPhase::Late),
                              false, earlyOut.color, earlyOut.depth, MeshletPhase::Late, visibility, pyramid, blended)
@@ -387,8 +444,8 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
     } else {
         DrawList list = createDrawList(graph, "frame", scene, meshlets);
         addClearPass(graph, {&list}, nullptr, !meshlets && !scene.drawCount);
-        addCullPass(graph, "cull", meshlets ? CullVariant::Meshlets : CullVariant::Vertex, scene, sets, settings.culling,
-                    list, nullptr, {}, pipelines);
+        addCullPass(graph, "cull", meshlets ? CullVariant::Meshlets : CullVariant::Vertex, scene, buffers.instances,
+                    sets, settings.culling, list, nullptr, {}, pipelines);
         if (meshlets) {
             addDrawArgsPass(graph, "draw args", list, pipelines);
         }
@@ -409,6 +466,7 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
         [&](PassBuilder &builder, ForwardPassOutput &out) {
             out.color = builder.colorAttachment(opaque.color, LoadOp::Load, StoreOp::Store);
             builder.depthReadOnly(opaque.depth);
+            builder.read(buffers.materials, BufferUsage::StorageRead); // set 0's material table
             out.depth = opaque.depth;
         },
         [&scene, pipeline, meshlets, meshletBase, frameSet, textureSet](const ForwardPassOutput &,

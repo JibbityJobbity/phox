@@ -14,9 +14,6 @@ namespace phox {
 /// One mesh to draw with one material and transform.
 struct DrawItem {
     std::uint64_t objectId = 0; ///< Object::id() of the object drawn
-    /// ObjectId::index of the object in its scene: dense and stable while the object exists, so renderers
-    /// can keep per-object state in arrays (another object may have it later; objectId tells them apart).
-    std::uint32_t sceneIndex = 0;
     const Mesh *mesh = nullptr;
     const Material *material = nullptr;
     mat4 model{1.0f};
@@ -52,9 +49,13 @@ struct RenderView {
 
 /// Builds the view for @p scene rendered at @p extent: camera matrices, the light, and the objects inside
 /// the view frustum sorted front to back. Objects without a mesh, or with an empty one, are skipped.
-/// With @p cull false, every object is listed and draws keep scene order (renderers that cull on the GPU
-/// want them all); transparent items are still sorted back to front, as blending needs.
+/// With @p cull false, every object is listed and draws keep scene order; transparent items are still
+/// sorted back to front, as blending needs.
 RenderView extractView(const Scene &scene, Extent2D extent, bool cull = true);
+
+/// The view without its items: camera matrices and frustum planes, the light, clear colour and tone
+/// mapping. For renderers that keep the scene's objects themselves (the Vulkan renderer's GpuScene).
+RenderView extractCamera(const Scene &scene, Extent2D extent);
 
 /// Whether a box, transformed by @p mvp into clip space, lies entirely outside one of the frustum planes.
 bool outsideFrustum(const mat4 &mvp, const Bounds &bounds);

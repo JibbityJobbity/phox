@@ -23,10 +23,11 @@ image, and falls back to a software rasterizer when there is no usable GPU.
   the same images come from the vertex pipeline. See [architecture sections 6.1 and
   6.2](docs/architecture.md#61-mesh-shading). Pipelines come from a cache keyed by a backend-free `PipelineDesc`, and use
   dynamic rendering.
-- **GPU-driven rendering**: the CPU writes the scene's instances, meshes and materials to the GPU unculled,
-  and compute passes cull objects against the frustum and the depth pyramid, then build the draw lists
-  that a handful of indirect draws consume. On a 32,768-object scene that cuts CPU time per frame from
-  12.5 ms to 2.4 ms and GPU time from 5.1 ms to 0.8 ms. See [architecture section
+- **GPU-driven rendering**: the scene's objects and materials stay on the GPU, and the CPU uploads only
+  what changed, found through the scene's change log. Compute passes cull objects against the frustum and
+  the depth pyramid, then build the draw lists that a handful of indirect draws consume. On a 32,768-object
+  scene that cuts CPU time per frame from 12.5 ms to 0.16 ms still (1.6 ms with every object moving) and
+  GPU time from 5.1 ms to 0.8 ms. See [architecture section
   6.5](docs/architecture.md#65-gpu-driven-rendering).
 - **Cluster LOD** (as in Nanite): each mesh is built into a hierarchy of meshlets at successive levels of
   detail, simplified group by group with shared borders locked, and the task shader picks per part of the

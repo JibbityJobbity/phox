@@ -10,10 +10,6 @@
 #include <utility>
 #include <vector>
 
-namespace phox {
-struct RenderView;
-}
-
 namespace phox::vk {
 
 class Device;
@@ -35,12 +31,14 @@ public:
     TextureCache(const TextureCache &) = delete;
     TextureCache &operator=(const TextureCache &) = delete;
 
-    /// Uploads every texture the materials of @p view's draws use that is not resident yet, recording the
-    /// copies into @p cmd (staged in the frame's upload arena), and writes their slots. Afterwards the
-    /// images are ready for fragment shaders.
+    /// Marks @p texture as used this frame (so it is not evicted) and returns its slot. A texture that is
+    /// not resident gets a slot now and is uploaded by flush(); @p texture must live until then.
     /// @throws std::runtime_error if the table is full
-    void prepare(const RenderView &view, FrameContext &frame, VkCommandBuffer cmd, std::uint64_t frameNumber);
-    /// The slot of @p texture, which prepare() has made resident.
+    std::uint32_t require(const Texture &texture, std::uint64_t frameNumber);
+    /// Uploads what require() queued, recording the copies into @p cmd (staged in the frame's upload
+    /// arena), and writes their slots. Afterwards the images are ready for fragment shaders.
+    void flush(FrameContext &frame, VkCommandBuffer cmd);
+    /// The slot of @p texture, which require() has made resident.
     /// @throws std::logic_error if it is not
     std::uint32_t slot(const Texture &texture) const;
     /// The texture table, for binding as set SetLayout::Bindless.
@@ -67,6 +65,7 @@ private:
     std::vector<std::uint32_t> m_freeSlots;
     std::unordered_map<std::uint64_t, Entry> m_textures;
     std::vector<std::pair<SamplerDesc, VkSampler>> m_samplers;
+    std::vector<std::pair<const Texture *, std::uint64_t>> m_pending; ///< (texture, its id) for flush()
 };
 
 } // namespace phox::vk
