@@ -71,20 +71,20 @@ constexpr double kTexturedFractionOverTolerance = 0.02;
 
 struct GoldenCase {
     std::string name;
-    std::string scene;
+    phox::SampleSceneId scene;
     float time; ///< animation time the scene is posed at
     phox::ToneMapping toneMapping{};
     double allowedFraction = kMaxFractionOverTolerance; ///< of the pixels, may be over kChannelTolerance
 };
 
 const std::vector<GoldenCase> kCases = {
-    {"triangle", "triangle", 0.0f},
-    {"triangle_turned", "triangle", 2.0f}, // past 90 degrees: the back face, lit from behind
-    {"cubes", "cubes", 0.7f},
-    {"cubes_aces", "cubes", 0.7f, {phox::ToneMapOperator::Aces, 1.6f}},
-    {"tori", "tori", 0.8f}, // meshlets cut by the frustum and facing away
+    {"triangle", phox::SampleSceneId::Triangle, 0.0f},
+    {"triangle_turned", phox::SampleSceneId::Triangle, 2.0f}, // past 90 degrees: the back face, lit from behind
+    {"cubes", phox::SampleSceneId::Cubes, 0.7f},
+    {"cubes_aces", phox::SampleSceneId::Cubes, 0.7f, {phox::ToneMapOperator::Aces, 1.6f}},
+    {"tori", phox::SampleSceneId::Tori, 0.8f}, // meshlets cut by the frustum and facing away
     // metal/roughness, textures, normal map, alpha mask and blend, emission
-    {"materials", "materials", 0.7f, {}, kTexturedFractionOverTolerance},
+    {"materials", phox::SampleSceneId::Materials, 0.7f, {}, kTexturedFractionOverTolerance},
 };
 
 const std::filesystem::path kGoldenDir = PHOX_GOLDEN_DIR;

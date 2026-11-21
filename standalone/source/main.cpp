@@ -15,6 +15,8 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,6 +30,15 @@ ToneMapOperator parseToneMap(const std::string &name) {
   if (name == "reinhard") return ToneMapOperator::Reinhard;
   if (name == "aces") return ToneMapOperator::Aces;
   throw std::invalid_argument("--tonemap expects clamp, reinhard or aces");
+}
+
+// "triangle, cubes, ...": every sample scene, for messages.
+std::string sampleSceneList() {
+  std::string list;
+  for (SampleSceneId id : kSampleScenes) {
+    list += (list.empty() ? "" : ", ") + std::string(sampleSceneName(id));
+  }
+  return list;
 }
 
 RendererType parseBackend(const std::string &name) {
@@ -86,7 +97,7 @@ int main(int argc, char **argv) {
   cxxopts::Options options("PhoxSample", "Renders a Phox sample scene, headless or in a window.");
   // clang-format off
   options.add_options()
-    ("scene", "sample scene: triangle, cubes, tori, materials or field", cxxopts::value<std::string>()->default_value("triangle"))
+    ("scene", "sample scene: " + sampleSceneList(), cxxopts::value<std::string>()->default_value("triangle"))
     ("mesh", "show a model file on a turntable instead of a sample scene: glTF 2.0 (.gltf, .glb) with its "
              "materials, or OBJ", cxxopts::value<std::string>())
     ("window", "present to a window until it is closed")
@@ -129,7 +140,12 @@ int main(int argc, char **argv) {
         sample = makeMeshViewerScene(std::make_shared<Mesh>(loadMesh(path)), path.stem().string());
       }
     } else {
-      sample = makeSampleScene(args["scene"].as<std::string>());
+      const std::string name = args["scene"].as<std::string>();
+      const std::optional<SampleSceneId> id = parseSampleScene(name);
+      if (!id) {
+        throw std::invalid_argument("unknown sample scene '" + name + "' (try: " + sampleSceneList() + ")");
+      }
+      sample = makeSampleScene(*id);
     }
 
     sample.scene.toneMapping.op = parseToneMap(args["tonemap"].as<std::string>());

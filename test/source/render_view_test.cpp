@@ -94,11 +94,9 @@ void meshesValidateAndVersion() {
 
 void objectIdsSurviveRemoval() {
     Scene scene;
-    const ObjectId a = scene.addObject("a", nullptr, Material{.name = "a"});
-    const ObjectId b = scene.addObject("b", nullptr, Material{.name = "b"});
-    const ObjectId c = scene.addObject("c", nullptr, Material{.name = "c"});
+    const auto [a, b, c] = scene.addObjects({{.name = "a"}, {.name = "b"}, {.name = "c"}});
     CHECK(a.valid() && !(a == b) && !ObjectId{}.valid() && !scene.contains(ObjectId{}));
-    CHECK(scene.find("b") == b && !scene.find("z").valid());
+    CHECK(scene.objectIds()[0] == a && scene.objectIds()[1] == b && scene.objectIds()[2] == c);
 
     // Removing from the middle moves another object into the hole; every other id still finds its object.
     CHECK(scene.removeObject(a));
@@ -111,7 +109,7 @@ void objectIdsSurviveRemoval() {
     }
 
     // The freed slot is reused with a new generation, so the stale id stays stale.
-    const ObjectId d = scene.addObject("d", nullptr, Material{.name = "d"});
+    const ObjectId d = scene.addObject({.name = "d"});
     CHECK(d.index == a.index && d.generation != a.generation);
     CHECK(!scene.contains(a) && scene.at(d).name() == "d");
     bool threw = false;
@@ -134,10 +132,12 @@ Scene twoCubeScene() {
     // A red cube 2 units away and a green one 6 units away, both straight ahead, plus one behind the camera.
     Scene scene;
     auto cube = std::make_shared<Mesh>(Mesh::cube(1.0f));
-    scene.addObject("far", cube, Material{.name = "green", .albedo = {0.0f, 1.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -6.0f}});
-    scene.addObject("near", cube, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}}, Transform{{0.0f, 0.0f, -2.0f}});
-    scene.addObject("behind", cube, Material{.name = "blue", .albedo = {0.0f, 0.0f, 1.0f, 1.0f}}, Transform{{0.0f, 0.0f, 5.0f}});
-    scene.addObject("no mesh", nullptr, Material{});
+    scene.addObjects({
+        {.mesh = cube, .material = {.albedo = {0.0f, 1.0f, 0.0f, 1.0f}}, .transform = {.position = {0.0f, 0.0f, -6.0f}}}, // far
+        {.mesh = cube, .material = {.albedo = {1.0f, 0.0f, 0.0f, 1.0f}}, .transform = {.position = {0.0f, 0.0f, -2.0f}}}, // near
+        {.mesh = cube, .material = {.albedo = {0.0f, 0.0f, 1.0f, 1.0f}}, .transform = {.position = {0.0f, 0.0f, 5.0f}}}, // behind
+        {}, // no mesh
+    });
     scene.camera().position = {0.0f, 0.0f, 0.0f};
     scene.light().direction = {0.0f, 0.0f, -1.0f}; // shining straight at the cubes' front faces
     scene.light().ambient = 0.0f;
@@ -149,8 +149,8 @@ void extractionCullsAndSorts() {
     const RenderView view = extractView(scene, {200, 100});
     CHECK(view.draws.size() == 2);
     CHECK(view.culled == 1);
-    CHECK(view.draws[0].material->name == "red"); // nearest first
-    CHECK(view.draws[1].material->name == "green");
+    CHECK(view.draws[0].material->albedo.r == 1.0f); // nearest first
+    CHECK(view.draws[1].material->albedo.g == 1.0f);
     CHECK(near(view.draws[0].viewDepth, 2.0f) && near(view.draws[1].viewDepth, 6.0f));
     CHECK(near(view.lightDirection, vec3(0.0f, 0.0f, 1.0f)));
     // The aspect ratio comes from the extent.
@@ -351,8 +351,7 @@ void depthPyramidIsPowersOfTwo() {
 
 void objectsHaveTheirOwnIds() {
     Scene scene;
-    const ObjectId idA = scene.addObject("a", nullptr, Material{});
-    const ObjectId idB = scene.addObject("b", nullptr, Material{});
+    const auto [idA, idB] = scene.addObjects({{.name = "a"}, {.name = "b"}});
     Object &a = scene.at(idA);
     Object &b = scene.at(idB);
     CHECK(a.id() != 0 && a.id() != b.id());
@@ -364,11 +363,10 @@ void objectsHaveTheirOwnIds() {
 
     // The scene moves objects around (growing, filling a removed one's slot); they keep their ids.
     Scene grown;
-    const ObjectId first = grown.addObject("first", nullptr, Material{});
-    const ObjectId last = grown.addObject("last", nullptr, Material{});
+    const auto [first, last] = grown.addObjects({{}, {}});
     const std::uint64_t lastId = grown.at(last).id();
     for (int i = 0; i < 100; ++i) {
-        grown.addObject("filler", nullptr, Material{});
+        grown.addObject({});
     }
     CHECK(grown.at(last).id() == lastId);
     const ObjectId end = grown.objectIds().back();
@@ -381,7 +379,7 @@ void singleSidedMaterialsCullBackFaces() {
     // The triangle faces +Z; the camera looks at its back from -Z.
     Scene scene;
     auto triangle = std::make_shared<Mesh>(Mesh::triangle(1.0f));
-    Object &object = scene.at(scene.addObject("triangle", triangle, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}}));
+    Object &object = scene.at(scene.addObject({.mesh = triangle, .material = {.albedo = {1.0f, 0.0f, 0.0f, 1.0f}}}));
     scene.camera().position = {0.0f, 0.0f, -3.0f};
     scene.camera().lookAt({0.0f, 0.0f, 0.0f});
     const auto centre = [&] { return rasterize(extractView(scene, {64, 64})).pixel(32, 32); };
@@ -536,11 +534,15 @@ void materialsPackForShaders() {
 void blendedItemsAreDrawnLastAndFarthestFirst() {
     Scene scene;
     auto cube = std::make_shared<Mesh>(Mesh::cube(1.0f));
-    const Material glass{.name = "glass", .albedo = {0.0f, 0.0f, 1.0f, 0.5f}, .alphaMode = AlphaMode::Blend};
-    scene.addObject("near glass", cube, glass, Transform{{0.0f, 0.0f, -2.0f}});
-    scene.addObject("far glass", cube, glass, Transform{{0.0f, 0.0f, -5.0f}});
-    scene.addObject("wall", cube, Material{.name = "red", .albedo = {1.0f, 0.0f, 0.0f, 1.0f}},
-                    Transform{{0.0f, 0.0f, -8.0f}, quat(1, 0, 0, 0), vec3(4.0f, 4.0f, 0.1f)});
+    const Material glass{.albedo = {0.0f, 0.0f, 1.0f, 0.5f}, .alphaMode = AlphaMode::Blend};
+    scene.addObjects({
+        {.mesh = cube, .material = glass, .transform = {.position = {0.0f, 0.0f, -2.0f}}},
+        {.mesh = cube, .material = glass, .transform = {.position = {0.0f, 0.0f, -5.0f}}},
+        // a red wall
+        {.mesh = cube,
+         .material = {.albedo = {1.0f, 0.0f, 0.0f, 1.0f}},
+         .transform = {.position = {0.0f, 0.0f, -8.0f}, .scale = {4.0f, 4.0f, 0.1f}}},
+    });
     scene.camera().position = {0.0f, 0.0f, 0.0f};
     scene.camera().lookAt({0.0f, 0.0f, -1.0f});
     const RenderView view = extractView(scene, {64, 64});
@@ -559,11 +561,16 @@ void maskedTexelsAreCut() {
                                           SamplerDesc{.magFilter = TextureFilter::Nearest}, false);
     auto quad = std::make_shared<Mesh>(Mesh::plane(2.0f));
     const quat upright = glm::angleAxis(glm::half_pi<float>(), vec3(1, 0, 0));
-    scene.addObject("cutout", quad,
-                    Material{.name = "cutout", .albedo = vec4(1.0f), .alphaMode = AlphaMode::Mask, .baseColorTexture = mask},
-                    Transform{{0.0f, 0.0f, -2.0f}, upright});
-    scene.addObject("wall", std::make_shared<Mesh>(Mesh::cube(1.0f)), Material{.name = "red", .albedo = {1, 0, 0, 1}},
-                    Transform{{0.0f, 0.0f, -6.0f}, quat(1, 0, 0, 0), vec3(8.0f, 8.0f, 0.1f)});
+    scene.addObjects({
+        // the cutout
+        {.mesh = quad,
+         .material = {.albedo = vec4(1.0f), .alphaMode = AlphaMode::Mask, .baseColorTexture = mask},
+         .transform = {.position = {0.0f, 0.0f, -2.0f}, .rotation = upright}},
+        // the wall
+        {.mesh = std::make_shared<Mesh>(Mesh::cube(1.0f)),
+         .material = {.albedo = {1, 0, 0, 1}},
+         .transform = {.position = {0.0f, 0.0f, -6.0f}, .scale = {8.0f, 8.0f, 0.1f}}},
+    });
     scene.camera().position = {0.0f, 0.0f, 0.0f};
     scene.camera().lookAt({0.0f, 0.0f, -1.0f});
     const CpuImage image = rasterize(extractView(scene, {64, 64}));

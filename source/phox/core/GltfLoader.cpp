@@ -190,7 +190,8 @@ private:
                     m_result.bounds.max = glm::max(m_result.bounds.max, w);
                 }
                 m_result.objects.push_back(
-                    m_scene.addObject(std::move(name), std::move(mesh), materialFor(primitive.material), Transform::fromMatrix(world)));
+                    m_scene.addObject({.mesh = std::move(mesh), .material = materialFor(primitive.material),
+                                       .transform = Transform::fromMatrix(world), .name = std::move(name)}));
             }
         }
         for (cgltf_size i = 0; i < node.children_count; ++i) addNode(*node.children[i], world);

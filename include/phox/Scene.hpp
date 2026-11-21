@@ -11,7 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace phox {
@@ -97,7 +97,7 @@ enum class AlphaMode : std::uint8_t {
 /// A metallic-roughness material, as in glTF 2.0. Each texture is optional; where present it is
 /// multiplied by its factor. Colours are linear (see phox/Color.hpp).
 struct Material {
-    std::string name;
+    std::string name{}; ///< optional, for debuggers and tools
     vec4 albedo{1.0f, 0.2f, 0.4f, 1.0f}; ///< base colour factor; rgb linear, a: opacity
     float metallic = 0.0f;               ///< 0: dielectric, 1: metal
     float roughness = 0.5f;              ///< perceptual roughness: 0 mirror-like, 1 fully rough
@@ -153,6 +153,17 @@ struct Transform {
     static Transform fromMatrix(const mat4 &m);
 };
 
+/// Describes an object, for Scene::addObject() and addObjects(). Name the fields that matter and leave
+/// the rest: `scene.addObject({.mesh = cube, .material = {.albedo = red}, .transform = {.position = p}})`.
+struct ObjectDesc {
+    std::shared_ptr<const Mesh> mesh{}; ///< null: the object draws nothing
+    Material material{};
+    Transform transform{};
+    /// Optional, for debuggers, logs and tools (loadGltf() fills it in from the file). Nothing looks an
+    /// object up by it: an object's identity is the ObjectId its scene hands out.
+    std::string name{};
+};
+
 /// A mesh placed in a scene with a material. Each object has an id that is never reused, so renderers
 /// can keep per-object state across frames (e.g. which meshlets were visible). Copies get a new id.
 ///
@@ -164,7 +175,7 @@ struct Transform {
 /// old reference is not seen. Mesh geometry is versioned by the Mesh itself.
 class Object {
 public:
-    Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
+    explicit Object(ObjectDesc desc);
     /// A copy is a different object: it gets its own id. A move keeps the id, so the Scene can move its
     /// objects around (growing, or filling the hole of a removed one) without renderers losing track.
     Object(const Object &other);
@@ -173,6 +184,7 @@ public:
     Object &operator=(Object &&) noexcept = default;
 
     std::uint64_t id() const { return m_id; }
+    /// A label for debuggers and tools; may be empty, and need not be unique (see ObjectDesc::name).
     const std::string &name() const { return m_name; }
     const std::shared_ptr<const Mesh> &mesh() const { return m_mesh; }
     void setMesh(std::shared_ptr<const Mesh> mesh) {
@@ -259,7 +271,7 @@ struct ObjectId {
 /// render() call.
 ///
 /// Objects are stored contiguously. Keep ObjectIds, not Object pointers or references: those are only
-/// valid until the next addObject() or removeObject().
+/// valid until the next addObject(), addObjects() or removeObject().
 class Scene {
 public:
     /// Where a reader of changes() has got to.
@@ -276,7 +288,21 @@ public:
     Scene &operator=(Scene &&) noexcept = default;
     ~Scene();
 
-    ObjectId addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform = {});
+    /// Adds the object @p desc describes and returns the id that names it from then on.
+    ObjectId addObject(ObjectDesc desc);
+    /// Adds several objects, in order, and returns their ids in the same order, to be taken apart by a
+    /// structured binding:
+    ///   const auto [floor, crate] = scene.addObjects({
+    ///       {.mesh = plane, .material = {.albedo = grey}},
+    ///       {.mesh = cube, .transform = {.position = {0.0f, 0.5f, 0.0f}}},
+    ///   });
+    template <std::size_t N> std::array<ObjectId, N> addObjects(ObjectDesc (&&descs)[N]) {
+        std::array<ObjectId, N> ids;
+        for (std::size_t i = 0; i < N; ++i) {
+            ids[i] = addObject(std::move(descs[i]));
+        }
+        return ids;
+    }
     /// Removes the object; the order of the remaining objects may change. Returns false if @p id is stale.
     bool removeObject(ObjectId id);
     bool contains(ObjectId id) const;
@@ -287,10 +313,6 @@ public:
     /// The object. @throws std::out_of_range if @p id is stale
     Object &at(ObjectId id);
     const Object &at(ObjectId id) const;
-
-    /// The first object called @p name, or an invalid id. A linear search, for tools and tests; keep the
-    /// id that addObject() returns instead.
-    ObjectId find(std::string_view name) const;
 
     /// The object whose ObjectId::index is @p index, or nullptr if there is none.
     const Object *objectAt(std::uint32_t index) const;

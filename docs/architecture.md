@@ -214,13 +214,16 @@ pipeline needs the shader library and set layouts, which belong with the cache.
   version for caching. Zero tangents are generated from the texture coordinates (`generateTangents`).
   Built-ins: `triangle`, `cube`, `plane`, `torus`, `sphere`; `loadMesh()` reads OBJ through assimp, and
   `loadGltf()` whole glTF scenes (6.3).
-- `Object`: name, `shared_ptr<const Mesh>`, `Material` (6.3), `Transform` (scale, rotate, translate).
+- `Object`: `shared_ptr<const Mesh>`, `Material` (6.3), `Transform` (scale, rotate, translate) and an
+  optional name for debugging, described by an `ObjectDesc` whose fields are named at the call:
+  `scene.addObject({.mesh = cube, .material = {.albedo = red}})`.
   Materials are double-sided by default; single-sided ones have their back faces culled. Each
   object also has a never-reused `id()` that tells apart the objects a slot of per-object state has held
   (6.5); copies get a new one, moves keep it. Its non-const accessors bump a transform or material revision
   and log the object in its scene's change log (6.5).
 - `Scene`: objects, named by `ObjectId {index, generation}` handles that go stale on removal (a slot table over
-  a dense object array, so view extraction iterates contiguously; names are only for `find` and debugging),
+  a dense object array, so view extraction iterates contiguously). `addObject(desc)` returns the id;
+  `addObjects({desc, ...})` returns an array of them for a structured binding. Nothing is looked up by name.
   `Camera` (position, orientation, field of view, near and far; `lookAt`), `DirectionalLight`,
   clear colour and `ToneMapping` (exposure, then clamp, Reinhard or ACES). `changes(cursor)` reads its change
   log (6.5); the log is on the heap, so moving a scene keeps it, and a copy gets a log of its own.
@@ -231,7 +234,8 @@ pipeline needs the shader library and set layouts, which belong with the cache.
   (`DrawItem::cullBackFaces`). With `cull` false every object is listed and `draws` keep scene order.
   `extractCamera(scene, extent)` fills in only the camera, light and settings, for renderers that keep the
   objects themselves (the Vulkan renderer, 6.5).
-- `SampleScenes` gives the app and the tests the same scenes with deterministic `animate(scene, t)`.
+- `SampleScenes` gives the app and the tests the same scenes (`makeSampleScene(SampleSceneId)`) with
+  deterministic `animate(scene, t)`; `parseSampleScene` turns a name typed on a command line into the id.
 
 Feature passes are free functions in `phox::vk` that add themselves to a frame's graph:
 

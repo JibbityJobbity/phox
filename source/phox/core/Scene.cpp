@@ -314,9 +314,9 @@ Transform Transform::fromMatrix(const mat4 &m) {
     return t;
 }
 
-Object::Object(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform)
-    : m_id(nextObjectId()), m_name(std::move(name)), m_mesh(std::move(mesh)), m_material(std::move(material)),
-      m_transform(transform) {}
+Object::Object(ObjectDesc desc)
+    : m_id(nextObjectId()), m_name(std::move(desc.name)), m_mesh(std::move(desc.mesh)),
+      m_material(std::move(desc.material)), m_transform(desc.transform) {}
 
 Object::Object(const Object &other)
     : m_id(nextObjectId()), m_name(other.m_name), m_mesh(other.m_mesh), m_material(other.m_material),
@@ -408,7 +408,7 @@ const Object *Scene::objectAt(std::uint32_t index) const {
     return &m_objects[slot.dense];
 }
 
-ObjectId Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Material material, Transform transform) {
+ObjectId Scene::addObject(ObjectDesc desc) {
     std::uint32_t index;
     if (!m_freeSlots.empty()) {
         index = m_freeSlots.back();
@@ -420,7 +420,7 @@ ObjectId Scene::addObject(std::string name, std::shared_ptr<const Mesh> mesh, Ma
         index = static_cast<std::uint32_t>(m_slots.size());
         m_slots.emplace_back();
     }
-    Object &object = m_objects.emplace_back(std::move(name), std::move(mesh), std::move(material), transform);
+    Object &object = m_objects.emplace_back(std::move(desc));
     const ObjectId id{index, m_slots[index].generation};
     m_ids.push_back(id);
     m_slots[index].dense = static_cast<std::uint32_t>(m_objects.size() - 1);
@@ -483,14 +483,5 @@ const Object &Scene::at(ObjectId id) const {
     return *object;
 }
 Object &Scene::at(ObjectId id) { return const_cast<Object &>(std::as_const(*this).at(id)); }
-
-ObjectId Scene::find(std::string_view name) const {
-    for (std::size_t i = 0; i < m_objects.size(); ++i) {
-        if (m_objects[i].name() == name) {
-            return m_ids[i];
-        }
-    }
-    return {};
-}
 
 } // namespace phox

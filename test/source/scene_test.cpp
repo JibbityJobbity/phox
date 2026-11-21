@@ -51,6 +51,17 @@ void expectLikeFresh(phox::Renderer &seasoned, const phox::Scene &scene, const p
     fresh->cleanup();
 }
 
+// The objects of the "cubes" sample scene, which adds them in this order. Read from a scene that has not
+// had objects removed.
+struct CubesObjects {
+    phox::ObjectId floor, red, green, blue, yellow, purple;
+};
+CubesObjects cubesObjects(const phox::Scene &scene) {
+    const auto ids = scene.objectIds();
+    CHECK(ids.size() == 6);
+    return {ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]};
+}
+
 // A renderer keeps state across frames for each object (GPU-driven rendering: the objects themselves,
 // visibility history and meshlet visibility bits), and updates only what changed. Objects leave, arrive,
 // change mesh, material and transform, and meshes change geometry; the renderer that saw the old scene
@@ -61,37 +72,40 @@ void changingScenesDrawLikeFreshOnes(bool meshShaders) {
     config.meshShaders = meshShaders;
     auto seasoned = phox::Renderer::Create(phox::RendererType::Vulkan);
     seasoned->initialize(config);
-    phox::SampleScene sample = phox::makeSampleScene("cubes");
+    phox::SampleScene sample = phox::makeSampleScene(phox::SampleSceneId::Cubes);
     sample.animate(sample.scene, 0.3f);
     renderFrames(*seasoned, sample.scene, 4);
+    const CubesObjects cubes = cubesObjects(sample.scene);
 
     // Two objects go, three arrive (reusing their slots, then one more), one changes mesh. The scene's
     // animation refers to the removed objects, so the pose stays as it is.
     phox::Scene &scene = sample.scene;
-    CHECK(scene.removeObject(scene.find("red")) && scene.removeObject(scene.find("green")));
+    CHECK(scene.removeObject(cubes.red) && scene.removeObject(cubes.green));
     auto torus = std::make_shared<phox::Mesh>(phox::Mesh::torus(0.4f, 0.15f, 32, 16));
-    for (int i = 0; i < 3; ++i) {
-        scene.addObject("new " + std::to_string(i), torus,
-                        phox::Material{.name = "new", .albedo = {0.2f, 0.8f, 0.9f, 1.0f}, .doubleSided = false},
-                        phox::Transform{{-1.5f + 1.5f * static_cast<float>(i), 0.3f, 0.6f}});
-    }
-    scene.at(scene.find("blue")).setMesh(std::make_shared<phox::Mesh>(phox::Mesh::sphere(0.6f)));
+    const phox::Material cyan{.albedo = {0.2f, 0.8f, 0.9f, 1.0f}, .doubleSided = false};
+    const auto [arrival, second, third] = scene.addObjects({
+        {.mesh = torus, .material = cyan, .transform = {.position = {-1.5f, 0.3f, 0.6f}}},
+        {.mesh = torus, .material = cyan, .transform = {.position = {0.0f, 0.3f, 0.6f}}},
+        {.mesh = torus, .material = cyan, .transform = {.position = {1.5f, 0.3f, 0.6f}}},
+    });
+    CHECK(scene.contains(second) && scene.contains(third));
+    scene.at(cubes.blue).setMesh(std::make_shared<phox::Mesh>(phox::Mesh::sphere(0.6f)));
     expectLikeFresh(*seasoned, scene, config, "changed objects");
 
     // In place: a material recoloured, one made translucent, one moved, and the torus the new objects
     // share given other geometry (more meshlets).
-    scene.at(scene.find("yellow")).material().albedo = {0.1f, 0.9f, 0.2f, 1.0f};
-    phox::Material &purple = scene.at(scene.find("purple")).material();
+    scene.at(cubes.yellow).material().albedo = {0.1f, 0.9f, 0.2f, 1.0f};
+    phox::Material &purple = scene.at(cubes.purple).material();
     purple.alphaMode = phox::AlphaMode::Blend;
     purple.albedo.a = 0.5f;
-    scene.at(scene.find("new 0")).transform().position.y += 0.5f;
+    scene.at(arrival).transform().position.y += 0.5f;
     const phox::Mesh sphere = phox::Mesh::sphere(0.5f, 64, 32);
     torus->setGeometry(sphere.vertices(), sphere.indices());
     expectLikeFresh(*seasoned, scene, config, "edited objects");
 
     // Back to opaque, and the floor loses its mesh.
-    scene.at(scene.find("purple")).material().alphaMode = phox::AlphaMode::Opaque;
-    scene.at(scene.find("floor")).setMesh(nullptr);
+    scene.at(cubes.purple).material().alphaMode = phox::AlphaMode::Opaque;
+    scene.at(cubes.floor).setMesh(nullptr);
     expectLikeFresh(*seasoned, scene, config, "edited again");
 
     // A crowd arrives: more meshlet visibility words than the renderer has, so it starts them over and
@@ -100,8 +114,9 @@ void changingScenesDrawLikeFreshOnes(bool meshShaders) {
     for (int i = 0; i < 20000; ++i) {
         const float x = static_cast<float>(i % 200) * 0.03f - 3.0f;
         const float y = static_cast<float>(i / 200) * 0.03f - 1.0f;
-        scene.addObject("pebble", pebble, phox::Material{.name = "pebble", .albedo = {0.9f, 0.9f, 0.9f, 1.0f}},
-                        phox::Transform{{x, y, -2.0f}});
+        scene.addObject({.mesh = pebble,
+                         .material = {.albedo = {0.9f, 0.9f, 0.9f, 1.0f}},
+                         .transform = {.position = {x, y, -2.0f}}});
     }
     expectLikeFresh(*seasoned, scene, config, "crowd arrived");
     seasoned->cleanup();
@@ -111,8 +126,7 @@ void changingScenesDrawLikeFreshOnes(bool meshShaders) {
 void changeLogTracksObjects() {
     phox::Scene scene;
     auto cube = std::make_shared<phox::Mesh>(phox::Mesh::cube());
-    const phox::ObjectId a = scene.addObject("a", cube, {});
-    const phox::ObjectId b = scene.addObject("b", cube, {});
+    const auto [a, b] = scene.addObjects({{.mesh = cube}, {.mesh = cube}});
     phox::Scene::ChangeCursor cursor;
     CHECK(!scene.changes(cursor)); // a new reader looks at everything
     CHECK(scene.changes(cursor)->empty());
@@ -130,7 +144,7 @@ void changeLogTracksObjects() {
 
     // Removal moves b into a's place in the object array, but b keeps its index; both are logged.
     CHECK(scene.removeObject(a));
-    const phox::ObjectId c = scene.addObject("c", cube, {});
+    const phox::ObjectId c = scene.addObject({.mesh = cube});
     changes = scene.changes(cursor);
     CHECK(changes && changes->size() == 2 && (*changes)[0] == a.index && (*changes)[1] == c.index);
     CHECK(c.index == a.index && scene.objectAt(c.index) == &scene.at(c));
@@ -166,27 +180,21 @@ void changeLogTracksObjects() {
 
 int main() {
     changeLogTracksObjects();
-    CHECK(phox::sampleSceneNames().size() == 6);
-    for (const std::string &name : phox::sampleSceneNames()) {
-        CHECK(phox::makeSampleScene(name).scene.objectCount() > 0);
+    CHECK(phox::kSampleScenes.size() == 6);
+    for (phox::SampleSceneId id : phox::kSampleScenes) {
+        const phox::SampleScene sample = phox::makeSampleScene(id);
+        CHECK(sample.scene.objectCount() > 0);
+        CHECK(sample.name == phox::sampleSceneName(id) && phox::parseSampleScene(sample.name) == id);
     }
-    CHECK(phox::makeSampleScene("field").scene.objectCount() == 24 * 24);
-    phox::SampleScene cubes = phox::makeSampleScene("cubes");
+    CHECK(!phox::parseSampleScene("nope"));
+    CHECK(phox::makeSampleScene(phox::SampleSceneId::Field).scene.objectCount() == 24 * 24);
+    phox::SampleScene cubes = phox::makeSampleScene(phox::SampleSceneId::Cubes);
     CHECK(cubes.scene.objectCount() == 6);
-    const phox::ObjectId red = cubes.scene.find("red");
+    const phox::ObjectId red = cubesObjects(cubes.scene).red;
     CHECK(cubes.scene.contains(red));
-    CHECK(!cubes.scene.find("nothing").valid());
     const phox::quat before = cubes.scene.at(red).transform().rotation;
     cubes.animate(cubes.scene, 1.0f);
     CHECK(cubes.scene.at(red).transform().rotation != before);
-
-    bool threw = false;
-    try {
-        phox::makeSampleScene("nope");
-    } catch (const std::invalid_argument &) {
-        threw = true;
-    }
-    CHECK(threw);
 
     auto renderer = phox::Renderer::Create(phox::RendererType::Vulkan);
     phox::RendererConfig config;

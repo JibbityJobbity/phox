@@ -16,16 +16,15 @@ namespace {
 quat spin(float radians, const vec3 &axis) { return glm::angleAxis(radians, glm::normalize(axis)); }
 
 // A fairly rough dielectric in a colour picked in sRGB: flat colours with a soft highlight.
-Material paint(std::string name, float r, float g, float b, bool doubleSided = true) {
-    return Material{.name = std::move(name), .albedo = srgb(r, g, b), .roughness = 0.6f, .doubleSided = doubleSided};
+Material paint(float r, float g, float b, bool doubleSided = true) {
+    return Material{.albedo = srgb(r, g, b), .roughness = 0.6f, .doubleSided = doubleSided};
 }
 
 SampleScene triangle() {
     SampleScene sample;
-    sample.name = "triangle";
     Scene &scene = sample.scene;
-    const ObjectId tri = scene.addObject("triangle", std::make_shared<Mesh>(Mesh::triangle(1.0f)),
-                                         paint("pink", 1.0f, 0.2f, 0.4f));
+    const ObjectId tri =
+        scene.addObject({.mesh = std::make_shared<Mesh>(Mesh::triangle(1.0f)), .material = paint(1.0f, 0.2f, 0.4f)});
     scene.camera().position = {0.0f, 0.0f, 3.0f};
     scene.camera().lookAt({0.0f, 0.0f, 0.0f});
     scene.light().direction = {-0.4f, -0.6f, -1.0f};
@@ -35,22 +34,24 @@ SampleScene triangle() {
 
 SampleScene cubes() {
     SampleScene sample;
-    sample.name = "cubes";
     Scene &scene = sample.scene;
     auto cube = std::make_shared<Mesh>(Mesh::cube(1.0f));
-    scene.addObject("floor", std::make_shared<Mesh>(Mesh::plane(8.0f)), paint("floor", 0.55f, 0.55f, 0.6f),
-                    Transform{{0.0f, -0.5f, 0.0f}});
-    const ObjectId red =
-        scene.addObject("red", cube, paint("red", 0.9f, 0.25f, 0.2f), Transform{{0.0f, 0.0f, 0.0f}});
-    const ObjectId green =
-        scene.addObject("green", cube, paint("green", 0.3f, 0.75f, 0.35f), Transform{{-1.6f, 0.0f, -0.8f}});
-    const ObjectId blue =
-        scene.addObject("blue", cube, paint("blue", 0.25f, 0.45f, 0.9f), Transform{{1.6f, 0.0f, -0.8f}});
-    scene.addObject("yellow", cube, paint("yellow", 0.9f, 0.8f, 0.3f),
-                    Transform{{0.0f, 0.25f, -2.2f}, quat(1.0f, 0.0f, 0.0f, 0.0f), {1.0f, 1.5f, 1.0f}});
-    // In front of the red cube and overlapping it on screen, so depth testing has something to do.
-    const ObjectId purple = scene.addObject("purple", cube, paint("purple", 0.6f, 0.35f, 0.85f),
-                                            Transform{{0.55f, -0.25f, 1.0f}, quat(1.0f, 0.0f, 0.0f, 0.0f), vec3(0.5f)});
+    scene.addObject({.mesh = std::make_shared<Mesh>(Mesh::plane(8.0f)),
+                     .material = paint(0.55f, 0.55f, 0.6f),
+                     .transform = {.position = {0.0f, -0.5f, 0.0f}}});
+    const auto [red, green, blue, yellow, purple] = scene.addObjects({
+        {.mesh = cube, .material = paint(0.9f, 0.25f, 0.2f)},
+        {.mesh = cube, .material = paint(0.3f, 0.75f, 0.35f), .transform = {.position = {-1.6f, 0.0f, -0.8f}}},
+        {.mesh = cube, .material = paint(0.25f, 0.45f, 0.9f), .transform = {.position = {1.6f, 0.0f, -0.8f}}},
+        {.mesh = cube,
+         .material = paint(0.9f, 0.8f, 0.3f),
+         .transform = {.position = {0.0f, 0.25f, -2.2f}, .scale = {1.0f, 1.5f, 1.0f}}},
+        // In front of the red cube and overlapping it on screen, so depth testing has something to do.
+        {.mesh = cube,
+         .material = paint(0.6f, 0.35f, 0.85f),
+         .transform = {.position = {0.55f, -0.25f, 1.0f}, .scale = vec3(0.5f)}},
+    });
+    static_cast<void>(yellow); // stands still
     scene.camera().position = {0.0f, 2.2f, 5.0f};
     scene.camera().lookAt({0.0f, 0.0f, -0.3f});
     scene.light().direction = {-0.5f, -1.0f, -0.35f};
@@ -68,19 +69,19 @@ SampleScene cubes() {
 // frustum and cone culling both have work to do.
 SampleScene tori() {
     SampleScene sample;
-    sample.name = "tori";
     Scene &scene = sample.scene;
     auto torus = std::make_shared<Mesh>(Mesh::torus(0.6f, 0.22f, 64, 32));
-    scene.addObject("floor", std::make_shared<Mesh>(Mesh::plane(10.0f)),
-                    paint("floor", 0.55f, 0.55f, 0.6f, false), Transform{{0.0f, -0.5f, -1.0f}});
-    const ObjectId near = scene.addObject("near", torus, paint("orange", 0.95f, 0.5f, 0.15f, false),
-                                          Transform{{0.5f, 0.1f, 1.6f}});
-    const ObjectId edge = scene.addObject("edge", torus, paint("teal", 0.2f, 0.7f, 0.7f, false),
-                                          Transform{{-2.6f, 0.2f, 0.0f}});
-    const ObjectId back = scene.addObject("back", torus, paint("violet", 0.6f, 0.4f, 0.9f, false),
-                                          Transform{{0.9f, 0.4f, -2.2f}, quat(1.0f, 0.0f, 0.0f, 0.0f), vec3(1.4f)});
-    const ObjectId left = scene.addObject("left", torus, paint("lime", 0.55f, 0.85f, 0.3f, false),
-                                          Transform{{-1.0f, 0.0f, -0.6f}});
+    scene.addObject({.mesh = std::make_shared<Mesh>(Mesh::plane(10.0f)),
+                     .material = paint(0.55f, 0.55f, 0.6f, false),
+                     .transform = {.position = {0.0f, -0.5f, -1.0f}}});
+    const auto [near, edge, back, left] = scene.addObjects({
+        {.mesh = torus, .material = paint(0.95f, 0.5f, 0.15f, false), .transform = {.position = {0.5f, 0.1f, 1.6f}}},
+        {.mesh = torus, .material = paint(0.2f, 0.7f, 0.7f, false), .transform = {.position = {-2.6f, 0.2f, 0.0f}}},
+        {.mesh = torus,
+         .material = paint(0.6f, 0.4f, 0.9f, false),
+         .transform = {.position = {0.9f, 0.4f, -2.2f}, .scale = vec3(1.4f)}},
+        {.mesh = torus, .material = paint(0.55f, 0.85f, 0.3f, false), .transform = {.position = {-1.0f, 0.0f, -0.6f}}},
+    });
     scene.camera().position = {0.0f, 1.6f, 4.0f};
     scene.camera().lookAt({0.0f, 0.0f, -0.4f});
     scene.light().direction = {-0.5f, -1.0f, -0.4f};
@@ -97,7 +98,6 @@ SampleScene tori() {
 // from inside the grid so that many tori are cut by the frustum. Far too heavy for the CPU rasterizers.
 SampleScene field() {
     SampleScene sample;
-    sample.name = "field";
     Scene &scene = sample.scene;
     auto torus = std::make_shared<Mesh>(Mesh::torus(0.6f, 0.22f, 256, 128));
     constexpr int kGrid = 24;
@@ -108,9 +108,9 @@ SampleScene field() {
             const vec4 albedo = srgb(0.4f + 0.5f * hue, 0.35f + 0.4f * (1.0f - hue), 0.5f + 0.3f * std::sin(6.0f * hue));
             const vec3 position{(static_cast<float>(x) - 0.5f * (kGrid - 1)) * kSpacing, 0.0f,
                                 (static_cast<float>(z) - 0.5f * (kGrid - 1)) * kSpacing};
-            scene.addObject("torus " + std::to_string(x) + "," + std::to_string(z), torus,
-                            Material{.name = "torus", .albedo = albedo, .roughness = 0.6f, .doubleSided = false},
-                            Transform{position});
+            scene.addObject({.mesh = torus,
+                             .material = {.albedo = albedo, .roughness = 0.6f, .doubleSided = false},
+                             .transform = {.position = position}});
         }
     }
     scene.camera().position = {0.0f, 2.5f, 6.0f};
@@ -168,19 +168,19 @@ std::shared_ptr<Texture> holesTexture(std::uint32_t size, std::uint32_t cells) {
 // 393k triangles), so the per-object work of a renderer shows.
 SampleScene crowd() {
     SampleScene sample;
-    sample.name = "crowd";
     Scene &scene = sample.scene;
     auto cube = std::make_shared<Mesh>(Mesh::cube(0.3f));
     constexpr int kSide = 32;
     constexpr float kSpacing = 0.6f;
-    const std::array<Material, 4> paints{paint("red", 0.9f, 0.25f, 0.2f, false), paint("green", 0.3f, 0.75f, 0.35f, false),
-                                         paint("blue", 0.25f, 0.45f, 0.9f, false),
-                                         paint("yellow", 0.9f, 0.8f, 0.3f, false)};
+    const std::array<Material, 4> paints{paint(0.9f, 0.25f, 0.2f, false), paint(0.3f, 0.75f, 0.35f, false),
+                                         paint(0.25f, 0.45f, 0.9f, false), paint(0.9f, 0.8f, 0.3f, false)};
     for (int x = 0; x < kSide; ++x) {
         for (int y = 0; y < kSide; ++y) {
             for (int z = 0; z < kSide; ++z) {
                 const vec3 position = (vec3(x, y, z) - 0.5f * (kSide - 1)) * kSpacing;
-                scene.addObject("cube", cube, paints[static_cast<std::size_t>(x + y + z) % paints.size()], Transform{position});
+                scene.addObject({.mesh = cube,
+                                 .material = paints[static_cast<std::size_t>(x + y + z) % paints.size()],
+                                 .transform = {.position = position}});
             }
         }
     }
@@ -200,7 +200,6 @@ SampleScene crowd() {
 // cube, on a checkered floor.
 SampleScene materials() {
     SampleScene sample;
-    sample.name = "materials";
     Scene &scene = sample.scene;
     auto sphere = std::make_shared<Mesh>(Mesh::sphere(0.35f, 32, 16));
 
@@ -208,23 +207,24 @@ SampleScene materials() {
     auto checker = std::make_shared<Texture>(Texture::checker("floor checker", 64, 8, srgb(0.75f, 0.75f, 0.78f),
                                                               srgb(0.35f, 0.35f, 0.4f), TextureEncoding::Srgb,
                                                               SamplerDesc{.magFilter = TextureFilter::Nearest}));
-    scene.addObject("floor", std::make_shared<Mesh>(Mesh::plane(8.0f)),
-                    Material{.name = "floor", .albedo = vec4(1.0f), .roughness = 0.8f, .doubleSided = false,
-                             .baseColorTexture = checker},
-                    Transform{{0.0f, -0.4f, -0.5f}});
+    scene.addObject({.mesh = std::make_shared<Mesh>(Mesh::plane(8.0f)),
+                     .material = {.albedo = vec4(1.0f), .roughness = 0.8f, .doubleSided = false, .baseColorTexture = checker},
+                     .transform = {.position = {0.0f, -0.4f, -0.5f}}});
 
     constexpr int kSteps = 5;
     for (int i = 0; i < kSteps; ++i) {
         const float roughness = 0.1f + 0.85f * static_cast<float>(i) / (kSteps - 1);
         const float x = (static_cast<float>(i) - 0.5f * (kSteps - 1)) * 0.8f;
-        scene.addObject("gold " + std::to_string(i), sphere,
-                        Material{.name = "gold", .albedo = srgb(1.0f, 0.78f, 0.34f), .metallic = 1.0f,
-                                 .roughness = roughness, .doubleSided = false},
-                        Transform{{x, 0.0f, -1.3f}});
-        scene.addObject("plastic " + std::to_string(i), sphere,
-                        Material{.name = "plastic", .albedo = srgb(0.8f, 0.1f, 0.1f), .roughness = roughness,
-                                 .doubleSided = false},
-                        Transform{{x, 0.0f, -2.2f}});
+        scene.addObjects({
+            // gold
+            {.mesh = sphere,
+             .material = {.albedo = srgb(1.0f, 0.78f, 0.34f), .metallic = 1.0f, .roughness = roughness, .doubleSided = false},
+             .transform = {.position = {x, 0.0f, -1.3f}}},
+            // red plastic
+            {.mesh = sphere,
+             .material = {.albedo = srgb(0.8f, 0.1f, 0.1f), .roughness = roughness, .doubleSided = false},
+             .transform = {.position = {x, 0.0f, -2.2f}}},
+        });
     }
 
     auto tiles = std::make_shared<Texture>(
@@ -232,28 +232,28 @@ SampleScene materials() {
     // Metallic-roughness: g roughness, b metallic. The light squares are polished metal, the dark ones rough.
     auto tileSurface = std::make_shared<Texture>(Texture::checker(
         "tile surface", 128, 4, vec4(0.0f, 0.25f, 1.0f, 1.0f), vec4(0.0f, 0.9f, 0.0f, 1.0f), TextureEncoding::Linear));
-    const ObjectId textured = scene.addObject(
-        "textured", std::make_shared<Mesh>(Mesh::sphere(0.55f, 48, 24)),
-        Material{.name = "tiles", .albedo = vec4(1.0f), .metallic = 1.0f, .roughness = 1.0f, .doubleSided = false,
-                 .baseColorTexture = tiles, .metallicRoughnessTexture = tileSurface,
-                 .normalTexture = bumpNormalMap(128, 8, 6.0f)},
-        Transform{{-1.0f, 0.15f, 0.2f}});
-
-    // An upright screen (a plane turned to face the camera), double-sided, its holes cut by the mask.
-    scene.addObject("screen", std::make_shared<Mesh>(Mesh::plane(1.0f)),
-                    Material{.name = "screen", .albedo = srgb(0.3f, 0.6f, 0.95f), .roughness = 0.5f,
-                             .alphaMode = AlphaMode::Mask, .baseColorTexture = holesTexture(64, 4)},
-                    Transform{{0.55f, 0.15f, -0.3f}, spin(glm::half_pi<float>(), {1, 0, 0})});
-
-    scene.addObject("glass", sphere,
-                    Material{.name = "glass", .albedo = srgb(0.6f, 0.85f, 1.0f, 0.35f), .roughness = 0.05f,
-                             .alphaMode = AlphaMode::Blend, .doubleSided = false},
-                    Transform{{1.1f, 0.05f, 0.6f}});
-    const ObjectId glow = scene.addObject(
-        "glow", std::make_shared<Mesh>(Mesh::cube(0.3f)),
-        Material{.name = "glow", .albedo = srgb(0.2f, 0.1f, 0.05f), .roughness = 0.9f,
-                 .emissive = vec3(4.0f, 1.6f, 0.4f), .doubleSided = false},
-        Transform{{0.1f, -0.2f, 0.9f}});
+    const auto [textured, screen, glass, glow] = scene.addObjects({
+        {.mesh = std::make_shared<Mesh>(Mesh::sphere(0.55f, 48, 24)),
+         .material = {.albedo = vec4(1.0f), .metallic = 1.0f, .roughness = 1.0f, .doubleSided = false,
+                      .baseColorTexture = tiles, .metallicRoughnessTexture = tileSurface,
+                      .normalTexture = bumpNormalMap(128, 8, 6.0f)},
+         .transform = {.position = {-1.0f, 0.15f, 0.2f}}},
+        // An upright screen (a plane turned to face the camera), double-sided, its holes cut by the mask.
+        {.mesh = std::make_shared<Mesh>(Mesh::plane(1.0f)),
+         .material = {.albedo = srgb(0.3f, 0.6f, 0.95f), .roughness = 0.5f, .alphaMode = AlphaMode::Mask,
+                      .baseColorTexture = holesTexture(64, 4)},
+         .transform = {.position = {0.55f, 0.15f, -0.3f}, .rotation = spin(glm::half_pi<float>(), {1, 0, 0})}},
+        {.mesh = sphere,
+         .material = {.albedo = srgb(0.6f, 0.85f, 1.0f, 0.35f), .roughness = 0.05f, .alphaMode = AlphaMode::Blend,
+                      .doubleSided = false},
+         .transform = {.position = {1.1f, 0.05f, 0.6f}}},
+        {.mesh = std::make_shared<Mesh>(Mesh::cube(0.3f)),
+         .material = {.albedo = srgb(0.2f, 0.1f, 0.05f), .roughness = 0.9f, .emissive = vec3(4.0f, 1.6f, 0.4f),
+                      .doubleSided = false},
+         .transform = {.position = {0.1f, -0.2f, 0.9f}}},
+    });
+    static_cast<void>(screen); // these two stand still
+    static_cast<void>(glass);
 
     scene.camera().position = {0.0f, 1.4f, 3.2f};
     scene.camera().lookAt({0.0f, -0.1f, -0.6f});
@@ -267,25 +267,34 @@ SampleScene materials() {
 
 } // namespace
 
-std::vector<std::string> sampleSceneNames() { return {"triangle", "cubes", "tori", "materials", "field", "crowd"}; }
-
-SampleScene makeSampleScene(const std::string &name) {
-    SampleScene sample;
-    if (name == "triangle") {
-        sample = triangle();
-    } else if (name == "cubes") {
-        sample = cubes();
-    } else if (name == "tori") {
-        sample = tori();
-    } else if (name == "materials") {
-        sample = materials();
-    } else if (name == "field") {
-        sample = field();
-    } else if (name == "crowd") {
-        sample = crowd();
-    } else {
-        throw std::invalid_argument("unknown sample scene '" + name + "' (try: triangle, cubes, tori, materials, field, crowd)");
+std::string_view sampleSceneName(SampleSceneId id) {
+    switch (id) {
+    case SampleSceneId::Triangle: return "triangle";
+    case SampleSceneId::Cubes: return "cubes";
+    case SampleSceneId::Tori: return "tori";
+    case SampleSceneId::Materials: return "materials";
+    case SampleSceneId::Field: return "field";
+    case SampleSceneId::Crowd: return "crowd";
     }
+    throw std::invalid_argument("unknown SampleSceneId");
+}
+
+std::optional<SampleSceneId> parseSampleScene(std::string_view name) {
+    const auto it = std::ranges::find(kSampleScenes, name, sampleSceneName);
+    return it != kSampleScenes.end() ? std::optional(*it) : std::nullopt;
+}
+
+SampleScene makeSampleScene(SampleSceneId id) {
+    SampleScene sample;
+    switch (id) {
+    case SampleSceneId::Triangle: sample = triangle(); break;
+    case SampleSceneId::Cubes: sample = cubes(); break;
+    case SampleSceneId::Tori: sample = tori(); break;
+    case SampleSceneId::Materials: sample = materials(); break;
+    case SampleSceneId::Field: sample = field(); break;
+    case SampleSceneId::Crowd: sample = crowd(); break;
+    }
+    sample.name = sampleSceneName(id);
     sample.animate(sample.scene, 0.0f);
     return sample;
 }
@@ -298,7 +307,7 @@ SampleScene makeMeshViewerScene(std::shared_ptr<const Mesh> mesh, std::string na
     const float largest = std::max({size.x, size.y, size.z, 1e-6f});
     const float scale = 2.0f / largest;
     // Pivot about the mesh's centre: the turntable spins the centred mesh.
-    const ObjectId id = sample.scene.addObject("mesh", std::move(mesh), paint("clay", 0.8f, 0.75f, 0.7f));
+    const ObjectId id = sample.scene.addObject({.mesh = std::move(mesh), .material = paint(0.8f, 0.75f, 0.7f)});
     sample.scene.camera().position = {0.0f, 0.8f, 3.6f};
     sample.scene.camera().lookAt({0.0f, 0.0f, 0.0f});
     sample.animate = [id, center = bounds.center(), scale](Scene &s, float t) {
