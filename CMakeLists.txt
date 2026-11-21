@@ -394,6 +394,7 @@ set(PHOX_SHADER_OUTPUT_DIR ${PROJECT_BINARY_DIR}/shaders)
 set(PHOX_SHADER_SPV)
 set(PHOX_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl
                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/forward_task.glsl
+                         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/forward_grid.glsl
                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.glsl
 )
 foreach(
@@ -404,6 +405,8 @@ foreach(
   forward_early.task
   forward_late.task
   forward.mesh
+  forward_grid.task
+  forward_grid.mesh
   fullscreen.vert
   tonemap.frag
   depthpyramid.comp

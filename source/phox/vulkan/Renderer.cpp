@@ -541,7 +541,8 @@ void Renderer::render(const Scene &scene) {
     GraphExecutor executor(graph, *m_device, *m_transients, frame, m_frameNumber, cmd);
     std::vector<GeneratedDraw> generated;
     for (const auto &feature : m_features) {
-        FrameFeatureContext context{graph, executor, *m_device, *m_pipelines, frame, view, m_frameNumber};
+        FrameFeatureContext context{graph, executor, *m_device, *m_pipelines, frame, view, m_frameNumber,
+                                    m_meshes->meshlets()};
         feature->addPasses(context, generated);
     }
     const ForwardSets sets{writeFrameSet(*m_device, frame, *m_pipelines, view, *m_textures, generated),
@@ -750,6 +751,9 @@ bool Renderer::createPipelines() {
             m_pipelines->get(forwardMeshletPipelineDesc(kHdrFormat, m_depthFormat, cull, MeshletPhase::Single, true));
         }
         m_pipelines->get(depthPyramidPipelineDesc());
+        for (CullMode cull : {CullMode::None, CullMode::Back}) {
+            m_pipelines->get(forwardGridPipelineDesc(kHdrFormat, m_depthFormat, cull));
+        }
     } catch (const std::exception &e) {
         log::warn("mesh shader pipelines failed, drawing with vertex shaders: {}", e.what());
         return false;

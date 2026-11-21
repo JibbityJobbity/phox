@@ -63,13 +63,10 @@ std::vector<std::filesystem::path> FluidFeature::shaderDirectories() const { ret
 void FluidFeature::initialize(vk::Device &device, vk::PipelineCache &) {
     const std::uint32_t n = m_settings.resolution;
     m_solver->initialize(device, n);
-    const std::uint64_t vertices = static_cast<std::uint64_t>(n - 1) * (n - 1) * 6;
     for (int i = 0; i < 2; ++i) {
-        const std::string suffix = " " + std::to_string(i);
-        m_vertices[i].create(device, vertices * sizeof(Vertex),
-                             usageBit(BufferUsage::StorageWrite) | usageBit(BufferUsage::Vertex), "fluid surface" + suffix);
-        m_indirect[i].create(device, sizeof(VkDrawIndirectCommand),
-                             usageBit(BufferUsage::StorageWrite) | usageBit(BufferUsage::Indirect), "fluid draw" + suffix);
+        m_heights[i].create(device, static_cast<std::uint64_t>(n) * n * sizeof(float),
+                            usageBit(BufferUsage::StorageWrite) | usageBit(BufferUsage::StorageRead),
+                            "fluid heights " + std::to_string(i), true);
         m_written[i] = false;
     }
     const std::uint64_t cells = static_cast<std::uint64_t>(n) * n;
@@ -89,12 +86,28 @@ void FluidFeature::initialize(vk::Device &device, vk::PipelineCache &) {
 void FluidFeature::shutdown() {
     m_solver->shutdown();
     for (int i = 0; i < 2; ++i) {
+        m_heights[i].destroy();
         m_vertices[i].destroy();
         m_indirect[i].destroy();
     }
     m_readbackDensity.reset();
     m_readbackVelocity.reset();
     m_readbackParticles.reset();
+}
+
+void FluidFeature::ensureVertexBuffers(vk::Device &device) {
+    if (m_vertices[0].created()) {
+        return;
+    }
+    const std::uint32_t n = m_settings.resolution;
+    const std::uint64_t vertices = static_cast<std::uint64_t>(n - 1) * (n - 1) * 6;
+    for (int i = 0; i < 2; ++i) {
+        const std::string suffix = " " + std::to_string(i);
+        m_vertices[i].create(device, vertices * sizeof(Vertex),
+                             usageBit(BufferUsage::StorageWrite) | usageBit(BufferUsage::Vertex), "fluid surface" + suffix);
+        m_indirect[i].create(device, sizeof(VkDrawIndirectCommand),
+                             usageBit(BufferUsage::StorageWrite) | usageBit(BufferUsage::Indirect), "fluid draw" + suffix);
+    }
 }
 
 void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::GeneratedDraw> &draws) {
@@ -105,19 +118,41 @@ void FluidFeature::addPasses(vk::FrameFeatureContext &context, std::vector<vk::G
 
     // This frame's surface, from the last step's density.
     const int written = m_settings.pipelined ? static_cast<int>(m_frames % 2) : 0;
-    BufferHandle vertices = m_vertices[written].import(context, false);
-    BufferHandle indirect = m_indirect[written].import(context, false);
     const SurfacePush surface{n, m_settings.size, m_solver->restDensity(), m_settings.heightScale};
-    dispatchGrid(context, "fluid surface", "fluid_surface.comp", {outputs.density}, {&vertices, &indirect}, surface, n, n);
+    const bool meshShaders = m_settings.meshShaders && context.meshShaders;
+    const auto heightfield = [&](const BufferHandle &heights, int index) {
+        vk::GeneratedDraw draw;
+        draw.model = m_settings.model;
+        draw.material = m_settings.material;
+        draw.heightfield = vk::GeneratedDraw::Heightfield{heights, m_heights[index].address(), n, m_settings.size};
+        return draw;
+    };
+    BufferHandle vertices, indirect, heights;
+    if (meshShaders) {
+        heights = m_heights[written].import(context, false);
+        dispatchGrid(context, "fluid heights", "fluid_height.comp", {outputs.density}, {&heights}, surface, n, n);
+    } else {
+        ensureVertexBuffers(context.device);
+        vertices = m_vertices[written].import(context, false);
+        indirect = m_indirect[written].import(context, false);
+        dispatchGrid(context, "fluid surface", "fluid_surface.comp", {outputs.density}, {&vertices, &indirect}, surface, n,
+                     n);
+    }
     m_written[written] = true;
 
     if (m_settings.pipelined) {
         // Last frame's surface, which the async queue finished before this frame's work there.
         const int shown = 1 - written;
         if (m_written[shown]) {
-            draws.push_back({m_vertices[shown].import(context, true), m_indirect[shown].import(context, true),
-                             m_settings.model, m_settings.material});
+            if (meshShaders) {
+                draws.push_back(heightfield(m_heights[shown].import(context, true), shown));
+            } else {
+                draws.push_back({m_vertices[shown].import(context, true), m_indirect[shown].import(context, true),
+                                 m_settings.model, m_settings.material});
+            }
         }
+    } else if (meshShaders) {
+        draws.push_back(heightfield(heights, written));
     } else {
         draws.push_back({vertices, indirect, m_settings.model, m_settings.material});
     }

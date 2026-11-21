@@ -1,0 +1,89 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Emits one tile of a generated heightfield chosen by forward_grid.task: its vertices, transformed as
+// forward.vert does, and two triangles a cell. See forward_grid.glsl.
+#include "forward_grid.glsl"
+
+layout(local_size_x = 64) in;
+// (kGridTileCells + 1)^2 vertices and 2 * kGridTileCells^2 triangles (phox/vulkan/ShaderInterface.hpp).
+layout(triangles, max_vertices = 81, max_primitives = 128) out;
+
+taskPayloadSharedEXT GridTask task;
+
+// The same outputs as forward.vert.
+layout(location = 0) out vec3 outPosition[]; // world space
+layout(location = 1) out vec3 outNormal[];   // world space
+layout(location = 2) out vec2 outTexCoord[];
+layout(location = 3) out vec4 outTangent[];  // world space xyz, handedness w
+layout(location = 4) flat out uint outMaterial[];
+
+// The height at grid point @p g of the tile at @p origin of @p cells, drawn with steps of 1 << own: where
+// the tile borders a neighbour that steps further (shift @p along), on the line between the neighbour's
+// points. @p alongZ: the edge runs along z (left and right), else along x.
+float edgeHeight(ivec2 g, ivec2 origin, uint along, bool alongZ) {
+    int step = 1 << along;
+    int v = alongZ ? g.y - origin.y : g.x - origin.x;
+    int below = v / step * step;
+    float t = float(v - below) / float(step);
+    ivec2 a = alongZ ? ivec2(g.x, origin.y + below) : ivec2(origin.x + below, g.y);
+    ivec2 b = alongZ ? ivec2(g.x, a.y + step) : ivec2(a.x + step, g.y);
+    return mix(heightAt(a), heightAt(b), t);
+}
+
+float snappedHeight(ivec2 g, ivec2 origin, ivec2 cells, uint own, uvec4 neighbours) {
+    ivec2 local = g - origin;
+    if (local.x == 0 && neighbours.x > own) return edgeHeight(g, origin, neighbours.x, true);
+    if (local.x == cells.x && neighbours.y > own) return edgeHeight(g, origin, neighbours.y, true);
+    if (local.y == 0 && neighbours.z > own) return edgeHeight(g, origin, neighbours.z, false);
+    if (local.y == cells.y && neighbours.w > own) return edgeHeight(g, origin, neighbours.w, false);
+    return heightAt(g);
+}
+
+void main() {
+    uvec2 tile = task.tile;
+    uint own = task.shifts & 3u;
+    uvec4 neighbours = uvec4((task.shifts >> 2) & 3u, (task.shifts >> 4) & 3u, (task.shifts >> 6) & 3u,
+                             (task.shifts >> 8) & 3u);
+    ivec2 origin = ivec2(tile * PHOX_GRID_TILE);
+    ivec2 cells = ivec2(tileCells(tile));
+    int step = 1 << own;
+    uint nx = uint(cells.x / step);
+    uint nz = uint(cells.y / step);
+    uint width = nx + 1u;
+    uint vertexCount = width * (nz + 1u);
+    uint triangleCount = nx * nz * 2u;
+    SetMeshOutputsEXT(vertexCount, triangleCount);
+
+    float spacing = draw.size / float(draw.resolution - 1u);
+    uint lane = gl_LocalInvocationIndex;
+    for (uint v = lane; v < vertexCount; v += 64u) {
+        ivec2 g = origin + ivec2(int(v % width), int(v / width)) * step;
+        float height = snappedHeight(g, origin, cells, own, neighbours);
+        // Normals from the finest grid whatever the detail, so a tile does not change shade as it coarsens.
+        float dx = (heightAt(g + ivec2(1, 0)) - heightAt(g - ivec2(1, 0))) / (2.0 * spacing);
+        float dz = (heightAt(g + ivec2(0, 1)) - heightAt(g - ivec2(0, 1))) / (2.0 * spacing);
+        vec3 normal = normalize(vec3(-dx, 1.0, -dz));
+        vec3 tangent = vec3(1.0, dx, 0.0);
+        tangent = normalize(tangent - normal * dot(normal, tangent));
+        vec2 xz = gridXZ(vec2(g));
+        // Same expressions as forward.vert.
+        vec4 world = draw.model * vec4(xz.x, height, xz.y, 1.0);
+        outPosition[v] = world.xyz;
+        outNormal[v] = mat3(transpose(inverse(draw.model))) * normal;
+        outTexCoord[v] = vec2(g) / float(draw.resolution - 1u);
+        outTangent[v] = vec4(mat3(draw.model) * tangent, -1.0);
+        outMaterial[v] = draw.material;
+        gl_MeshVerticesEXT[v].gl_Position = frame.viewProj * world;
+    }
+    for (uint q = lane; q < nx * nz; q += 64u) {
+        uint i = q % nx;
+        uint j = q / nx;
+        uint a = j * width + i;  // (i, j)
+        uint b = a + 1u;         // (i + 1, j)
+        uint c = a + width;      // (i, j + 1)
+        uint d = c + 1u;         // (i + 1, j + 1)
+        // Counter-clockwise seen from +y, as the vertex path.
+        gl_PrimitiveTriangleIndicesEXT[2u * q] = uvec3(c, d, b);
+        gl_PrimitiveTriangleIndicesEXT[2u * q + 1u] = uvec3(c, b, a);
+    }
+}

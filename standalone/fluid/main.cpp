@@ -107,6 +107,8 @@ int main(int argc, char **argv) {
     ("iterations", "stable: Jacobi iterations per step", cxxopts::value<unsigned>()->default_value("40"))
     ("pipelined", "draw last frame's surface while this frame simulates (on or off)", cxxopts::value<std::string>()->default_value("on"))
     ("async-compute", "simulate on a separate compute queue where the GPU has one (on or off)", cxxopts::value<std::string>()->default_value("on"))
+    ("mesh-shaders", "draw with task and mesh shaders where the GPU has them: the surface is built from the heights in tiles, culled and coarsened by distance (on or off)", cxxopts::value<std::string>()->default_value("on"))
+    ("lod-error", "mesh shaders: merge surface cells while they stay at most this many pixels wide (0: never merge)", cxxopts::value<float>()->default_value("1"))
     ("window", "show it in a window")
     ("frames", "frames to run (headless: then write the image; window: 0 runs until closed)", cxxopts::value<long>()->default_value("240"))
     ("size", "image size, headless", cxxopts::value<std::string>()->default_value("1280x720"))
@@ -162,6 +164,8 @@ int main(int argc, char **argv) {
     config.window = window.get();
     config.headlessExtent = parseSize(args["size"].as<std::string>());
     config.asyncCompute = parseOnOff(args, "async-compute");
+    config.meshShaders = parseOnOff(args, "mesh-shaders");
+    config.lodErrorPixels = args["lod-error"].as<float>();
     if (args.count("device")) config.preferredDevice = args["device"].as<std::string>();
 
     vk::Renderer renderer;

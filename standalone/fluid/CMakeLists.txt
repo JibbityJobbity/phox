@@ -26,6 +26,7 @@ foreach(
   fluid_sph_integrate.comp
   fluid_sph_fields.comp
   fluid_surface.comp
+  fluid_height.comp
 )
   set(spv ${PHOX_FLUID_SHADER_OUTPUT_DIR}/${shader}.spv)
   add_custom_command(

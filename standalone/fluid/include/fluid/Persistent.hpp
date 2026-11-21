@@ -25,10 +25,15 @@ public:
     PersistentBuffer(PersistentBuffer &&) noexcept;
     PersistentBuffer &operator=(PersistentBuffer &&) noexcept;
 
-    /// @p usage: every phox::BufferUsage the buffer will see, as a mask.
-    void create(phox::vk::Device &device, std::uint64_t size, phox::BufferUsageMask usage, std::string name);
+    /// @p usage: every phox::BufferUsage the buffer will see, as a mask. @p deviceAddress: shaders may read
+    /// it through address() (still declare the read in the graph, or it gets no barrier).
+    void create(phox::vk::Device &device, std::uint64_t size, phox::BufferUsageMask usage, std::string name,
+                bool deviceAddress = false);
     void destroy();
+    bool created() const { return m_buffer != nullptr; }
     std::uint64_t size() const { return m_size; }
+    /// 0 unless created with a device address.
+    std::uint64_t address() const;
 
     /// Imports it into @p context's graph. @p contents: what it holds matters (it was written before, in
     /// a StorageWrite state); else the graph may discard it. It leaves the graph in StorageWrite.

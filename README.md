@@ -104,6 +104,8 @@ In a window, dragging with the left mouse button pushes the fluid along the drag
 | `--resolution N`, `--steps N`, `--iterations N`, `--particles N` | cells a side; solver steps per frame; Jacobi iterations per step (stable); particles a side (sph) |
 | `--pipelined on\|off` | draw the previous frame's surface while this frame simulates, so the queues overlap (default on) |
 | `--async-compute on\|off` | simulate on a separate compute queue where the GPU has one |
+| `--mesh-shaders on\|off` | draw the surface with task and mesh shaders where the GPU has them: built from the heights in 8 x 8 tiles, culled when outside the view and coarsened by distance (default on) |
+| `--lod-error PIXELS` | mesh shaders: merge surface cells while they stay at most this wide on screen; 0 never merges (default 1) |
 | `--window`, `--frames N`, `--size WxH`, `--output FILE`, `--debug`, `--device NAME` | as for PhoxSample |
 
 A new solver implements `FluidSolver` (`standalone/fluid/include/fluid/FluidSolver.hpp`): `initialize` its

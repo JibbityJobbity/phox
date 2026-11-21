@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "fluid_common.glsl"
+// The surface's heights, for the mesh shader path (forward_grid.*): height = (field - base) * scale at
+// every cell centre, the same values fluid_surface.comp makes its vertices from. The surface is then drawn
+// straight from them. They are kept per frame, so a pipelined frame can draw last frame's.
+
+layout(set = 0, binding = 0, std430) readonly buffer Field { float data[]; } field;
+layout(set = 0, binding = 1, std430) writeonly buffer Heights { float data[]; } heights;
+layout(push_constant) uniform Params {
+    uint n;
+    float size;
+    float base;
+    float scale;
+} params;
+
+void main() {
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (outside(c, params.n)) return;
+    const uint i = cellIndex(c, params.n);
+    heights.data[i] = (field.data[i] - params.base) * params.scale;
+}

@@ -1,0 +1,64 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// The task shader of a generated heightfield; see forward_grid.glsl. One workgroup per tile.
+#include "forward_grid.glsl"
+
+layout(local_size_x = 32) in;
+
+taskPayloadSharedEXT GridTask task;
+
+shared vec2 laneRange[32]; // per invocation: the lowest and highest height it saw
+shared uint keep;
+
+void main() {
+    uvec2 tile = gl_WorkGroupID.xy;
+    uint lane = gl_LocalInvocationIndex;
+    uvec2 cells = tileCells(tile);
+    uvec2 origin = tile * PHOX_GRID_TILE;
+
+    // The tile's heights, shared out over the workgroup.
+    uint width = cells.x + 1u;
+    uint points = width * (cells.y + 1u);
+    float low = 3.0e38;
+    float high = -3.0e38;
+    for (uint i = lane; i < points; i += 32u) {
+        float h = heightAt(ivec2(origin) + ivec2(i % width, i / width));
+        low = min(low, h);
+        high = max(high, h);
+    }
+    laneRange[lane] = vec2(low, high);
+    barrier();
+
+    if (lane == 0u) {
+        for (uint i = 1u; i < 32u; ++i) {
+            low = min(low, laneRange[i].x);
+            high = max(high, laneRange[i].y);
+        }
+        // The tile's bounding sphere in world space.
+        vec2 corner0 = gridXZ(vec2(origin));
+        vec2 corner1 = gridXZ(vec2(origin + cells));
+        vec3 middle = vec3(0.5 * (corner0.x + corner1.x), 0.5 * (low + high), 0.5 * (corner0.y + corner1.y));
+        vec3 extent = vec3(0.5 * abs(corner1.x - corner0.x), 0.5 * (high - low), 0.5 * abs(corner1.y - corner0.y));
+        vec3 centre = (draw.model * vec4(middle, 1.0)).xyz;
+        float radius = length(extent) * modelScale();
+        bool visible = true;
+        if ((draw.flags & kGridFrustumCulling) != 0u) {
+            for (int i = 0; i < 6; ++i) {
+                if (dot(frame.frustumPlanes[i].xyz, centre) + frame.frustumPlanes[i].w < -radius) {
+                    visible = false;
+                }
+            }
+        }
+        uint count = tileCount();
+        uint own = tileShift(tile);
+        uint left = tile.x > 0u ? tileShift(tile - uvec2(1u, 0u)) : own;
+        uint right = tile.x + 1u < count ? tileShift(tile + uvec2(1u, 0u)) : own;
+        uint below = tile.y > 0u ? tileShift(tile - uvec2(0u, 1u)) : own;
+        uint above = tile.y + 1u < count ? tileShift(tile + uvec2(0u, 1u)) : own;
+        task.tile = tile;
+        task.shifts = own | (left << 2) | (right << 4) | (below << 6) | (above << 8);
+        keep = visible ? 1u : 0u;
+    }
+    barrier();
+    EmitMeshTasksEXT(keep, 1, 1);
+}

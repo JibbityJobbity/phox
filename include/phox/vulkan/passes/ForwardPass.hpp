@@ -35,6 +35,10 @@ PipelineDesc forwardPipelineDesc(Format color, Format depth, CullMode cull = Cul
 PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cull = CullMode::None,
                                         MeshletPhase phase = MeshletPhase::Single, bool blend = false);
 
+/// The pipeline for generated heightfields (GeneratedDraw::heightfield): task and mesh shaders
+/// (shaders/forward_grid.*) with the forward fragment shader.
+PipelineDesc forwardGridPipelineDesc(Format color, Format depth, CullMode cull = CullMode::None);
+
 /// The descriptor sets every forward pipeline binds first.
 struct ForwardSets {
     VkDescriptorSet frame = VK_NULL_HANDLE;    ///< set 0: FrameUniforms and the frame's MaterialData table
@@ -68,8 +72,10 @@ struct MeshletOcclusion {
 ///
 /// @p generated, if any, is drawn after the opaque items with vertex shaders and indirect draws
 /// ("forward generated"), before the blended ones; its materials follow view.transparent's in the table.
-/// It takes no part in occlusion culling.
-/// @throws std::invalid_argument if a generated draw's material is not opaque or has textures
+/// It takes no part in occlusion culling. Heightfields among it are drawn with task and mesh shaders, which
+/// MeshletSettings::culling (frustum culling) and ::lodErrorPixels (detail) steer.
+/// @throws std::invalid_argument if a generated draw's material is not opaque or has textures, or it has a
+///         heightfield and the mesh cache holds no meshlets (no mesh shaders)
 ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, const ForwardSets &sets,
                                  ImageHandle color, ImageHandle depth, MeshCache &meshes, PipelineCache &pipelines,
                                  const MeshletSettings &meshlets = {}, const MeshletOcclusion *occlusion = nullptr,

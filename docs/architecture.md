@@ -492,8 +492,24 @@ instead, whose rule 1 it fits: a compute pass writes it and the forward pass rea
 - `GeneratedDraw`: graph buffers of unindexed `phox::Vertex` (read as Vertex) and a `VkDrawIndirectCommand`
   (read as Indirect), a model matrix and a material (opaque, untextured). The vertex count comes from the
   GPU, so a generator decides there how much it draws.
+- `GeneratedDraw::heightfield`, instead of vertices: a square grid of heights (a buffer read through its device
+  address, still declared in the graph as `StorageRead`) that the renderer draws with task and mesh shaders
+  (`shaders/forward_grid.*`) when the forward pass uses them (`FrameFeatureContext::meshShaders`); otherwise
+  the feature writes vertices as above. The grid is cut into tiles of 8 x 8 cells (81 vertices, 128
+  triangles). One task workgroup takes one tile: it reduces the tile's lowest and highest height, culls the
+  tile's bounding sphere against the frustum (`MeshletSettings::culling`), and picks the tile's detail from
+  its distance alone: every 1st, 2nd or 4th grid point, the coarsest whose merged cells are at most
+  `MeshletSettings::lodErrorPixels` wide (0 merges nothing). The mesh workgroup emits the tile. Tiles of
+  different detail meet without cracks because the finer tile's edge points along a coarser neighbour are
+  moved onto the line between that neighbour's points; each task workgroup finds its four neighbours'
+  detail with the same `precise` function they use for themselves. Normals are central differences of the
+  finest grid whatever the detail. There is no cone culling (the surface is one connected sheet, mostly
+  facing up), no occlusion culling (generated draws never take part, see below) and no cluster hierarchy.
+  With detail 0 the image is the vertex path's, pixel for pixel (`fluid_test`). That the edge points are
+  moved is not covered by a test that fails without it: seen from above, the steps it removes are sub-pixel.
 - "forward generated": after the opaque passes and before "forward blend", the forward pipelines with
-  vertex shaders (whatever path the scene takes) draw each one with `vkCmdDrawIndirect`. Their materials
+  vertex shaders (whatever path the scene takes) draw each one with `vkCmdDrawIndirect`; heightfields use the
+  grid pipeline with `vkCmdDrawMeshTasksEXT`, one task workgroup a tile. Their materials
   follow the view's items in the material table. They take no part in occlusion culling: they are drawn
   after the late pass and are not in the depth pyramid.
 - `SetLayout::ComputeStorage`: eight storage buffers for compute passes that generate data.

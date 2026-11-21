@@ -24,7 +24,10 @@ std::optional<phox::vec2> pointOnSurface(const phox::Camera &camera, float x, fl
                                          const phox::mat4 &model, float size);
 
 /// Runs a FluidSolver in every frame of a vk::Renderer and draws its density as a surface: a compute pass
-/// turns the density into a heightfield (GPU-generated geometry), which the forward pass draws.
+/// turns the density into a heightfield (GPU-generated geometry), which the forward pass draws. With mesh
+/// shaders the heights are all it makes: task and mesh shaders build the surface from them, tile by tile,
+/// dropping the tiles out of view and drawing far ones with fewer points. Without, a compute pass writes
+/// the triangles' vertices and an indirect command, and the surface is drawn from those.
 ///
 /// Pipelined (the default), the surface drawn in frame n is the one computed in frame n - 1: frame n's
 /// simulation and surface run on the async compute queue while the graphics queue draws the previous one,
@@ -36,6 +39,9 @@ public:
         std::uint32_t resolution = 128; ///< cells a side
         std::uint32_t steps = 1;        ///< solver steps per frame
         bool pipelined = true;
+        /// Draw the surface with task and mesh shaders when the renderer uses them, else (or when off) from
+        /// vertices a compute pass writes.
+        bool meshShaders = true;
         float size = 4.0f;              ///< of the surface, in world units
         float heightScale = 0.5f;       ///< world units per unit of density above the solver's rest density
         phox::mat4 model{1.0f};
@@ -68,11 +74,14 @@ public:
     void addPasses(phox::vk::FrameFeatureContext &context, std::vector<phox::vk::GeneratedDraw> &draws) override;
 
 private:
+    void ensureVertexBuffers(phox::vk::Device &device);
+
     std::unique_ptr<FluidSolver> m_solver;
     Settings m_settings;
     FluidInputs m_inputs;
     // Two surfaces: pipelined, one is written while the other is drawn.
-    std::array<PersistentBuffer, 2> m_vertices, m_indirect;
+    // Mesh shader path: the heights. Vertex path: the vertices, made when first needed, and their command.
+    std::array<PersistentBuffer, 2> m_heights, m_vertices, m_indirect;
     std::array<bool, 2> m_written{};
     std::uint64_t m_frames = 0;
     std::unique_ptr<phox::vk::Buffer> m_readbackDensity, m_readbackVelocity, m_readbackParticles; ///< host-visible

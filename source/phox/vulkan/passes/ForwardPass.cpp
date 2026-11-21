@@ -146,6 +146,22 @@ PipelineDesc forwardMeshletPipelineDesc(Format color, Format depth, CullMode cul
     return desc;
 }
 
+PipelineDesc forwardGridPipelineDesc(Format color, Format depth, CullMode cull) {
+    PipelineDesc desc;
+    desc.name = "forward grid";
+    desc.taskShader = "forward_grid.task";
+    desc.meshShader = "forward_grid.mesh";
+    desc.fragmentShader = "forward.frag";
+    desc.raster.cull = cull;
+    desc.depth = {true, true, CompareOp::Less};
+    desc.blend = {BlendMode::Opaque};
+    desc.colorFormats = {color};
+    desc.depthFormat = depth;
+    desc.pushConstants = {{kTaskStage | kMeshStage, 0, sizeof(GridDrawPushConstants)}};
+    desc.setLayouts = {SetLayout::Frame, SetLayout::Bindless};
+    return desc;
+}
+
 namespace {
 
 // The opaque and alpha-masked draws (view.draws), in one pass or, with occlusion culling, two. @p keepDepth:
@@ -271,6 +287,9 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
             std::any_of(textures.begin(), textures.end(), [](const Texture *t) { return t != nullptr; })) {
             throw std::invalid_argument("generated draws must have opaque materials without textures");
         }
+        if (draw.heightfield && !meshes.meshlets()) {
+            throw std::invalid_argument("generated heightfields are drawn with mesh shaders, which this renderer lacks");
+        }
     }
     const bool blended = !view.transparent.empty();
     const Format colorFormat = graph.imageInfo(color).desc.format;
@@ -281,6 +300,15 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
     if (!generated.empty()) {
         // Indirect draws of GPU-made vertices, with the vertex pipelines whatever path the scene takes.
         const PipelinePair pipeline = vertexPipelinePair(pipelines, colorFormat, depthFormat, false);
+        const bool anyGrid = std::any_of(generated.begin(), generated.end(),
+                                         [](const GeneratedDraw &draw) { return draw.heightfield.has_value(); });
+        const PipelinePair gridPipeline = anyGrid ? PipelinePair{&pipelines.get(forwardGridPipelineDesc(
+                                                                     colorFormat, depthFormat, CullMode::None)),
+                                                                 &pipelines.get(forwardGridPipelineDesc(
+                                                                     colorFormat, depthFormat, CullMode::Back))}
+                                                  : PipelinePair{};
+        const bool gridCulling = meshletSettings.culling;
+        const float gridLodThreshold = meshletSettings.lodErrorPixels;
         const auto firstMaterial = static_cast<std::uint32_t>(view.itemCount());
         const VkDescriptorSet frameSet = sets.frame;
         const VkDescriptorSet textureSet = sets.textures;
@@ -296,26 +324,60 @@ ForwardPassOutput addForwardPass(RenderGraph &graph, const RenderView &view, con
                              data.out.depth = builder.depthAttachment(opaque.depth, LoadOp::Load,
                                                                       blended ? StoreOp::Store : StoreOp::DontCare);
                              for (const GeneratedDraw &draw : generated) {
-                                 builder.read(draw.vertices, BufferUsage::Vertex);
-                                 builder.read(draw.indirect, BufferUsage::Indirect);
+                                 if (draw.heightfield) {
+                                     // Read through its address by the task and mesh shaders, but declared, or
+                                     // it would get no barrier.
+                                     builder.read(draw.heightfield->heights, BufferUsage::StorageRead);
+                                 } else {
+                                     builder.read(draw.vertices, BufferUsage::Vertex);
+                                     builder.read(draw.indirect, BufferUsage::Indirect);
+                                 }
                              }
                              data.draws = generated;
                          },
-                         [frameSet, textureSet, pipeline, firstMaterial](const Data &data, phox::PassContext &context) {
+                         [frameSet, textureSet, pipeline, gridPipeline, gridCulling, gridLodThreshold,
+                          firstMaterial](const Data &data, phox::PassContext &context) {
                              auto &ctx = PassContext::from(context);
                              const auto &table = ctx.device().table();
                              const VkCommandBuffer cmd = ctx.cmd();
-                             bindSets(ctx, pipeline, {frameSet, textureSet});
+                             // The vertex and the grid pipelines have different push constants, so they do not
+                             // share bound sets: bind again after switching from one kind to the other.
                              const Pipeline *bound = nullptr;
+                             bool boundGrid = false;
+                             bool anyBound = false;
                              for (std::size_t i = 0; i < data.draws.size(); ++i) {
                                  const GeneratedDraw &draw = data.draws[i];
                                  // As extractView decides for scene items.
                                  const bool cullBackFaces =
                                      !draw.material.doubleSided && glm::determinant(mat3(draw.model)) > 0.0f;
-                                 const Pipeline *wanted = pipeline[cullBackFaces ? 1 : 0];
+                                 const bool grid = draw.heightfield.has_value();
+                                 const Pipeline *wanted = (grid ? gridPipeline : pipeline)[cullBackFaces ? 1 : 0];
+                                 if (!anyBound || grid != boundGrid) {
+                                     bindSets(ctx, grid ? gridPipeline : pipeline, {frameSet, textureSet});
+                                     boundGrid = grid;
+                                     anyBound = true;
+                                 }
                                  if (wanted != bound) {
                                      table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wanted->handle());
                                      bound = wanted;
+                                 }
+                                 if (grid) {
+                                     const GeneratedDraw::Heightfield &field = *draw.heightfield;
+                                     GridDrawPushConstants constants;
+                                     constants.model = draw.model;
+                                     constants.heights = field.heightsAddress;
+                                     constants.resolution = field.resolution;
+                                     constants.size = field.size;
+                                     constants.flags = gridCulling ? kGridFrustumCulling : 0u;
+                                     constants.material = firstMaterial + static_cast<std::uint32_t>(i);
+                                     constants.lodThreshold = gridLodThreshold;
+                                     table.vkCmdPushConstants(cmd, wanted->layout(),
+                                                              VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0,
+                                                              sizeof(constants), &constants);
+                                     const std::uint32_t tiles =
+                                         (field.resolution - 1 + kGridTileCells - 1) / kGridTileCells;
+                                     table.vkCmdDrawMeshTasksEXT(cmd, tiles, tiles, 1);
+                                     continue;
                                  }
                                  const VkBuffer vertexBuffer = ctx.buffer(draw.vertices);
                                  const VkDeviceSize offset = 0;

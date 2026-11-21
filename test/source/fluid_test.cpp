@@ -6,7 +6,12 @@
 //   every neighbour), and its particles stay in the tank;
 // - both stay finite and move when stirred, within the lattice's speed limit for LBM;
 // - the async compute queue and the graphics queue compute the same fields, bit for bit;
-// - pipelined frames show the previous frame's surface: frame n + 1 pipelined looks like frame n without.
+// - pipelined frames show the previous frame's surface: frame n + 1 pipelined looks like frame n without;
+// - the surface drawn with task and mesh shaders (tiles built from the heights) is the surface drawn from
+//   compute-written vertices, pixel for pixel, whole or cut by the edge of the view, and with its far tiles
+//   coarsened it stays close to it. (That tiles of different detail meet without cracks, by moving the finer
+//   tile's edge points onto the coarser one's edge, is not tested: the steps a missing fix leaves between
+//   tiles are sub-pixel from above, and no view of this surface made the images differ without it.)
 //
 // Environment: PHOX_VALIDATION=1 (fail on any validation message), PHOX_REQUIRE_GPU=1 (fail instead of
 // skipping without a Vulkan device), PHOX_DEVICE=<name>.
@@ -194,6 +199,108 @@ std::size_t differingPixels(const phox::CpuImage &a, const phox::CpuImage &b) {
     return count + (a.rgba.size() != b.rgba.size() ? 1 : 0);
 }
 
+struct SurfaceView {
+    bool meshShaders = true;
+    float lodErrorPixels = 0.0f; ///< 0: every tile at full detail
+    bool culling = true;
+    phox::vec3 eye{0.0f, 3.0f, 3.5f};
+    phox::vec3 target{0.0f};
+    float heightScale = 3.0f;
+    float coarse = 4.0f; ///< the lodErrorPixels that gives tiles of different detail in this view
+    std::uint32_t resolution = 130; ///< 16 tiles and a partial one of 2 cells
+};
+
+struct SurfaceResult {
+    phox::CpuImage image;
+    phox::RendererInfo info;
+};
+
+// The stirred fluid after 12 frames, drawn as @p view says.
+SurfaceResult runSurface(const SurfaceView &view) {
+    fluid::FluidFeature::Settings settings;
+    settings.resolution = view.resolution;
+    settings.heightScale = view.heightScale;
+    settings.meshShaders = view.meshShaders;
+    auto feature = std::make_shared<fluid::FluidFeature>(std::make_unique<fluid::StableFluids>(), settings);
+    phox::vk::Renderer renderer;
+    phox::RendererConfig config;
+    config.debug = envFlag("PHOX_VALIDATION");
+    config.headlessExtent = {320, 240};
+    config.meshletCulling = view.culling;
+    config.lodErrorPixels = view.lodErrorPixels;
+    renderer.addFeature(feature);
+    renderer.initialize(config);
+    SurfaceResult result;
+    result.info = renderer.info();
+    if (result.info.backend != phox::RendererBackend::Vulkan) {
+        return result;
+    }
+    phox::Scene scene = makeScene();
+    scene.camera().position = view.eye;
+    scene.camera().lookAt(view.target);
+    for (int f = 0; f < 12; ++f) {
+        feature->setInputs(stir(f));
+        renderer.render(scene);
+    }
+    result.image = renderer.lastFrame();
+    result.info = renderer.info();
+    renderer.cleanup();
+    if (result.info.validationErrors + result.info.validationWarnings > 0) {
+        check(false, std::to_string(result.info.validationErrors) + " validation error(s), " +
+                         std::to_string(result.info.validationWarnings) + " warning(s)");
+    }
+    return result;
+}
+
+// Pixels differing by more than @p threshold in a channel.
+std::size_t pixelsOver(const phox::CpuImage &a, const phox::CpuImage &b, int threshold) {
+    std::size_t count = 0;
+    for (std::size_t p = 0; p + 3 < a.rgba.size() && p + 3 < b.rgba.size(); p += 4) {
+        int delta = 0;
+        for (int c = 0; c < 3; ++c) delta = std::max(delta, std::abs(int(a.rgba[p + c]) - int(b.rgba[p + c])));
+        if (delta > threshold) ++count;
+    }
+    return count;
+}
+
+// Whether the tiles' surface matches the vertices' (the mesh shader path against the vertex path).
+void meshSurface(const phox::RendererInfo &info) {
+    if (!info.meshShaders) {
+        std::cout << "SKIP the mesh shader surface: the renderer has no mesh shaders" << std::endl;
+        if (envFlag("PHOX_REQUIRE_MESH_SHADERS")) check(false, "mesh shaders are required but not available");
+        return;
+    }
+    const SurfaceView whole;
+    SurfaceView edge; // close and off to one side: tiles on every side of the view's edges
+    edge.eye = {0.8f, 1.2f, 1.6f};
+    edge.target = {1.0f, 0.0f, 0.4f};
+    edge.coarse = 12.0f;
+    for (const auto &[name, view] : {std::pair{"whole", whole}, std::pair{"cut by the view's edge", edge}}) {
+        SurfaceView vertices = view;
+        vertices.meshShaders = false;
+        const SurfaceResult reference = runSurface(vertices);
+        const SurfaceResult tiles = runSurface(view);
+        check(differingPixels(tiles.image, reference.image) == 0,
+              std::string("tiles and vertices draw the same surface, ") + name + " (" +
+                  std::to_string(differingPixels(tiles.image, reference.image)) + " pixels differ)");
+        SurfaceView unculled = view;
+        unculled.culling = false;
+        check(differingPixels(runSurface(unculled).image, reference.image) == 0,
+              std::string("tiles without culling draw it too, ") + name);
+        // Far tiles merge cells: some pixels differ, at the silhouette and in the shading, but few by much.
+        SurfaceView coarse = view;
+        coarse.lodErrorPixels = view.coarse; // near tiles at full detail, farther ones at every 2nd and 4th point
+        const SurfaceResult merged = runSurface(coarse);
+        const std::size_t any = pixelsOver(merged.image, reference.image, 2);
+        const std::size_t far = pixelsOver(merged.image, reference.image, 64);
+        const std::size_t pixels = reference.image.rgba.size() / 4;
+        std::cout << "  coarse tiles, " << name << ": " << any << " pixels differ, " << far << " by a lot (of " << pixels
+                  << ")" << std::endl;
+        check(any > 0, std::string("coarse tiles draw fewer points, ") + name);
+        check(far * 100 <= pixels, std::string("coarse tiles stay close to the full surface, ") + name);
+    }
+}
+
 } // namespace
 
 // The mouse: points of the surface, projected to the screen, are found again by pointOnSurface().
@@ -312,6 +419,8 @@ int main() {
         check(differing == 0, std::string(name) + ": pipelined frame 21 shows frame 20's surface (" +
                                   std::to_string(differing) + " pixels differ)");
     }
+
+    meshSurface(stableRest.info);
 
     std::cout << (failures == 0 ? "fluid tests passed" : "fluid tests FAILED") << std::endl;
     return failures == 0 ? 0 : 1;

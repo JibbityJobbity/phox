@@ -40,6 +40,27 @@ struct MeshletDrawPushConstants {
 };
 static_assert(sizeof(MeshletDrawPushConstants) == 128, "must match MeshletDrawPushConstants in shaders/common.glsl");
 
+/// Tiles of a generated heightfield: cells a side (PHOX_GRID_TILE in shaders/forward_grid.glsl). 8 cells are
+/// 81 vertices and 128 triangles, within every mesh shader's limits, and divisible by the coarsest stride.
+inline constexpr std::uint32_t kGridTileCells = 8;
+
+/// GridDrawPushConstants::flags.
+inline constexpr std::uint32_t kGridFrustumCulling = 1u << 0;
+
+/// Push constants of one generated heightfield drawn with shaders/forward_grid.task and .mesh (task and mesh
+/// stages; the mesh shader passes the material index on to the fragment shader).
+struct GridDrawPushConstants {
+    mat4 model{1.0f};
+    std::uint64_t heights = 0;  ///< device address of the float heights, resolution * resolution
+    std::uint32_t resolution = 0;
+    float size = 1.0f;
+    std::uint32_t flags = 0;    ///< kGridFrustumCulling
+    std::uint32_t material = 0; ///< index into the frame's MaterialData array
+    float lodThreshold = 1.0f;  ///< the widest, in pixels, a merged cell may be
+    std::uint32_t padding = 0;
+};
+static_assert(sizeof(GridDrawPushConstants) == 96, "must match GridDrawPushConstants in shaders/forward_grid.glsl");
+
 /// Push constants of the depth pyramid build (shaders/depthpyramid.comp), compute stage.
 struct DepthPyramidPushConstants {
     std::uint32_t level = 0; ///< the mip written

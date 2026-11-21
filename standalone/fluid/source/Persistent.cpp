@@ -21,8 +21,9 @@ PersistentBuffer::~PersistentBuffer() = default;
 PersistentBuffer::PersistentBuffer(PersistentBuffer &&) noexcept = default;
 PersistentBuffer &PersistentBuffer::operator=(PersistentBuffer &&) noexcept = default;
 
-void PersistentBuffer::create(vk::Device &device, std::uint64_t size, BufferUsageMask usage, std::string name) {
-    m_buffer = device.makeBuffer({size, usage, MemoryLocation::DeviceLocal, name});
+void PersistentBuffer::create(vk::Device &device, std::uint64_t size, BufferUsageMask usage, std::string name,
+                              bool deviceAddress) {
+    m_buffer = device.makeBuffer({size, usage, MemoryLocation::DeviceLocal, name, deviceAddress});
     m_size = size;
     m_name = std::move(name);
 }
@@ -31,6 +32,8 @@ void PersistentBuffer::destroy() {
     m_buffer.reset();
     m_size = 0;
 }
+
+std::uint64_t PersistentBuffer::address() const { return m_buffer ? m_buffer->deviceAddress() : 0; }
 
 BufferHandle PersistentBuffer::import(vk::FrameFeatureContext &context, bool contents) const {
     if (!m_buffer) {
